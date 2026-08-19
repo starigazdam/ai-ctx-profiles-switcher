@@ -87,7 +87,7 @@ ctx coding azure                # "coding" profile + "azure" shared context
 ctx review dotnet security      # profile + multiple shared contexts
 ctx current                     # show the active profile/shared/env vars
 ctx clear                       # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-ctx clear --all                 # also delete generated settings.local.json / *.code-workspace
+ctx clear --all                 # also delete generated *.code-workspace
 ctx --help                      # usage help
 ```
 
@@ -172,22 +172,92 @@ context.
 Setting `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` makes Copilot CLI load custom
 instructions from your `.ctx` entries, but it does **not** make it discover
 [agent skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
-stored in those directories. To fix this, whenever a `.ctx` file is loaded,
-`ctx` also checks each resolved directory for a `.github/skills` subfolder.
-Any that are found are added to the `skillDirectories` array in
-`.github/copilot/settings.local.json`, located next to the `.ctx` file
-(creating the file and `.github/copilot/` directory if needed).
+stored in those directories.
 
-- Existing keys and pre-existing `skillDirectories` entries in
-  `settings.local.json` are preserved; entries are only added, never removed,
-  and duplicates are avoided.
-- Nothing is changed when you leave the directory / clear the context —
-  `settings.local.json` is project-local and has no effect from outside the
-  project, and it will already be up to date the next time you return. Run
-  `ctx clear --all` to delete it instead.
-- Add `.github/copilot/settings.local.json` to `.gitignore` since it's meant
-  for personal, local overrides (see the
-  [Copilot CLI settings documentation](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)).
+#### What does NOT work
+
+> **There is no per-folder skill discovery mechanism in Copilot CLI.**
+
+All of the following approaches were investigated and do not work for Copilot
+CLI skill discovery from `.ctx` context directories:
+
+- **`skillDirectories` in `settings.local.json`** — silently ignored.
+  `skillDirectories` is a user-level-only setting. The
+  `.github/copilot/settings.local.json` file uses the restricted repo-scope
+  schema, which does not include `skillDirectories`. Values written there are
+  discarded. The only location where it is honoured is `~/.copilot/settings.json`.
+
+- **`enabledPlugins` in `settings.local.json`** — does not override the
+  user-level `~/.copilot/settings.json`. A plugin disabled globally cannot be
+  re-enabled per-folder via `settings.local.json`.
+
+- **VS Code workspace file** — the `.code-workspace` file `ctx` generates adds
+  context directories as VS Code workspace roots. This causes the **VS Code
+  Copilot UI** to discover skills from those folders, but it has no effect on
+  **Copilot CLI**. Starting Copilot CLI from VS Code's integrated terminal does
+  not inherit workspace-root skill discovery.
+
+#### Working alternatives for Copilot CLI
+
+**Option 1 — Personal skills (symlinks, always-on):**
+
+Symlink each skill directory into `~/.copilot/skills/`. Personal skills are
+always loaded in every CLI session regardless of project.
+
+```sh
+# bash/zsh
+for d in /path/to/context/.github/skills/*/; do
+  ln -s "$d" ~/.copilot/skills/"$(basename "$d")"
+done
+```
+
+```powershell
+# PowerShell
+Get-ChildItem /path/to/context/.github/skills -Directory | ForEach-Object {
+    New-Item -ItemType SymbolicLink -Path "$HOME\.copilot\skills\$($_.Name)" -Target $_.FullName
+}
+```
+
+**Option 2 — Global `skillDirectories` in `~/.copilot/settings.json`:**
+
+Add the skills folder path to `skillDirectories` in your user settings. This
+is global (not per-folder) but requires no symlinks:
+
+```json
+{
+  "skillDirectories": [
+    "/path/to/context/.github/skills"
+  ]
+}
+```
+
+Use Option 1 or 2 depending on whether the skills apply to a single project or
+all your work. Neither provides automatic per-folder switching — that is a
+current limitation of Copilot CLI's skill discovery model.
+
+> **Option 1 is only appropriate if the skills are genuinely global** (useful
+> in every project). Using symlinks to expose project-specific skills as
+> personal skills pollutes all other CLI sessions — if you work across multiple
+> projects with distinct skill sets, they will all bleed into each other.
+> There is currently no supported mechanism for per-folder, session-isolated
+> skill discovery in Copilot CLI.
+
+#### Planned: per-folder skill isolation via `COPILOT_HOME`
+
+A future enhancement to `ctx` will use the `COPILOT_HOME` environment variable
+— which Copilot CLI respects as a full replacement for `~/.copilot` — to
+provide genuine per-folder, session-isolated skill discovery without any
+bleed between projects.
+
+The approach: on `.ctx` load, `ctx` sets `COPILOT_HOME` to a project-specific
+directory (e.g. `~/.config/ctx/homes/<context-name>/`) that contains only
+that project's skill symlinks. Global config (authentication, settings, MCP
+servers, session history) is preserved by symlinking the shared files back to
+`~/.copilot`. On `ctx clear`, `COPILOT_HOME` is unset and the CLI returns to
+the global config with no project skills visible.
+
+See [GitHub issue #1](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/1)
+for the implementation plan.
 
 ### VS Code workspace
 
