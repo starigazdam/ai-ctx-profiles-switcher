@@ -24,6 +24,29 @@ current shell session, and exposes the active selection as `AI_CONTEXT`
 Available for **bash**, **zsh**, and **PowerShell** (Windows PowerShell 5.1+
 and PowerShell 7+ / pwsh).
 
+## Requirements
+
+`ctx` is built specifically for and heavily oriented around
+[**GitHub Copilot CLI**](https://docs.github.com/copilot/how-tos/copilot-cli):
+custom-instructions loading (`COPILOT_CUSTOM_INSTRUCTIONS_DIRS`) and
+per-folder skill discovery (`COPILOT_HOME`, see [Skill discovery](#skill-discovery)
+below) both depend on behavior specific to that CLI, not on GitHub Copilot
+in general (e.g. the VS Code extension) or other AI coding agents.
+
+- **GitHub Copilot CLI** must be installed and authenticated —
+  `npm install -g @github/copilot`, then `copilot login`. See the
+  [official docs](https://docs.github.com/copilot/how-tos/copilot-cli) for
+  details.
+- All `COPILOT_HOME`-dependent behavior in this README (isolation,
+  reconciliation, the empirically-found symlink hazard, etc.) was
+  developed against and tested with **GitHub Copilot CLI 1.0.80**. Other
+  versions likely work — the `COPILOT_HOME`/`COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+  environment variables are documented, stable CLI behavior — but the
+  specific hazards and workarounds described here (see
+  [Skill discovery](#skill-discovery)) were only verified empirically
+  against that version. If you hit different behavior on another version,
+  please open an issue with your `copilot --version` output.
+
 ## Files
 
 | File           | Purpose                                             |
