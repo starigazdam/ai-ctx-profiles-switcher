@@ -375,8 +375,20 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: .copilot-ctx-a`nhome: .copilot-ctx-b`nreview:$reviewDir"
 
+        # Import-CtxFile is not an advanced function (no [CmdletBinding()]),
+        # so -ErrorAction/-ErrorVariable on the call site don't bind to it;
+        # its Write-Error obeys the ambient $ErrorActionPreference instead.
+        # Pin that to SilentlyContinue around the call and read $Error.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
         $Error.Clear()
-        $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx') -ErrorAction SilentlyContinue
+        $result = $null
+        try {
+            $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+
         $result | Should -Be $false
         ($Error | Select-Object -First 1).ToString() | Should -Match 'duplicate'
     }
