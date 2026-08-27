@@ -178,8 +178,10 @@ _ctx_clear() {
     # to the nearest .ctx file (.github/copilot/settings.local.json and the
     # "<folder-name>.code-workspace" file), instead of just leaving them in
     # place for next time.
+    local prev_context="${AI_CONTEXT:-}"
     unset AI_CONTEXT
     unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    unset COPILOT_HOME
 
     if [ "${1:-}" = "--all" ]; then
         local dir_of_file="$_ctx_auto_load_dir"
@@ -193,6 +195,11 @@ _ctx_clear() {
         if [ -n "$dir_of_file" ]; then
             local settings_file="$dir_of_file/.github/copilot/settings.local.json"
             if [ -f "$settings_file" ]; then
+                # Legacy cleanup: settings.local.json's skillDirectories is
+                # confirmed inert (issue #1) and no longer written by ctx,
+                # but pre-existing files from older ctx versions are still
+                # removed here for one release. Safe to drop this block in
+                # a future release once users have upgraded.
                 rm -f "$settings_file"
                 printf 'ctx: removed %s\n' "$settings_file"
             fi
@@ -205,7 +212,26 @@ _ctx_clear() {
                 printf 'ctx: removed %s\n' "$workspace_file"
             fi
         else
-            printf 'ctx: warning: no .ctx file found; nothing to remove\n' >&2
+            if [ -n "$prev_context" ]; then
+                # Context was activated manually (no .ctx file), so there are
+                # no on-disk artifacts (settings.local.json / workspace file)
+                # to clean up, but the COPILOT_HOME directory below still
+                # gets removed - don't imply nothing happens at all.
+                printf 'ctx: warning: no .ctx file found; skipping artifact cleanup\n' >&2
+            else
+                printf 'ctx: warning: no .ctx file found; nothing to remove\n' >&2
+            fi
+        fi
+
+        if [ -n "$prev_context" ]; then
+            local sanitized homes_root home_dir
+            sanitized="$(_ctx_sanitize_context_name "$prev_context")"
+            homes_root="$(_ctx_copilot_home_root)"
+            home_dir="$homes_root/$sanitized"
+            if [ -d "$home_dir" ]; then
+                rm -rf "$home_dir"
+                printf 'ctx: removed %s\n' "$home_dir"
+            fi
         fi
     fi
 
@@ -289,6 +315,11 @@ ctx() {
         export AI_CONTEXT="$profile_name"
     fi
 
+    local -a resolved_dirs_manual=()
+    IFS=',' read -r -a resolved_dirs_manual <<< "$dirs_csv"
+
+    _ctx_setup_copilot_home "$AI_CONTEXT" "${resolved_dirs_manual[@]}"
+
     _ctx_print_status "$profile_name" "$shared_csv" "$dirs_csv"
 }
 
@@ -328,6 +359,193 @@ _ctx_auto_load_hook() {
             _ctx_auto_load_dir=""
         fi
     fi
+}
+
+_ctx_copilot_home_root() {
+    printf '%s\n' "${AI_CONFIG_ROOT:+}" >/dev/null # no-op, keeps shellcheck quiet about unused pattern
+    printf '%s\n' "${CTX_HOMES_ROOT:-$HOME/.config/ctx/homes}"
+}
+
+_ctx_sanitize_context_name() {
+    # Sanitizes a context name for safe use as a single path component.
+    # '+' is already filesystem-safe and left as-is. Any '/' or other
+    # unsafe character is replaced with '_' defensively.
+    local name="$1"
+    printf '%s' "$name" | tr -c 'A-Za-z0-9+._-' '_'
+}
+
+# List of files (relative to a COPILOT_HOME dir / ~/.copilot) that get
+# symlinked back to the real ~/.copilot so global auth/config/session
+# history keep working identically across all contexts. This is also the
+# authoritative list the 3.4a reconciliation loop walks on every
+# activation to detect + repair a symlink that Copilot CLI silently
+# replaced with a plain file via rename(tmp, path).
+_ctx_copilot_home_shared_files() {
+    cat <<'EOF'
+settings.json
+config.json
+mcp-config.json
+session-store.db
+session-store.db-shm
+session-store.db-wal
+EOF
+}
+
+# Directories symlinked back to the real ~/.copilot the same way (treated
+# defensively with the same reconciliation, even though only files were
+# empirically observed broken - see plan section 3.4a).
+_ctx_copilot_home_shared_dirs() {
+    cat <<'EOF'
+session-state
+installed-plugins
+logs
+EOF
+}
+
+_ctx_reconcile_symlink() {
+    # Ensures $home_dir/$name is a symlink pointing at $real_target,
+    # self-healing the confirmed rename()-through-symlink hazard (plan
+    # 3.4a): if Copilot CLI (or anything else) replaced the symlink with
+    # a plain file/dir holding new data, that data is copied back onto
+    # the real ~/.copilot target *before* the symlink is recreated, so
+    # the most recent write is preserved rather than silently lost.
+    #
+    # $1: home_dir   $2: name (relative path under home_dir)
+    # $3: real_target (absolute path under ~/.copilot)
+    # $4: kind - "file" or "dir"
+    local home_dir="$1" name="$2" real_target="$3" kind="$4"
+    local link_path="$home_dir/$name"
+
+    if [ -L "$link_path" ]; then
+        local current_target
+        current_target="$(readlink "$link_path")"
+        if [ "$current_target" = "$real_target" ]; then
+            # Already correct; no-op (idempotency, plan 3.4).
+            return 0
+        fi
+        # Stale/incorrect symlink target - remove and recreate below.
+        rm -f "$link_path"
+    elif [ -e "$link_path" ]; then
+        # Not a symlink but exists: the confirmed hazard from 3.4a - the
+        # CLI's write-tmp+rename() replaced our symlink with a real file
+        # (or, defensively, a real dir) holding this context's latest
+        # data. Copy it over the real target so the write is not lost,
+        # then remove it and recreate the symlink.
+        mkdir -p "$(dirname "$real_target")"
+        if [ "$kind" = "dir" ]; then
+            rm -rf "$real_target"
+            cp -a "$link_path" "$real_target"
+            rm -rf "$link_path"
+        else
+            cp -f "$link_path" "$real_target"
+            rm -f "$link_path"
+        fi
+    fi
+
+    if [ ! -e "$link_path" ]; then
+        mkdir -p "$(dirname "$link_path")"
+        if [ "$kind" = "dir" ]; then
+            mkdir -p "$real_target"
+        else
+            mkdir -p "$(dirname "$real_target")"
+            [ -e "$real_target" ] || : > "$real_target"
+        fi
+        if ! ln -s "$real_target" "$link_path" 2>/dev/null; then
+            printf 'ctx: warning: could not create symlink %s -> %s\n' "$link_path" "$real_target" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+_ctx_setup_copilot_home() {
+    # $1: context-name (raw, e.g. "review+test")
+    # remaining args: resolved directories for the active context
+    local context_name="$1"
+    shift
+    local -a resolved_dirs=("$@")
+
+    local sanitized homes_root home_dir copilot_dir
+    sanitized="$(_ctx_sanitize_context_name "$context_name")"
+    homes_root="$(_ctx_copilot_home_root)"
+    home_dir="$homes_root/$sanitized"
+    copilot_dir="${CTX_COPILOT_DIR:-$HOME/.copilot}"
+
+    mkdir -p "$home_dir/skills" || {
+        printf 'ctx: warning: could not create %s; leaving COPILOT_HOME unset\n' "$home_dir" >&2
+        return 1
+    }
+    mkdir -p "$copilot_dir" 2>/dev/null || true
+
+    local ok=1
+    local f
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        _ctx_reconcile_symlink "$home_dir" "$f" "$copilot_dir/$f" "file" || ok=0
+    done <<EOF
+$(_ctx_copilot_home_shared_files)
+EOF
+
+    local d
+    while IFS= read -r d; do
+        [ -z "$d" ] && continue
+        _ctx_reconcile_symlink "$home_dir" "$d" "$copilot_dir/$d" "dir" || ok=0
+    done <<EOF
+$(_ctx_copilot_home_shared_dirs)
+EOF
+
+    if [ "$ok" -ne 1 ]; then
+        printf 'ctx: warning: one or more COPILOT_HOME symlinks could not be created; leaving COPILOT_HOME unset for this session\n' >&2
+        return 1
+    fi
+
+    # Reconcile skills/: desired (name -> target) pairs come from each
+    # resolved dir's .github/skills subfolder, if present.
+    local -A desired_skills=()
+    local rd skill_dir sname
+    for rd in "${resolved_dirs[@]}"; do
+        skill_dir="$rd/.github/skills"
+        [ -d "$skill_dir" ] || continue
+        local s
+        for s in "$skill_dir"/*/; do
+            [ -d "$s" ] || continue
+            sname="$(basename "$s")"
+            desired_skills["$sname"]="${s%/}"
+        done
+    done
+
+    # Remove stale skill symlinks no longer in desired set.
+    if [ -d "$home_dir/skills" ]; then
+        local existing
+        for existing in "$home_dir/skills"/*; do
+            [ -e "$existing" ] || continue
+            local ename
+            ename="$(basename "$existing")"
+            if [ -z "${desired_skills[$ename]:-}" ]; then
+                # Skills are directory symlinks; rm -rf mirrors
+                # _ctx_reconcile_symlink and the PowerShell equivalent
+                # (Remove-Item -Recurse -Force).
+                rm -rf "$existing"
+            fi
+        done
+    fi
+
+    # Create/repair desired skill symlinks (idempotent).
+    local name target link
+    for name in "${!desired_skills[@]}"; do
+        target="${desired_skills[$name]}"
+        link="$home_dir/skills/$name"
+        if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+            continue
+        fi
+        rm -rf "$link"
+        if ! ln -s "$target" "$link" 2>/dev/null; then
+            printf 'ctx: warning: could not create skill symlink %s -> %s\n' "$link" "$target" >&2
+        fi
+    done
+
+    export COPILOT_HOME="$home_dir"
+    return 0
 }
 
 _ctx_update_skill_directories() {
@@ -520,19 +738,10 @@ _ctx_load_ctx_file() {
     fi
 
     # Setting COPILOT_CUSTOM_INSTRUCTIONS_DIRS alone does not make Copilot CLI
-    # load skills from these directories. If any of them contain a
-    # .github/skills folder, register it in .github/copilot/settings.local.json
-    # (next to the .ctx file) so skills are discovered too.
-    local -a skill_dirs_found=()
-    local d
-    for d in "${resolved_dirs[@]}"; do
-        if [ -d "$d/.github/skills" ]; then
-            skill_dirs_found+=("$d/.github/skills")
-        fi
-    done
-    if [ "${#skill_dirs_found[@]}" -gt 0 ]; then
-        _ctx_update_skill_directories "$dir_of_file" "${skill_dirs_found[@]}"
-    fi
+    # load skills from these directories. Genuine per-folder, session-
+    # isolated skill discovery is provided via COPILOT_HOME (see
+    # _ctx_setup_copilot_home) rather than settings.local.json's
+    # skillDirectories, which Copilot CLI silently ignores (issue #1).
 
     # Create/update "<folder-name>.code-workspace" next to the .ctx file so
     # this project and its .ctx dependencies can be browsed together in one
@@ -546,6 +755,8 @@ _ctx_load_ctx_file() {
 
     export AI_CONTEXT="$ai_context"
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv"
+
+    _ctx_setup_copilot_home "$ai_context" "${resolved_dirs[@]}"
 
     local shared_csv
     if [ "$ai_context" = "$first_name" ]; then

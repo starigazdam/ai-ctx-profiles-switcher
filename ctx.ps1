@@ -178,8 +178,10 @@ function Show-CtxCurrent {
 function Clear-CtxContext {
     param([switch]$All)
 
+    $prevContext = $env:AI_CONTEXT
     Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
+    Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
 
     if ($All) {
         $dirOfFile = $Script:CtxAutoLoadDir
@@ -191,6 +193,11 @@ function Clear-CtxContext {
         }
 
         if ($dirOfFile) {
+            # Legacy cleanup: settings.local.json's skillDirectories is
+            # confirmed inert (issue #1) and no longer written by ctx, but
+            # pre-existing files from older ctx versions are still removed
+            # here for one release. Safe to drop this block in a future
+            # release once users have upgraded.
             $settingsFile = Join-Path $dirOfFile '.github\copilot\settings.local.json'
             if (Test-Path -LiteralPath $settingsFile -PathType Leaf) {
                 Remove-Item -LiteralPath $settingsFile -Force
@@ -204,7 +211,25 @@ function Clear-CtxContext {
                 Write-Host "ctx: removed $workspaceFile"
             }
         } else {
-            Write-Warning "ctx: warning: no .ctx file found; nothing to remove"
+            if ($prevContext) {
+                # Context was activated manually (no .ctx file), so there are
+                # no on-disk artifacts (settings.local.json / workspace file)
+                # to clean up, but the COPILOT_HOME directory below still
+                # gets removed - don't imply nothing happens at all.
+                Write-Warning "ctx: warning: no .ctx file found; skipping artifact cleanup"
+            } else {
+                Write-Warning "ctx: warning: no .ctx file found; nothing to remove"
+            }
+        }
+
+        if ($prevContext) {
+            $sanitized = Get-CtxSanitizedContextName -Name $prevContext
+            $homesRoot = Get-CtxCopilotHomeRoot
+            $homeDir = Join-Path $homesRoot $sanitized
+            if (Test-Path -LiteralPath $homeDir -PathType Container) {
+                Remove-Item -LiteralPath $homeDir -Recurse -Force
+                Write-Host "ctx: removed $homeDir"
+            }
         }
     }
 
@@ -290,6 +315,8 @@ function ctx {
         $env:AI_CONTEXT = $profileName
     }
 
+    Set-CtxCopilotHome -ContextName $env:AI_CONTEXT -ResolvedDirs $dirsList
+
     Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv -DirsCsv $dirsCsv
 }
 
@@ -297,6 +324,288 @@ function ctx {
 
 $Script:CtxAutoLoadDir = $null
 $Script:CtxLastPwd = $null
+
+function Get-CtxCopilotHomeRoot {
+    if ($env:CTX_HOMES_ROOT) {
+        return $env:CTX_HOMES_ROOT
+    }
+    return (Join-Path $HOME '.config\ctx\homes')
+}
+
+function Get-CtxCopilotDir {
+    if ($env:CTX_COPILOT_DIR) {
+        return $env:CTX_COPILOT_DIR
+    }
+    return (Join-Path $HOME '.copilot')
+}
+
+function Get-CtxSanitizedContextName {
+    # Sanitizes a context name for safe use as a single path component.
+    # '+' is already filesystem-safe and left as-is. Any other unsafe
+    # character is replaced with '_' defensively.
+    param([string]$Name)
+    return ($Name -replace '[^A-Za-z0-9+._-]', '_')
+}
+
+function Get-CtxCopilotHomeSharedFiles {
+    # List of files symlinked/hardlinked back to the real ~/.copilot so
+    # global auth/config/session history keep working identically across
+    # all contexts. Also the authoritative list the reconciliation loop
+    # walks on every activation to detect + repair a link that Copilot CLI
+    # silently replaced with a plain file via rename(tmp, path) - the
+    # confirmed hazard from plan section 3.4a.
+    return @(
+        'settings.json',
+        'config.json',
+        'mcp-config.json',
+        'session-store.db',
+        'session-store.db-shm',
+        'session-store.db-wal'
+    )
+}
+
+function Get-CtxCopilotHomeSharedDirs {
+    # Directories linked back the same way (treated defensively with the
+    # same reconciliation, even though only files were empirically
+    # observed broken - see plan section 3.4a).
+    return @('session-state', 'installed-plugins', 'logs')
+}
+
+function New-CtxLink {
+    # Creates a link at $LinkPath pointing at $RealTarget, following the
+    # Windows fallback ladder from plan section 3.5:
+    #   1. Try a real symlink (New-Item -ItemType SymbolicLink) - requires
+    #      Developer Mode or admin on Windows; works unprivileged on
+    #      Linux/macOS pwsh.
+    #   2. For directories, fall back to a junction (New-Item -ItemType
+    #      Junction) - no special privilege required on Windows.
+    #   3. For files, fall back to a hardlink (New-Item -ItemType
+    #      HardLink) - requires the same volume, true for ~/.copilot and
+    #      ~/.config/ctx both under $HOME by default.
+    #   4. If all else fails, return $false so the caller can warn and
+    #      leave COPILOT_HOME isolation off for this session rather than
+    #      hard-failing ctx.
+    param(
+        [string]$LinkPath,
+        [string]$RealTarget,
+        [ValidateSet('file', 'dir')]
+        [string]$Kind
+    )
+
+    try {
+        New-Item -ItemType SymbolicLink -Path $LinkPath -Target $RealTarget -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        # Fall through to the next rung of the ladder.
+    }
+
+    if ($Kind -eq 'dir') {
+        try {
+            New-Item -ItemType Junction -Path $LinkPath -Target $RealTarget -ErrorAction Stop | Out-Null
+            return $true
+        } catch {
+            # Fall through.
+        }
+    } else {
+        try {
+            New-Item -ItemType HardLink -Path $LinkPath -Target $RealTarget -ErrorAction Stop | Out-Null
+            return $true
+        } catch {
+            # Fall through.
+        }
+    }
+
+    return $false
+}
+
+function Test-CtxIsLink {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    return [bool]($item.LinkType) -or [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+}
+
+function Get-CtxLinkTarget {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Target) {
+        # Target can be an array on some PS versions/link types.
+        return @($item.Target)[0]
+    }
+    return $null
+}
+
+function Resolve-CtxLink {
+    # Ensures $HomeDir\$Name is a link (symlink/junction/hardlink per the
+    # fallback ladder) pointing at $RealTarget, self-healing the confirmed
+    # rename()-through-symlink hazard (plan 3.4a): if Copilot CLI (or
+    # anything else) replaced the link with a plain file/dir holding new
+    # data, that data is copied back onto the real ~/.copilot target
+    # *before* the link is recreated, so the most recent write is
+    # preserved rather than silently lost. Returns $true on success.
+    param(
+        [string]$HomeDir,
+        [string]$Name,
+        [string]$RealTarget,
+        [ValidateSet('file', 'dir')]
+        [string]$Kind
+    )
+
+    $linkPath = Join-Path $HomeDir $Name
+
+    if (Test-Path -LiteralPath $linkPath) {
+        if (Test-CtxIsLink -Path $linkPath) {
+            $currentTarget = Get-CtxLinkTarget -Path $linkPath
+            # Compare as raw strings (normalising separators) rather than via
+            # Resolve-Path: when neither target exists yet (e.g. settings.json,
+            # mcp-config.json not yet written by Copilot), Resolve-Path returns
+            # $null for both sides and $null -eq $null is $true, which would
+            # falsely treat a stale/wrong link as already correct and leave it
+            # in place. A raw string compare mirrors ctx.sh's readlink check.
+            $normalizedCurrent = if ($currentTarget) { $currentTarget.TrimEnd('\', '/').Replace('/', '\') } else { $null }
+            $normalizedReal = $RealTarget.TrimEnd('\', '/').Replace('/', '\')
+            if ($normalizedCurrent -and ($normalizedCurrent -eq $normalizedReal)) {
+                # Already correct; no-op (idempotency, plan 3.4).
+                return $true
+            }
+            Remove-Item -LiteralPath $linkPath -Force -Recurse -ErrorAction SilentlyContinue
+        } else {
+            # Not a link but exists: the confirmed hazard from 3.4a - the
+            # CLI's write-tmp+rename() replaced our link with a real file
+            # (or, defensively, a real dir) holding this context's latest
+            # data. Copy it over the real target so the write is not
+            # lost, then remove it and recreate the link.
+            $parentOfTarget = Split-Path -Parent $RealTarget
+            if ($parentOfTarget -and -not (Test-Path -LiteralPath $parentOfTarget)) {
+                New-Item -ItemType Directory -Path $parentOfTarget -Force | Out-Null
+            }
+            if ($Kind -eq 'dir') {
+                if (Test-Path -LiteralPath $RealTarget) {
+                    Remove-Item -LiteralPath $RealTarget -Recurse -Force
+                }
+                Copy-Item -LiteralPath $linkPath -Destination $RealTarget -Recurse -Force
+            } else {
+                Copy-Item -LiteralPath $linkPath -Destination $RealTarget -Force
+            }
+            Remove-Item -LiteralPath $linkPath -Recurse -Force
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $linkPath)) {
+        $linkParent = Split-Path -Parent $linkPath
+        if ($linkParent -and -not (Test-Path -LiteralPath $linkParent)) {
+            New-Item -ItemType Directory -Path $linkParent -Force | Out-Null
+        }
+        if ($Kind -eq 'dir') {
+            if (-not (Test-Path -LiteralPath $RealTarget)) {
+                New-Item -ItemType Directory -Path $RealTarget -Force | Out-Null
+            }
+        } else {
+            $targetParent = Split-Path -Parent $RealTarget
+            if ($targetParent -and -not (Test-Path -LiteralPath $targetParent)) {
+                New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+            }
+            if (-not (Test-Path -LiteralPath $RealTarget)) {
+                New-Item -ItemType File -Path $RealTarget -Force | Out-Null
+            }
+        }
+        if (-not (New-CtxLink -LinkPath $linkPath -RealTarget $RealTarget -Kind $Kind)) {
+            Write-Warning "ctx: warning: could not create link $linkPath -> $RealTarget"
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Set-CtxCopilotHome {
+    # Computes/reconciles the per-context COPILOT_HOME directory and
+    # exports $env:COPILOT_HOME, mirroring _ctx_setup_copilot_home in
+    # ctx.sh. $ContextName is the raw context name (e.g. "review+test");
+    # $ResolvedDirs is the list of resolved directories for the active
+    # context (profile dir + shared dirs, or .ctx entries).
+    param(
+        [string]$ContextName,
+        [string[]]$ResolvedDirs
+    )
+
+    $sanitized = Get-CtxSanitizedContextName -Name $ContextName
+    $homesRoot = Get-CtxCopilotHomeRoot
+    $homeDir = Join-Path $homesRoot $sanitized
+    $copilotDir = Get-CtxCopilotDir
+
+    if (-not (Test-Path -LiteralPath (Join-Path $homeDir 'skills'))) {
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $homeDir 'skills') -Force -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Warning "ctx: warning: could not create $homeDir; leaving COPILOT_HOME unset"
+            return
+        }
+    }
+    if (-not (Test-Path -LiteralPath $copilotDir)) {
+        New-Item -ItemType Directory -Path $copilotDir -Force | Out-Null
+    }
+
+    $ok = $true
+    foreach ($f in (Get-CtxCopilotHomeSharedFiles)) {
+        if (-not (Resolve-CtxLink -HomeDir $homeDir -Name $f -RealTarget (Join-Path $copilotDir $f) -Kind 'file')) {
+            $ok = $false
+        }
+    }
+    foreach ($d in (Get-CtxCopilotHomeSharedDirs)) {
+        if (-not (Resolve-CtxLink -HomeDir $homeDir -Name $d -RealTarget (Join-Path $copilotDir $d) -Kind 'dir')) {
+            $ok = $false
+        }
+    }
+
+    if (-not $ok) {
+        Write-Warning "ctx: warning: one or more COPILOT_HOME links could not be created; leaving COPILOT_HOME unset for this session"
+        return
+    }
+
+    # Reconcile skills/: desired (name -> target) pairs come from each
+    # resolved dir's .github\skills subfolder, if present.
+    $desiredSkills = @{}
+    foreach ($rd in $ResolvedDirs) {
+        $skillDir = Join-Path $rd '.github\skills'
+        if (Test-Path -LiteralPath $skillDir -PathType Container) {
+            Get-ChildItem -LiteralPath $skillDir -Directory | ForEach-Object {
+                $desiredSkills[$_.Name] = $_.FullName
+            }
+        }
+    }
+
+    $skillsHome = Join-Path $homeDir 'skills'
+    if (Test-Path -LiteralPath $skillsHome -PathType Container) {
+        Get-ChildItem -LiteralPath $skillsHome -Force | ForEach-Object {
+            if (-not $desiredSkills.ContainsKey($_.Name)) {
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force
+            }
+        }
+    }
+
+    foreach ($name in $desiredSkills.Keys) {
+        $target = $desiredSkills[$name]
+        $link = Join-Path $skillsHome $name
+        $needsCreate = $true
+        if (Test-Path -LiteralPath $link) {
+            if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $target)) {
+                $needsCreate = $false
+            } else {
+                Remove-Item -LiteralPath $link -Recurse -Force
+            }
+        }
+        if ($needsCreate) {
+            if (-not (New-CtxLink -LinkPath $link -RealTarget $target -Kind 'dir')) {
+                Write-Warning "ctx: warning: could not create skill link $link -> $target"
+            }
+        }
+    }
+
+    $env:COPILOT_HOME = $homeDir
+}
 
 function Update-CtxSkillDirectories {
     # Merges the given skill directories into the "skillDirectories" array of
@@ -477,25 +786,18 @@ function Import-CtxFile {
     }
 
     # Setting COPILOT_CUSTOM_INSTRUCTIONS_DIRS alone does not make Copilot CLI
-    # load skills from these directories. If any of them contain a
-    # .github\skills folder, register it in .github\copilot\settings.local.json
-    # (next to the .ctx file) so skills are discovered too.
-    $skillDirsFound = @()
-    foreach ($d in $dirs) {
-        $candidate = Join-Path $d '.github\skills'
-        if (Test-Path -LiteralPath $candidate -PathType Container) {
-            $skillDirsFound += $candidate
-        }
-    }
-    if ($skillDirsFound.Count -gt 0) {
-        Update-CtxSkillDirectories -BaseDir $dirOfFile -SkillDirs $skillDirsFound
-    }
+    # load skills from these directories. Genuine per-folder, session-
+    # isolated skill discovery is provided via COPILOT_HOME (see
+    # Set-CtxCopilotHome) rather than settings.local.json's
+    # skillDirectories, which Copilot CLI silently ignores (issue #1).
 
     Update-CtxWorkspaceFile -BaseDir $dirOfFile -Names $names -Dirs $dirs
 
     $dirsCsv = $dirs -join ','
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
     $env:AI_CONTEXT = $names -join '+'
+
+    Set-CtxCopilotHome -ContextName $env:AI_CONTEXT -ResolvedDirs $dirs
 
     $sharedCsv = ($names | Select-Object -Skip 1) -join ', '
     Write-CtxStatus -ProfileName $names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv

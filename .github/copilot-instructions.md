@@ -34,20 +34,46 @@ package manager, no test runner. All logic lives in those two files.
 
 ### Side effects of `.ctx` loading
 
-Both implementations do the same two things when a `.ctx` file is loaded:
+Both implementations do the same things when a `.ctx` file is loaded:
 
-1. **Skill discovery** — scans each resolved dir for `.github/skills`; if
-   found, merges those paths into `.github/copilot/settings.local.json`
-   next to the `.ctx` file (preserving existing keys). `ctx.sh` requires
-   `python3` for this; `ctx.ps1` uses `ConvertFrom-Json`/`ConvertTo-Json`.
+1. **`COPILOT_HOME` skill isolation** — computes/reconciles a per-context
+   home dir under `~/.config/ctx/homes/<context-name>/`, symlinking shared
+   Copilot CLI files/dirs (`settings.json`, `config.json`, `mcp-config.json`,
+   `session-store.db*`, `session-state/`, `installed-plugins/`, `logs/`)
+   back to the real `~/.copilot`, and populating `skills/` with symlinks to
+   each resolved dir's `.github/skills/*` subfolders. `COPILOT_HOME` is
+   exported to point at it. See `_ctx_setup_copilot_home` (ctx.sh) /
+   `Set-CtxCopilotHome` (ctx.ps1). Runs a self-healing reconciliation step
+   on every activation (see the "3.4a hazard" note below) — this replaced
+   the old, confirmed-broken `skillDirectories`-in-`settings.local.json`
+   approach (issue #1). `_ctx_update_skill_directories` /
+   `Update-CtxSkillDirectories` are no longer called from the load path;
+   the functions are kept only for the legacy-cleanup path in
+   `ctx clear --all` for one release.
 
 2. **VS Code workspace** — creates/updates `<folder-name>.code-workspace`
    next to the `.ctx` file with `root: <folder-name>` and `ctx: <name>`
    folders. User-added folders (names not starting with `root: ` or
    `ctx: `) are preserved. `ctx.sh` requires `python3`.
 
-Both generated files are intentionally **not cleaned on `ctx clear`** —
-only `ctx clear --all` removes them.
+Generated workspace files are intentionally **not cleaned on `ctx clear`**
+— only `ctx clear --all` removes them (and the current context's
+`COPILOT_HOME` home dir).
+
+### ⚠️ `rename()`-through-symlink hazard (plan section 3.4a)
+
+Copilot CLI writes files like `settings.json` via write-tmp + `rename()`,
+which **replaces a symlink at that path with a plain file** rather than
+writing through it (confirmed empirically against Copilot CLI 1.0.80 — see
+`empirical-test-symlink-hazard.md`). The reconciliation step in
+`_ctx_setup_copilot_home` / `Set-CtxCopilotHome` runs on every activation
+and self-heals this: if a shared file/dir is no longer a symlink, its
+content is copied onto the real `~/.copilot/<file>` first, then the plain
+file is deleted and the symlink recreated. **Do not remove this check when
+touching the reconciliation loop** — a version without it silently loses
+writes. Known residual limitation: concurrent contexts in two shells can
+still race (last reconciliation wins, not a merge) — documented in the
+README, not solved.
 
 ### Environment variables
 
@@ -55,8 +81,11 @@ only `ctx clear --all` removes them.
 |---|---|---|
 | `AI_CONTEXT` | `ctx` | Human-readable label, `profile+shared1+shared2` |
 | `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | `ctx` | Comma-separated paths passed to Copilot CLI |
+| `COPILOT_HOME` | `ctx` | Per-context Copilot CLI home dir for skill isolation (unset when no context is active) |
 | `AI_CONFIG_ROOT` | User | Root of the profiles/shared tree (default: `$HOME/work/ai-config`) |
 | `CTX_AUTO_LOAD` | User | Set to `0` to disable `.ctx` auto-loading |
+| `CTX_HOMES_ROOT` | User (mainly tests) | Overrides `~/.config/ctx/homes` for `COPILOT_HOME` dirs |
+| `CTX_COPILOT_DIR` | User (mainly tests) | Overrides `~/.copilot` as the shared-file symlink target |
 
 ## Conventions
 
@@ -91,10 +120,15 @@ Enforced by `.gitattributes`:
 
 Add to `.gitignore` in any project that uses `.ctx`:
 ```
+# legacy — ctx no longer writes this file (COPILOT_HOME isolation, issue #1);
+# kept as a guard for repos on an older ctx version
 .github/copilot/settings.local.json
 *.code-workspace
 .vscode/
 ```
+`COPILOT_HOME` per-context cache dirs live under `~/.config/ctx/homes/`
+(outside any project repo) by default, so no additional `.gitignore` entry
+is needed for them unless `CTX_HOMES_ROOT` is pointed inside a repo.
 
 ## `examples/` layout
 

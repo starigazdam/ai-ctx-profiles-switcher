@@ -24,6 +24,29 @@ current shell session, and exposes the active selection as `AI_CONTEXT`
 Available for **bash**, **zsh**, and **PowerShell** (Windows PowerShell 5.1+
 and PowerShell 7+ / pwsh).
 
+## Requirements
+
+`ctx` is built specifically for and heavily oriented around
+[**GitHub Copilot CLI**](https://docs.github.com/copilot/how-tos/copilot-cli):
+custom-instructions loading (`COPILOT_CUSTOM_INSTRUCTIONS_DIRS`) and
+per-folder skill discovery (`COPILOT_HOME`, see [Skill discovery](#skill-discovery)
+below) both depend on behavior specific to that CLI, not on GitHub Copilot
+in general (e.g. the VS Code extension) or other AI coding agents.
+
+- **GitHub Copilot CLI** must be installed and authenticated —
+  `npm install -g @github/copilot`, then `copilot login`. See the
+  [official docs](https://docs.github.com/copilot/how-tos/copilot-cli) for
+  details.
+- All `COPILOT_HOME`-dependent behavior in this README (isolation,
+  reconciliation, the empirically-found symlink hazard, etc.) was
+  developed against and tested with **GitHub Copilot CLI 1.0.80**. Other
+  versions likely work — the `COPILOT_HOME`/`COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+  environment variables are documented, stable CLI behavior — but the
+  specific hazards and workarounds described here (see
+  [Skill discovery](#skill-discovery)) were only verified empirically
+  against that version. If you hit different behavior on another version,
+  please open an issue with your `copilot --version` output.
+
 ## Files
 
 | File           | Purpose                                             |
@@ -172,92 +195,110 @@ context.
 Setting `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` makes Copilot CLI load custom
 instructions from your `.ctx` entries, but it does **not** make it discover
 [agent skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
-stored in those directories.
+stored in those directories on its own. `ctx` solves this with genuine
+per-folder, session-isolated skill discovery via the `COPILOT_HOME`
+environment variable, which Copilot CLI respects as a full replacement for
+`~/.copilot`.
 
-#### What does NOT work
+#### How it works
 
-> **There is no per-folder skill discovery mechanism in Copilot CLI.**
+Every time a context is activated (`ctx <profile> [shared...]` or `.ctx`
+auto-load), `ctx` computes and reconciles a per-context home directory at
+`~/.config/ctx/homes/<context-name>/` (e.g. `~/.config/ctx/homes/review+dotnet/`)
+and exports `COPILOT_HOME` to point at it:
 
-All of the following approaches were investigated and do not work for Copilot
-CLI skill discovery from `.ctx` context directories:
+```
+~/.config/ctx/homes/<context-name>/
+  settings.json           -> symlink to ~/.copilot/settings.json
+  config.json              -> symlink to ~/.copilot/config.json
+  mcp-config.json           -> symlink to ~/.copilot/mcp-config.json
+  session-store.db*         -> symlink to ~/.copilot/session-store.db*
+  session-state/            -> symlink to ~/.copilot/session-state/
+  installed-plugins/        -> symlink to ~/.copilot/installed-plugins/
+  logs/                     -> symlink to ~/.copilot/logs/
+  skills/
+    <skill-name>/            -> symlink to the real skill dir (from resolved .ctx/profile entries)
+```
+
+- **Shared files/dirs** (`settings.json`, `config.json`, `mcp-config.json`,
+  `session-store.db*`, `session-state/`, `installed-plugins/`, `logs/`) are
+  symlinked back to the real `~/.copilot`, so authentication, model
+  settings, MCP servers, and session history all keep working identically
+  to today, shared across every context.
+- **`skills/`** is context-local and populated only with symlinks to each
+  resolved directory's `.github/skills/*` subfolders — every context sees
+  exactly its own skills and nothing else. No bleed between projects.
+- Reactivating a context (re-`cd`-ing into a `.ctx` dir, or re-running
+  `ctx <profile>`) is idempotent: unchanged symlinks are left alone, stale
+  skill symlinks (from a profile's skill set that has since changed) are
+  removed, and incorrect/missing symlinks are (re)created.
+- `ctx clear` unsets `COPILOT_HOME` for the session but leaves the home
+  directory on disk as a reusable cache. `ctx clear --all` additionally
+  removes the *current* context's home directory (not other cached
+  contexts' homes).
+
+#### Self-healing reconciliation (important)
+
+Symlinking individual *files* back to `~/.copilot` has a confirmed hazard:
+**Copilot CLI writes files like `settings.json` via a write-tmp +
+`rename()` pattern, and `rename()` onto a path that is a symlink replaces
+the symlink itself with a plain file** — it does not write through to the
+symlink's target. This was empirically reproduced against Copilot CLI
+1.0.80: after a session that persisted a setting, the synthetic
+`COPILOT_HOME/settings.json` was silently no longer a symlink, and the real
+`~/.copilot/settings.json` never received the write.
+
+`ctx` fixes this with a **self-healing reconciliation step that runs on
+every activation**, for every file/dir in the shared list above: if the
+expected symlink has been replaced with a real file/dir (i.e. something
+wrote through it), `ctx` copies that content onto the real
+`~/.copilot/<file>` first (so the most recent write is preserved), then
+deletes the plain file/dir and recreates the symlink. This makes the
+orphaning bug self-correcting rather than silently losing data — see
+[`plan-issue-1.md` section 3.4a](plan-issue-1.md) and
+[`empirical-test-symlink-hazard.md`](empirical-test-symlink-hazard.md) for
+the full repro and design rationale.
+
+**Known limitation — concurrent contexts.** Reconciliation is only
+*eventually* consistent. If you run two contexts concurrently in two
+separate shells (each with its own `COPILOT_HOME`), and both write
+`settings.json` in the same window before either one reconciles, one
+context's write can still be lost (last reconciliation wins, not a merge).
+This is a narrower, harder-to-hit race than the original always-silently-
+orphaned bug, and is out of scope to fully solve — avoid running multiple
+Copilot CLI sessions under different contexts at the same time if you rely
+on writes like `--allow-all-tools` persisting reliably.
+
+#### Historical: what did NOT work
+
+Before `COPILOT_HOME` isolation, the following approaches were investigated
+and found broken or insufficient for Copilot CLI:
 
 - **`skillDirectories` in `settings.local.json`** — silently ignored.
-  `skillDirectories` is a user-level-only setting. The
+  `skillDirectories` is a user-level-only setting; the
   `.github/copilot/settings.local.json` file uses the restricted repo-scope
-  schema, which does not include `skillDirectories`. Values written there are
-  discarded. The only location where it is honoured is `~/.copilot/settings.json`.
-
+  schema, which does not include it. The only location where it is honoured
+  is `~/.copilot/settings.json`. (This is why `ctx` no longer writes
+  `settings.local.json` at all — see the Migration note below.)
 - **`enabledPlugins` in `settings.local.json`** — does not override the
-  user-level `~/.copilot/settings.json`. A plugin disabled globally cannot be
-  re-enabled per-folder via `settings.local.json`.
-
-- **VS Code workspace file** — the `.code-workspace` file `ctx` generates adds
-  context directories as VS Code workspace roots. This causes the **VS Code
-  Copilot UI** to discover skills from those folders, but it has no effect on
-  **Copilot CLI**. Starting Copilot CLI from VS Code's integrated terminal does
-  not inherit workspace-root skill discovery.
-
-#### Working alternatives for Copilot CLI
-
-**Option 1 — Personal skills (symlinks, always-on):**
-
-Symlink each skill directory into `~/.copilot/skills/`. Personal skills are
-always loaded in every CLI session regardless of project.
-
-```sh
-# bash/zsh
-for d in /path/to/context/.github/skills/*/; do
-  ln -s "$d" ~/.copilot/skills/"$(basename "$d")"
-done
-```
-
-```powershell
-# PowerShell
-Get-ChildItem /path/to/context/.github/skills -Directory | ForEach-Object {
-    New-Item -ItemType SymbolicLink -Path "$HOME\.copilot\skills\$($_.Name)" -Target $_.FullName
-}
-```
-
-**Option 2 — Global `skillDirectories` in `~/.copilot/settings.json`:**
-
-Add the skills folder path to `skillDirectories` in your user settings. This
-is global (not per-folder) but requires no symlinks:
-
-```json
-{
-  "skillDirectories": [
-    "/path/to/context/.github/skills"
-  ]
-}
-```
-
-Use Option 1 or 2 depending on whether the skills apply to a single project or
-all your work. Neither provides automatic per-folder switching — that is a
-current limitation of Copilot CLI's skill discovery model.
-
-> **Option 1 is only appropriate if the skills are genuinely global** (useful
-> in every project). Using symlinks to expose project-specific skills as
-> personal skills pollutes all other CLI sessions — if you work across multiple
-> projects with distinct skill sets, they will all bleed into each other.
-> There is currently no supported mechanism for per-folder, session-isolated
-> skill discovery in Copilot CLI.
-
-#### Planned: per-folder skill isolation via `COPILOT_HOME`
-
-A future enhancement to `ctx` will use the `COPILOT_HOME` environment variable
-— which Copilot CLI respects as a full replacement for `~/.copilot` — to
-provide genuine per-folder, session-isolated skill discovery without any
-bleed between projects.
-
-The approach: on `.ctx` load, `ctx` sets `COPILOT_HOME` to a project-specific
-directory (e.g. `~/.config/ctx/homes/<context-name>/`) that contains only
-that project's skill symlinks. Global config (authentication, settings, MCP
-servers, session history) is preserved by symlinking the shared files back to
-`~/.copilot`. On `ctx clear`, `COPILOT_HOME` is unset and the CLI returns to
-the global config with no project skills visible.
+  user-level `~/.copilot/settings.json`.
+- **VS Code workspace file** — causes the VS Code Copilot UI to discover
+  skills from workspace-root folders, but has no effect on Copilot CLI.
+- **Personal skills (symlinks into `~/.copilot/skills/`)** — works, but is
+  always-on/global, not per-folder; pollutes every other CLI session.
+- **Global `skillDirectories` in `~/.copilot/settings.json`** — works, but
+  is also global, not per-folder.
 
 See [GitHub issue #1](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/1)
-for the implementation plan.
+for the original investigation and implementation plan.
+
+#### Migration note
+
+If you have a `.github/copilot/settings.local.json` generated by an older
+`ctx` version, it's a harmless leftover (confirmed not read by Copilot CLI)
+— delete it manually, or run `ctx clear --all` once under the old code path
+before upgrading. `ctx` still cleans up this legacy file as part of
+`ctx clear --all` for one release, but no longer writes it.
 
 ### VS Code workspace
 
@@ -343,3 +384,38 @@ only the first context name plus a `(+2)` suffix for the rest (e.g.
 - Both implementations validate that the AI config root, profile directory,
   and every shared directory exist before exporting anything, and leave any
   previously active context untouched if validation fails.
+- `COPILOT_HOME` is managed automatically by `ctx` whenever a context is
+  active (see [Skill discovery](#skill-discovery)); it is exported/unset
+  alongside `AI_CONTEXT` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and shown
+  in `ctx current` output.
+
+## Testing
+
+Both implementations have an automated test suite that runs entirely
+against isolated temp directories — nothing in the suites touches your real
+`~/.copilot` or `~/.config/ctx`.
+
+### bash/zsh (`ctx.sh`) — bats
+
+```sh
+npm install --no-save bats
+./node_modules/.bin/bats tests/ctx.bats
+```
+
+### PowerShell (`ctx.ps1`) — Pester
+
+Requires PowerShell 7+ (`pwsh`) and [Pester](https://pester.dev/) 5+:
+
+```powershell
+Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck -MinimumVersion 5.0
+Invoke-Pester tests/ctx.Tests.ps1
+```
+
+### CI
+
+`.github/workflows/test.yml` runs both suites on every push/PR that touches
+`ctx.sh`, `ctx.ps1`, or `tests/**`, on `ubuntu-latest` only (`pwsh` ships
+preinstalled on that image, so it exercises real `ctx.ps1` logic — just
+without the Windows-only symlink → junction → hardlink fallback ladder,
+which stays manual-verification-only since `ubuntu-latest` doesn't hit
+Windows-style symlink permission errors).
