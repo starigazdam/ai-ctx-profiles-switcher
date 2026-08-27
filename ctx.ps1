@@ -223,9 +223,16 @@ function Clear-CtxContext {
         }
 
         if ($prevContext) {
-            $sanitized = Get-CtxSanitizedContextName -Name $prevContext
-            $homesRoot = Get-CtxCopilotHomeRoot
-            $homeDir = Join-Path $homesRoot $sanitized
+            if ($Script:CtxAutoLoadHomeOverride) {
+                # This context was loaded from a .ctx file with a "home:"
+                # directive (issue #7): its synthetic COPILOT_HOME lives at
+                # that custom location, not the centralized default.
+                $homeDir = $Script:CtxAutoLoadHomeOverride
+            } else {
+                $sanitized = Get-CtxSanitizedContextName -Name $prevContext
+                $homesRoot = Get-CtxCopilotHomeRoot
+                $homeDir = Join-Path $homesRoot $sanitized
+            }
             if (Test-Path -LiteralPath $homeDir -PathType Container) {
                 Remove-Item -LiteralPath $homeDir -Recurse -Force
                 Write-Host "ctx: removed $homeDir"
@@ -234,6 +241,7 @@ function Clear-CtxContext {
     }
 
     $Script:CtxAutoLoadDir = $null
+    $Script:CtxAutoLoadHomeOverride = $null
     Write-Host "AI context cleared."
 }
 
@@ -324,6 +332,10 @@ function ctx {
 
 $Script:CtxAutoLoadDir = $null
 $Script:CtxLastPwd = $null
+# Tracks the "home:" directive override (issue #7), if any, from the last
+# .ctx file auto-loaded, so Clear-CtxContext -All knows to look for the
+# synthetic COPILOT_HOME at that location instead of the centralized one.
+$Script:CtxAutoLoadHomeOverride = $null
 
 function Get-CtxCopilotHomeRoot {
     if ($env:CTX_HOMES_ROOT) {
@@ -525,15 +537,22 @@ function Set-CtxCopilotHome {
     # exports $env:COPILOT_HOME, mirroring _ctx_setup_copilot_home in
     # ctx.sh. $ContextName is the raw context name (e.g. "review+test");
     # $ResolvedDirs is the list of resolved directories for the active
-    # context (profile dir + shared dirs, or .ctx entries).
+    # context (profile dir + shared dirs, or .ctx entries). $HomeOverride
+    # is an absolute path (from the .ctx file's optional "home:" directive,
+    # issue #7) or empty/$null to use the centralized default.
     param(
         [string]$ContextName,
-        [string[]]$ResolvedDirs
+        [string[]]$ResolvedDirs,
+        [string]$HomeOverride
     )
 
-    $sanitized = Get-CtxSanitizedContextName -Name $ContextName
-    $homesRoot = Get-CtxCopilotHomeRoot
-    $homeDir = Join-Path $homesRoot $sanitized
+    if ($HomeOverride) {
+        $homeDir = $HomeOverride
+    } else {
+        $sanitized = Get-CtxSanitizedContextName -Name $ContextName
+        $homesRoot = Get-CtxCopilotHomeRoot
+        $homeDir = Join-Path $homesRoot $sanitized
+    }
     $copilotDir = Get-CtxCopilotDir
 
     if (-not (Test-Path -LiteralPath (Join-Path $homeDir 'skills'))) {
@@ -745,11 +764,19 @@ function Import-CtxFile {
     # "<context-name>:<path-to-folder>". Relative paths are resolved
     # against the directory containing the .ctx file. Sets AI_CONTEXT and
     # COPILOT_CUSTOM_INSTRUCTIONS_DIRS directly from the parsed entries.
+    #
+    # An optional line "home:<path>" (issue #7) is a reserved directive,
+    # not a profile/shared-context entry: it overrides where this .ctx
+    # file's synthetic COPILOT_HOME is created, instead of the centralized
+    # default. Its path resolves the same way (relative to the .ctx file's
+    # directory unless absolute), and the directory does not need to
+    # pre-exist (it's created on demand, same as the centralized default).
     param([string]$CtxFile)
 
     $dirOfFile = Split-Path -Parent $CtxFile
     $names = @()
     $dirs = @()
+    $homeOverride = $null
 
     foreach ($rawLine in Get-Content -LiteralPath $CtxFile) {
         $line = $rawLine.Trim()
@@ -771,6 +798,16 @@ function Import-CtxFile {
         }
 
         $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
+
+        if ($name -eq 'home') {
+            if ($homeOverride) {
+                Write-Error "ctx: error: duplicate `"home:`" directive in $CtxFile"
+                return $false
+            }
+            $homeOverride = $resolvedPath
+            continue
+        }
+
         if (-not (Test-Path -LiteralPath $resolvedPath -PathType Container)) {
             Write-Error "ctx: error: .ctx entry `"$name`" in $CtxFile points to missing directory: $resolvedPath"
             return $false
@@ -797,7 +834,8 @@ function Import-CtxFile {
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
     $env:AI_CONTEXT = $names -join '+'
 
-    Set-CtxCopilotHome -ContextName $env:AI_CONTEXT -ResolvedDirs $dirs
+    Set-CtxCopilotHome -ContextName $env:AI_CONTEXT -ResolvedDirs $dirs -HomeOverride $homeOverride
+    $Script:CtxAutoLoadHomeOverride = $homeOverride
 
     $sharedCsv = ($names | Select-Object -Skip 1) -join ', '
     Write-CtxStatus -ProfileName $names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv

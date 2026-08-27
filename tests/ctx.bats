@@ -333,3 +333,90 @@ EOF
     [ "$before_ino" = "$after_ino" ]
     [ "$real_before_ino" = "$real_after_ino" ]
 }
+
+# --- Tests 15-18: "home:" directive, custom COPILOT_HOME location (#7) -----
+
+@test "home: directive in .ctx puts COPILOT_HOME at the custom location" {
+    _make_profile "review" "review-skill"
+
+    local proj="$TEST_TMP/project-home"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+home: .copilot-ctx
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    _ctx_load_ctx_file "$proj/.ctx"
+
+    [ -n "$COPILOT_HOME" ]
+    [ "$COPILOT_HOME" = "$proj/.copilot-ctx" ]
+    [ -d "$COPILOT_HOME" ]
+    [ -L "$COPILOT_HOME/skills/review-skill" ]
+    # Centralized default root must NOT have been used.
+    [ ! -d "$CTX_HOMES_ROOT/review" ]
+}
+
+@test ".ctx without a home: directive still uses the centralized default" {
+    _make_profile "review" "review-skill"
+
+    local proj="$TEST_TMP/project-nohome"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    _ctx_load_ctx_file "$proj/.ctx"
+
+    [ "$COPILOT_HOME" = "$CTX_HOMES_ROOT/review" ]
+}
+
+@test "home: directive with absolute path is used as-is" {
+    _make_profile "review" "review-skill"
+
+    local proj="$TEST_TMP/project-home-abs"
+    local custom_home="$TEST_TMP/custom-copilot-home"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+home: $custom_home
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    _ctx_load_ctx_file "$proj/.ctx"
+
+    [ "$COPILOT_HOME" = "$custom_home" ]
+    [ -L "$COPILOT_HOME/skills/review-skill" ]
+}
+
+@test "ctx clear --all removes the custom home: location, not the centralized one" {
+    _make_profile "review" "review-skill"
+
+    local proj="$TEST_TMP/project-home-clear"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+home: .copilot-ctx
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    _ctx_load_ctx_file "$proj/.ctx"
+    local custom_home="$COPILOT_HOME"
+    [ -d "$custom_home" ]
+
+    _ctx_clear --all
+
+    [ ! -d "$custom_home" ]
+    [ ! -d "$CTX_HOMES_ROOT/review" ]
+}
+
+@test "duplicate home: directive in .ctx is rejected" {
+    local proj="$TEST_TMP/project-home-dup"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+home: .copilot-ctx-a
+home: .copilot-ctx-b
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    run _ctx_load_ctx_file "$proj/.ctx"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate"* ]]
+}
