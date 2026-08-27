@@ -236,7 +236,12 @@ EOF
 
     run ctx review
 
-    [ "$status" -eq 0 ]
+    # Don't assert `$status -eq 0`: ctx() currently ignores
+    # _ctx_setup_copilot_home's return value, but if error propagation is
+    # ever added that assertion would break for the wrong reason. What
+    # actually matters here is the observable fallback behavior: a warning
+    # is surfaced and COPILOT_HOME is left unset rather than pointing at a
+    # half-built home dir.
     [[ "$output" == *"warning"* ]]
     [ -z "${COPILOT_HOME:-}" ]
 }

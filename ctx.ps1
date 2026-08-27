@@ -211,7 +211,15 @@ function Clear-CtxContext {
                 Write-Host "ctx: removed $workspaceFile"
             }
         } else {
-            Write-Warning "ctx: warning: no .ctx file found; nothing to remove"
+            if ($prevContext) {
+                # Context was activated manually (no .ctx file), so there are
+                # no on-disk artifacts (settings.local.json / workspace file)
+                # to clean up, but the COPILOT_HOME directory below still
+                # gets removed - don't imply nothing happens at all.
+                Write-Warning "ctx: warning: no .ctx file found; skipping artifact cleanup"
+            } else {
+                Write-Warning "ctx: warning: no .ctx file found; nothing to remove"
+            }
         }
 
         if ($prevContext) {
@@ -450,7 +458,15 @@ function Resolve-CtxLink {
     if (Test-Path -LiteralPath $linkPath) {
         if (Test-CtxIsLink -Path $linkPath) {
             $currentTarget = Get-CtxLinkTarget -Path $linkPath
-            if ($currentTarget -and ((Resolve-Path -LiteralPath $currentTarget -ErrorAction SilentlyContinue).Path -eq (Resolve-Path -LiteralPath $RealTarget -ErrorAction SilentlyContinue).Path)) {
+            # Compare as raw strings (normalising separators) rather than via
+            # Resolve-Path: when neither target exists yet (e.g. settings.json,
+            # mcp-config.json not yet written by Copilot), Resolve-Path returns
+            # $null for both sides and $null -eq $null is $true, which would
+            # falsely treat a stale/wrong link as already correct and leave it
+            # in place. A raw string compare mirrors ctx.sh's readlink check.
+            $normalizedCurrent = if ($currentTarget) { $currentTarget.TrimEnd('\', '/').Replace('/', '\') } else { $null }
+            $normalizedReal = $RealTarget.TrimEnd('\', '/').Replace('/', '\')
+            if ($normalizedCurrent -and ($normalizedCurrent -eq $normalizedReal)) {
                 # Already correct; no-op (idempotency, plan 3.4).
                 return $true
             }

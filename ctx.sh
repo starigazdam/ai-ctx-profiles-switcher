@@ -212,7 +212,15 @@ _ctx_clear() {
                 printf 'ctx: removed %s\n' "$workspace_file"
             fi
         else
-            printf 'ctx: warning: no .ctx file found; nothing to remove\n' >&2
+            if [ -n "$prev_context" ]; then
+                # Context was activated manually (no .ctx file), so there are
+                # no on-disk artifacts (settings.local.json / workspace file)
+                # to clean up, but the COPILOT_HOME directory below still
+                # gets removed - don't imply nothing happens at all.
+                printf 'ctx: warning: no .ctx file found; skipping artifact cleanup\n' >&2
+            else
+                printf 'ctx: warning: no .ctx file found; nothing to remove\n' >&2
+            fi
         fi
 
         if [ -n "$prev_context" ]; then
@@ -514,7 +522,10 @@ EOF
             local ename
             ename="$(basename "$existing")"
             if [ -z "${desired_skills[$ename]:-}" ]; then
-                rm -f "$existing"
+                # Skills are directory symlinks; rm -rf mirrors
+                # _ctx_reconcile_symlink and the PowerShell equivalent
+                # (Remove-Item -Recurse -Force).
+                rm -rf "$existing"
             fi
         done
     fi
