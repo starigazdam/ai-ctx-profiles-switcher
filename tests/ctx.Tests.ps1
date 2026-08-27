@@ -58,6 +58,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
         Remove-Item Env:\CTX_AUTO_LOAD -ErrorAction SilentlyContinue
         $Script:CtxAutoLoadDir = $null
+        $Script:CtxAutoLoadHomeOverride = $null
 
         . $Script:CtxSrc
     }
@@ -302,5 +303,93 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
         $beforeHome | Should -Be $afterHome
         $beforeReal | Should -Be $afterReal
+    }
+
+    It 'Test 15: home: directive in .ctx puts COPILOT_HOME at the custom location' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+
+        $proj = Join-Path $Script:TestTmp 'project-home'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: .copilot-ctx`nreview:$reviewDir"
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+
+        $expectedHome = Join-Path $proj '.copilot-ctx'
+        $env:COPILOT_HOME | Should -Be $expectedHome
+        Test-Path -LiteralPath $env:COPILOT_HOME -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path (Join-Path $env:COPILOT_HOME 'skills') 'review-skill') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $env:CTX_HOMES_ROOT 'review') | Should -BeFalse
+    }
+
+    It 'Test 16: .ctx without a home: directive still uses the centralized default' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+
+        $proj = Join-Path $Script:TestTmp 'project-nohome'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+
+        $env:COPILOT_HOME | Should -Be (Join-Path $env:CTX_HOMES_ROOT 'review')
+    }
+
+    It 'Test 17: home: directive with absolute path is used as-is' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+
+        $proj = Join-Path $Script:TestTmp 'project-home-abs'
+        $customHome = Join-Path $Script:TestTmp 'custom-copilot-home'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: $customHome`nreview:$reviewDir"
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+
+        $env:COPILOT_HOME | Should -Be $customHome
+        Test-Path -LiteralPath (Join-Path (Join-Path $env:COPILOT_HOME 'skills') 'review-skill') | Should -BeTrue
+    }
+
+    It 'Test 18: Clear-CtxContext -All removes the custom home: location, not the centralized one' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+
+        $proj = Join-Path $Script:TestTmp 'project-home-clear'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: .copilot-ctx`nreview:$reviewDir"
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+        $customHome = $env:COPILOT_HOME
+        Test-Path -LiteralPath $customHome -PathType Container | Should -BeTrue
+
+        $Script:CtxAutoLoadDir = $proj
+        Clear-CtxContext -All
+
+        Test-Path -LiteralPath $customHome | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:CTX_HOMES_ROOT 'review') | Should -BeFalse
+    }
+
+    It 'Test 19: duplicate home: directive in .ctx is rejected' {
+        $proj = Join-Path $Script:TestTmp 'project-home-dup'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: .copilot-ctx-a`nhome: .copilot-ctx-b`nreview:$reviewDir"
+
+        # Import-CtxFile is not an advanced function (no [CmdletBinding()]),
+        # so -ErrorAction/-ErrorVariable on the call site don't bind to it;
+        # its Write-Error obeys the ambient $ErrorActionPreference instead.
+        # Pin that to SilentlyContinue around the call and read $Error.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
+        $Error.Clear()
+        $result = $null
+        try {
+            $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+
+        $result | Should -Be $false
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'duplicate'
     }
 }

@@ -225,9 +225,16 @@ _ctx_clear() {
 
         if [ -n "$prev_context" ]; then
             local sanitized homes_root home_dir
-            sanitized="$(_ctx_sanitize_context_name "$prev_context")"
-            homes_root="$(_ctx_copilot_home_root)"
-            home_dir="$homes_root/$sanitized"
+            if [ -n "$_ctx_auto_load_home_override" ]; then
+                # This context was loaded from a .ctx file with a "home:"
+                # directive (issue #7): its synthetic COPILOT_HOME lives at
+                # that custom location, not the centralized default.
+                home_dir="$_ctx_auto_load_home_override"
+            else
+                sanitized="$(_ctx_sanitize_context_name "$prev_context")"
+                homes_root="$(_ctx_copilot_home_root)"
+                home_dir="$homes_root/$sanitized"
+            fi
             if [ -d "$home_dir" ]; then
                 rm -rf "$home_dir"
                 printf 'ctx: removed %s\n' "$home_dir"
@@ -237,6 +244,7 @@ _ctx_clear() {
 
     export CTX_AUTO_LOAD_DIR=""
     _ctx_auto_load_dir=""
+    _ctx_auto_load_home_override=""
     printf 'AI context cleared.\n'
 }
 
@@ -318,7 +326,7 @@ ctx() {
     local -a resolved_dirs_manual=()
     IFS=',' read -r -a resolved_dirs_manual <<< "$dirs_csv"
 
-    _ctx_setup_copilot_home "$AI_CONTEXT" "${resolved_dirs_manual[@]}"
+    _ctx_setup_copilot_home "$AI_CONTEXT" "" "${resolved_dirs_manual[@]}"
 
     _ctx_print_status "$profile_name" "$shared_csv" "$dirs_csv"
 }
@@ -326,6 +334,10 @@ ctx() {
 # --- Auto-loading via .ctx files ----------------------------------------
 
 _ctx_auto_load_dir=""
+# Tracks the "home:" directive override (issue #7), if any, from the last
+# .ctx file auto-loaded, so _ctx_clear --all knows to look for the
+# synthetic COPILOT_HOME at that location instead of the centralized one.
+_ctx_auto_load_home_override=""
 
 _ctx_find_ctx_file() {
     # Search from $PWD upward to the filesystem root for a ".ctx" file.
@@ -460,15 +472,23 @@ _ctx_reconcile_symlink() {
 
 _ctx_setup_copilot_home() {
     # $1: context-name (raw, e.g. "review+test")
+    # $2: home-dir override (absolute path) or "" to use the centralized
+    #     default. Set via the .ctx file's optional "home:<path>" directive
+    #     (issue #7); manual "ctx <profile>..." invocations always pass "".
     # remaining args: resolved directories for the active context
     local context_name="$1"
-    shift
+    local home_override="$2"
+    shift 2
     local -a resolved_dirs=("$@")
 
     local sanitized homes_root home_dir copilot_dir
-    sanitized="$(_ctx_sanitize_context_name "$context_name")"
-    homes_root="$(_ctx_copilot_home_root)"
-    home_dir="$homes_root/$sanitized"
+    if [ -n "$home_override" ]; then
+        home_dir="$home_override"
+    else
+        sanitized="$(_ctx_sanitize_context_name "$context_name")"
+        homes_root="$(_ctx_copilot_home_root)"
+        home_dir="$homes_root/$sanitized"
+    fi
     copilot_dir="${CTX_COPILOT_DIR:-$HOME/.copilot}"
 
     mkdir -p "$home_dir/skills" || {
@@ -680,11 +700,19 @@ _ctx_load_ctx_file() {
     # "<context-name>:<path-to-folder>". Relative paths are resolved
     # against the directory containing the .ctx file. Sets AI_CONTEXT and
     # COPILOT_CUSTOM_INSTRUCTIONS_DIRS directly from the parsed entries.
+    #
+    # An optional line "home:<path>" (issue #7) is a reserved directive,
+    # not a profile/shared-context entry: it overrides where this .ctx
+    # file's synthetic COPILOT_HOME is created, instead of the centralized
+    # default under _ctx_copilot_home_root. Its path resolves the same way
+    # (relative to the .ctx file's directory unless absolute), and the
+    # directory does not need to pre-exist (it's created on demand, same
+    # as the centralized default).
     local ctx_file="$1"
     local dir_of_file
     dir_of_file="$(dirname "$ctx_file")"
 
-    local ai_context="" dirs_csv="" first_name=""
+    local ai_context="" dirs_csv="" first_name="" home_override=""
     local line name path resolved_path
     local -a resolved_dirs=()
     local -a resolved_names=()
@@ -705,6 +733,13 @@ _ctx_load_ctx_file() {
 
         name="${line%%:*}"
         path="${line#*:}"
+        # Trim leading/trailing whitespace so "home: .copilot-ctx" (with a
+        # space after the colon, as shown in docs/examples) parses the same
+        # as "home:.copilot-ctx" - matches ctx.ps1's .Trim() on both sides.
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
+        path="${path#"${path%%[![:space:]]*}"}"
+        path="${path%"${path##*[![:space:]]}"}"
         if [ -z "$name" ] || [ -z "$path" ]; then
             printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2
             return 1
@@ -714,6 +749,15 @@ _ctx_load_ctx_file() {
             /*) resolved_path="$path" ;;
             *) resolved_path="$dir_of_file/$path" ;;
         esac
+
+        if [ "$name" = "home" ]; then
+            if [ -n "$home_override" ]; then
+                printf 'ctx: error: duplicate "home:" directive in %s\n' "$ctx_file" >&2
+                return 1
+            fi
+            home_override="$resolved_path"
+            continue
+        fi
 
         if [ ! -d "$resolved_path" ]; then
             printf 'ctx: error: .ctx entry "%s" in %s points to missing directory: %s\n' "$name" "$ctx_file" "$resolved_path" >&2
@@ -756,7 +800,8 @@ _ctx_load_ctx_file() {
     export AI_CONTEXT="$ai_context"
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv"
 
-    _ctx_setup_copilot_home "$ai_context" "${resolved_dirs[@]}"
+    _ctx_setup_copilot_home "$ai_context" "$home_override" "${resolved_dirs[@]}"
+    _ctx_auto_load_home_override="$home_override"
 
     local shared_csv
     if [ "$ai_context" = "$first_name" ]; then

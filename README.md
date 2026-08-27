@@ -182,6 +182,11 @@ security:./local-instructions
   instructions that live outside your `ai-config` repo).
 - Every path is validated to exist; an invalid `.ctx` file leaves the
   previously active context untouched and prints a clear error.
+- An optional `home:<path>` line is a reserved directive, not a
+  profile/shared-context entry: it overrides where this `.ctx` file's
+  synthetic `COPILOT_HOME` is created (see [How it
+  works](#how-it-works) below) instead of the centralized default. See
+  [Choosing a custom COPILOT_HOME location](#choosing-a-custom-copilot_home-location).
 
 When your shell prompt renders after a `cd` / `Set-Location` into that
 directory (or any descendant of it), `AI_CONTEXT` (the names joined by `+`)
@@ -236,6 +241,37 @@ and exports `COPILOT_HOME` to point at it:
   directory on disk as a reusable cache. `ctx clear --all` additionally
   removes the *current* context's home directory (not other cached
   contexts' homes).
+
+#### Choosing a custom `COPILOT_HOME` location
+
+By default every context's synthetic `COPILOT_HOME` lives centrally under
+`~/.config/ctx/homes/<context-name>/` (or `$CTX_HOMES_ROOT` if set). If
+you'd rather keep it colocated with a specific project — easier to spot,
+inspect, or `.gitignore` — add a `home:<path>` line to that project's
+`.ctx` file:
+
+```
+home: .copilot-ctx
+review:/home/user/work/ai-config/profiles/review
+```
+
+- `home:` is a reserved directive name — you cannot also define a
+  profile/shared-context entry called `home`.
+- Only one `home:` line is allowed per `.ctx` file; a duplicate is an
+  error, same as any other invalid `.ctx` line.
+- The path resolves the same way as any other `.ctx` entry: relative to
+  the directory containing the `.ctx` file unless it's absolute. It does
+  **not** need to already exist — `ctx` creates it on demand, exactly like
+  the centralized default.
+- Add the custom directory to that project's `.gitignore` (e.g.
+  `.copilot-ctx/`) so the synthetic home never gets committed.
+- This only applies to `.ctx`-file activation. Manually invoking
+  `ctx <profile> [shared...]` (no `.ctx` file involved) always uses the
+  centralized default — there's no `.ctx` file to read a `home:` directive
+  from.
+- `ctx clear --all` looks up whichever location was actually used (custom
+  or centralized) for the context it's clearing, so cleanup works
+  correctly either way.
 
 #### Self-healing reconciliation (important)
 
