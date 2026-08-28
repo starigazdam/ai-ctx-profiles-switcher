@@ -417,6 +417,30 @@ EOF
     [[ "$output" == *"unsafe home"* ]]
 }
 
+@test "home validator rejects HOME and CTX_HOMES_ROOT themselves" {
+    run _ctx_validate_home_path "$HOME"
+    [ "$status" -ne 0 ]
+    run _ctx_validate_home_path "$CTX_HOMES_ROOT"
+    [ "$status" -ne 0 ]
+}
+
+@test "public ctx clear --all propagates unsafe home failure" {
+    _make_profile "review"
+    local victim="$HOME/public-victim-home"
+    local outside="$TEST_TMP/public-victim-outside"
+    mkdir -p "$outside"
+    ln -s "$outside" "$victim"
+    printf 'important\n' > "$outside/data.txt"
+    export AI_CONTEXT=review
+    export COPILOT_HOME="$victim"
+    _ctx_auto_load_home_override="$victim"
+
+    run ctx clear --all
+    [ "$status" -ne 0 ]
+    [ -f "$victim/data.txt" ]
+    [[ "$output" == *"unsafe home"* ]]
+}
+
 # --- Tests 15-18: "home:" directive, custom COPILOT_HOME location (#7) -----
 
 @test "home: directive in .ctx puts COPILOT_HOME at the custom location" {

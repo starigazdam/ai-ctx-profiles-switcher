@@ -465,4 +465,12 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Test-Path -LiteralPath (Join-Path $victim 'data.txt') | Should -BeTrue
         ($Error | Select-Object -First 1).ToString() | Should -Match 'unsafe home'
     }
+
+    It 'Test 26: home validator rejects HOME itself' {
+        { Get-CtxValidatedHomePath -Path $env:HOME } | Should -Throw '*unsafe home*'
+    }
+
+    It 'Test 27: home validator rejects CTX_HOMES_ROOT itself' {
+        { Get-CtxValidatedHomePath -Path $env:CTX_HOMES_ROOT } | Should -Throw '*unsafe home*'
+    }
 }

@@ -368,11 +368,13 @@ function Get-CtxValidatedHomePath {
     $canonical = [System.IO.Path]::GetFullPath($Path)
     $roots = @($env:HOME, (Get-CtxCopilotHomeRoot)) | Where-Object { $_ }
     $allowed = $false
+    $isAllowedRoot = $false
     foreach ($root in $roots) {
         $rootCanonical = [System.IO.Path]::GetFullPath($root).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-        if ($canonical -eq $rootCanonical -or $canonical.StartsWith($rootCanonical + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
+        if ($canonical -eq $rootCanonical) { $isAllowedRoot = $true }
+        if ($canonical -ne $rootCanonical -and $canonical.StartsWith($rootCanonical + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true }
     }
-    if (-not $allowed -or $canonical -eq [System.IO.Path]::GetPathRoot($canonical)) { throw "unsafe home: $Path is outside allowed roots or is a root" }
+    if ($isAllowedRoot -or -not $allowed -or $canonical -eq [System.IO.Path]::GetPathRoot($canonical)) { throw "unsafe home: $Path is outside allowed roots or is a root" }
     $prefix = [System.IO.Path]::GetPathRoot($canonical)
     foreach ($part in ($canonical.Substring($prefix.Length) -split '[\\/]')) {
         if (-not $part) { continue }

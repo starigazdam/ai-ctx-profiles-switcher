@@ -264,7 +264,7 @@ ctx() {
             ;;
         clear)
             _ctx_clear "$2"
-            return 0
+            return $?
             ;;
     esac
 
@@ -393,12 +393,14 @@ _ctx_validate_home_path() {
     case "$candidate" in /*) ;; *) printf 'ctx: error: unsafe home: path is not absolute: %s\n' "$candidate" >&2; return 1 ;; esac
     canonical="$(realpath -m -- "$candidate" 2>/dev/null)" || { printf 'ctx: error: unsafe home: %s\n' "$candidate" >&2; return 1; }
     [ "$canonical" != "/" ] || { printf 'ctx: error: unsafe home: filesystem root\n' >&2; return 1; }
-    local allowed=1
+    local allowed=1 root_is_candidate=0
     for root in "$HOME" "${CTX_HOMES_ROOT:-}"; do
         [ -n "$root" ] || continue
         root_canonical="$(realpath -m -- "$root" 2>/dev/null)" || continue
-        if [ "$canonical" = "$root_canonical" ] || [[ "$canonical" == "$root_canonical"/* ]]; then allowed=0; break; fi
+        if [ "$canonical" = "$root_canonical" ]; then root_is_candidate=1; fi
+        if [ "$canonical" != "$root_canonical" ] && [[ "$canonical" == "$root_canonical"/* ]]; then allowed=0; fi
     done
+    [ "$root_is_candidate" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is an allowed root, not a descendant\n' "$candidate" >&2; return 1; }
     [ "$allowed" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is outside HOME/CTX_HOMES_ROOT\n' "$candidate" >&2; return 1; }
     rest="${candidate#/}"; prefix="/"
     IFS='/' read -r -a parts <<< "$rest"
