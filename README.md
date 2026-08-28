@@ -263,6 +263,16 @@ review:/home/user/work/ai-config/profiles/review
   the directory containing the `.ctx` file unless it's absolute. It does
   **not** need to already exist — `ctx` creates it on demand, exactly like
   the centralized default.
+- For deletion safety, the resolved `home:` path must be a non-root
+  descendant of the user's home directory or `$CTX_HOMES_ROOT`. Paths that
+  are empty, escape with `..`, point outside those roots, or contain an
+  existing symlink/junction component are rejected before activation. This
+  intentionally means a project tree outside those roots cannot be selected
+  as a custom home; keep the project under `$HOME` if colocating is desired.
+- `ctx clear --all` deletes only the exact `COPILOT_HOME` selected for the
+  active context, after repeating the same validation. It refuses empty,
+  root, unselected, or symlink/junction targets and never recursively
+  follows an unsafe path.
 - Add the custom directory to that project's `.gitignore` (e.g.
   `.copilot-ctx/`) so the synthetic home never gets committed.
 - This only applies to `.ctx`-file activation. Manually invoking

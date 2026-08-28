@@ -177,6 +177,7 @@ function Clear-CtxContext {
     param([switch]$All)
 
     $prevContext = $env:AI_CONTEXT
+    $prevHome = $env:COPILOT_HOME
     Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
@@ -222,16 +223,18 @@ function Clear-CtxContext {
 
         if ($prevContext) {
             if ($Script:CtxAutoLoadHomeOverride) {
-                # This context was loaded from a .ctx file with a "home:"
-                # directive (issue #7): its synthetic COPILOT_HOME lives at
-                # that custom location, not the centralized default.
                 $homeDir = $Script:CtxAutoLoadHomeOverride
             } else {
                 $sanitized = Get-CtxSanitizedContextName -Name $prevContext
                 $homesRoot = Get-CtxCopilotHomeRoot
                 $homeDir = Join-Path $homesRoot $sanitized
             }
-            if (Test-Path -LiteralPath $homeDir -PathType Container) {
+            if (-not $prevHome -or $homeDir -ne $prevHome) {
+                Write-Error "ctx: error: refusing to remove unsafe or unselected home: $homeDir"
+                return
+            }
+            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_"; return }
+            if ((Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
                 Remove-Item -LiteralPath $homeDir -Recurse -Force
                 Write-Host "ctx: removed $homeDir"
             }
@@ -355,6 +358,31 @@ function Get-CtxSanitizedContextName {
     # character is replaced with '_' defensively.
     param([string]$Name)
     return ($Name -replace '[^A-Za-z0-9+._-]', '_')
+}
+
+function Get-CtxValidatedHomePath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Path]::IsPathRooted($Path)) {
+        throw "unsafe home: path must be absolute and non-empty"
+    }
+    $canonical = [System.IO.Path]::GetFullPath($Path)
+    $roots = @($env:HOME, (Get-CtxCopilotHomeRoot)) | Where-Object { $_ }
+    $allowed = $false
+    foreach ($root in $roots) {
+        $rootCanonical = [System.IO.Path]::GetFullPath($root).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        if ($canonical -eq $rootCanonical -or $canonical.StartsWith($rootCanonical + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
+    }
+    if (-not $allowed -or $canonical -eq [System.IO.Path]::GetPathRoot($canonical)) { throw "unsafe home: $Path is outside allowed roots or is a root" }
+    $prefix = [System.IO.Path]::GetPathRoot($canonical)
+    foreach ($part in ($canonical.Substring($prefix.Length) -split '[\\/]')) {
+        if (-not $part) { continue }
+        $prefix = Join-Path $prefix $part
+        if (Test-Path -LiteralPath $prefix) {
+            $item = Get-Item -LiteralPath $prefix -Force
+            if ($item.LinkType -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw "unsafe home: symlink or junction component in $Path" }
+        }
+    }
+    return $canonical
 }
 
 function Get-CtxCopilotHomeSharedFiles {
@@ -802,7 +830,7 @@ function Import-CtxFile {
                 Write-Error "ctx: error: duplicate `"home:`" directive in $CtxFile"
                 return $false
             }
-            $homeOverride = $resolvedPath
+            try { $homeOverride = Get-CtxValidatedHomePath -Path $resolvedPath } catch { Write-Error "ctx: error: $_"; return $false }
             continue
         }
 
