@@ -109,7 +109,7 @@ ctx review                     # activate the "review" profile
 ctx coding azure                # "coding" profile + "azure" shared context
 ctx review dotnet security      # profile + multiple shared contexts
 ctx current                     # show the active profile/shared/env vars
-ctx clear                       # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+ctx clear                       # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
 ctx clear --all                 # remove the current context home and generated artifacts
 ctx --help                      # usage help
 ```

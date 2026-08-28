@@ -45,8 +45,8 @@
         ctx coding azure               # "coding" profile + "azure" shared context
         ctx review dotnet security     # profile + multiple shared contexts
         ctx current                    # show active profile/shared/env vars
-        ctx clear                      # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-        ctx clear --all                # also delete generated settings.local.json / *.code-workspace
+        ctx clear                      # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
+        ctx clear --all                # remove the current context home and workspace artifacts
         ctx --help                     # usage help
 
     AUTO-LOADING (.ctx files)
