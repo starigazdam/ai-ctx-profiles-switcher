@@ -291,8 +291,8 @@ wrote through it), `ctx` copies that content onto the real
 `~/.copilot/<file>` first (so the most recent write is preserved), then
 deletes the plain file/dir and recreates the symlink. This makes the
 orphaning bug self-correcting rather than silently losing data — see
-[`plan-issue-1.md` section 3.4a](plan-issue-1.md) and
-[`empirical-test-symlink-hazard.md`](empirical-test-symlink-hazard.md) for
+[design history](docs/design-history-copilot-home.md) and
+[empirical hazard report](docs/empirical-symlink-hazard.md) for
 the full repro and design rationale.
 
 **Known limitation — concurrent contexts.** Reconciliation is only
@@ -326,7 +326,8 @@ and found broken or insufficient for Copilot CLI:
   is also global, not per-folder.
 
 See [GitHub issue #1](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/1)
-for the original investigation and implementation plan.
+for the original investigation. Detailed historical design notes are kept in
+[`docs/`](docs/).
 
 #### Migration note
 

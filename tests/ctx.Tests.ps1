@@ -1,7 +1,8 @@
 #Requires -Modules Pester
 <#
 .SYNOPSIS
-    Pester test suite for ctx.ps1 — mirrors tests/ctx.bats (plan-issue-1.md
+    Pester test suite for ctx.ps1 — mirrors tests/ctx.bats (historical design
+    in docs/design-history-copilot-home.md
     section 5.2), including COPILOT_HOME per-folder skill isolation and the
     3.4a self-healing reconciliation hazard fix.
 
