@@ -2,7 +2,10 @@
 
 Repo: `starigazdam/ai-ctx-profiles-switcher`
 Issue: https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/1
-Status: DRAFT — pending confirmation. No code changes made yet.
+Status: Historical design record — implemented by PR #3 and extended by PR #8.
+The checklist and test matrix below describe the design as it was proposed;
+the current implementation and user-facing behavior are documented in the
+repository README.
 
 ## 1. Goal
 

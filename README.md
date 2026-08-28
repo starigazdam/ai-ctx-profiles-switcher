@@ -110,7 +110,7 @@ ctx coding azure                # "coding" profile + "azure" shared context
 ctx review dotnet security      # profile + multiple shared contexts
 ctx current                     # show the active profile/shared/env vars
 ctx clear                       # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-ctx clear --all                 # also delete generated *.code-workspace
+ctx clear --all                 # remove the current context home and generated artifacts
 ctx --help                      # usage help
 ```
 
@@ -124,7 +124,7 @@ Shared  : dotnet, security
 
 AI_CONTEXT=review+dotnet+security
 
-COPILOT_HOME=<unset>
+COPILOT_HOME=/home/user/.config/ctx/homes/review+dotnet+security
 
 COPILOT_CUSTOM_INSTRUCTIONS_DIRS=
 /home/user/work/ai-config/profiles/review
