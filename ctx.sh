@@ -177,6 +177,7 @@ _ctx_clear() {
     # place for next time.
     local prev_context="${AI_CONTEXT:-}"
     local prev_home="${COPILOT_HOME:-}"
+    local cleanup_status=0
     unset AI_CONTEXT
     unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
     unset COPILOT_HOME
@@ -198,16 +199,24 @@ _ctx_clear() {
                 # but pre-existing files from older ctx versions are still
                 # removed here for one release. Safe to drop this block in
                 # a future release once users have upgraded.
-                rm -f "$settings_file"
-                printf 'ctx: removed %s\n' "$settings_file"
+                if rm -f "$settings_file"; then
+                    printf 'ctx: removed %s\n' "$settings_file"
+                else
+                    cleanup_status=$?
+                    printf 'ctx: error: failed to remove %s (status %s)\n' "$settings_file" "$cleanup_status" >&2
+                fi
             fi
 
             local folder_name workspace_file
             folder_name="$(basename "$dir_of_file")"
             workspace_file="$dir_of_file/$folder_name.code-workspace"
             if [ -f "$workspace_file" ]; then
-                rm -f "$workspace_file"
-                printf 'ctx: removed %s\n' "$workspace_file"
+                if rm -f "$workspace_file"; then
+                    printf 'ctx: removed %s\n' "$workspace_file"
+                else
+                    cleanup_status=$?
+                    printf 'ctx: error: failed to remove %s (status %s)\n' "$workspace_file" "$cleanup_status" >&2
+                fi
             fi
         else
             if [ -n "$prev_context" ]; then
@@ -250,6 +259,7 @@ _ctx_clear() {
     _ctx_auto_load_dir=""
     _ctx_auto_load_home_override=""
     printf 'AI context cleared.\n'
+    return "$cleanup_status"
 }
 
 ctx() {
