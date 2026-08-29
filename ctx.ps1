@@ -230,15 +230,15 @@ function Clear-CtxContext {
                 $homeDir = Join-Path $homesRoot $sanitized
             }
             if (-not $prevHome -or $homeDir -ne $prevHome) {
-                Write-Error "ctx: error: refusing to remove unsafe or unselected home: $homeDir"
+                Write-Error "ctx: error: refusing to remove unsafe or unselected home: $homeDir" -ErrorAction Continue
                 return $false
             }
-            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_"; return $false }
+            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_" -ErrorAction Continue; return $false }
             if ((Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
                 try {
                     Remove-Item -LiteralPath $homeDir -Recurse -Force -ErrorAction Stop
                 } catch {
-                    Write-Error "ctx: error: failed to remove $homeDir`: $_"
+                    Write-Error "ctx: error: failed to remove $homeDir`: $_" -ErrorAction Continue
                     return $false
                 }
                 Write-Host "ctx: removed $homeDir"
