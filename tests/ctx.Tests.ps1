@@ -513,6 +513,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
         $workspace = Join-Path $proj 'project-workspace.code-workspace'
         ((Get-Content -LiteralPath $workspace -Raw) | ConvertFrom-Json).generatedBy | Should -Be 'ctx'
+        $Script:CtxAutoLoadDir = $proj
         Clear-CtxContext -All | Should -BeTrue
         Test-Path -LiteralPath $workspace | Should -BeFalse
     }
