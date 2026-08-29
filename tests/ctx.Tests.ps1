@@ -507,7 +507,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
     It 'workspace created by ctx is marked and removed by clear --all' {
         $proj = Join-Path $Script:TestTmp 'project-workspace'
-        $profile = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $profile = Join-Path $env:AI_CONFIG_ROOT 'profileseview'
         New-Item -ItemType Directory -Path $proj, $profile -Force | Out-Null
         Update-CtxWorkspaceFile -BaseDir $proj -Names @('review') -Dirs @($profile)
 
@@ -523,6 +523,28 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $workspace = Join-Path $proj 'project-workspace-existing.code-workspace'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
         Set-Content -LiteralPath $workspace -Value '{"folders":[{"path":"."}],"settings":{}}'
+        $Script:CtxAutoLoadDir = $proj
+        Clear-CtxContext -All | Should -BeTrue
+        Test-Path -LiteralPath $workspace | Should -BeTrue
+    }
+
+    It 'symlink to a marked workspace is preserved by clear --all' {
+        $proj = Join-Path $Script:TestTmp 'project-workspace-symlink'
+        $target = Join-Path $Script:TestTmp 'marked.code-workspace'
+        $workspace = Join-Path $proj 'project-workspace-symlink.code-workspace'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath $target -Value '{"generatedBy":"ctx"}'
+        New-Item -ItemType SymbolicLink -Path $workspace -Target $target -ErrorAction Stop | Out-Null
+        $Script:CtxAutoLoadDir = $proj
+        Clear-CtxContext -All | Should -BeTrue
+        (Get-Item -LiteralPath $workspace -Force).LinkType | Should -Not -BeNullOrEmpty
+    }
+
+    It 'wrong-case workspace marker is preserved by clear --all' {
+        $proj = Join-Path $Script:TestTmp 'project-workspace-case'
+        $workspace = Join-Path $proj 'project-workspace-case.code-workspace'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath $workspace -Value '{"generatedBy":"CTX"}'
         $Script:CtxAutoLoadDir = $proj
         Clear-CtxContext -All | Should -BeTrue
         Test-Path -LiteralPath $workspace | Should -BeTrue

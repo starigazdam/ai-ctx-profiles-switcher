@@ -232,7 +232,7 @@ _ctx_clear() {
             local folder_name workspace_file
             folder_name="$(basename "$dir_of_file")"
             workspace_file="$dir_of_file/$folder_name.code-workspace"
-            if [ -f "$workspace_file" ]; then
+            if [ -f "$workspace_file" ] && [ ! -L "$workspace_file" ]; then
                 if _ctx_workspace_is_generated "$workspace_file"; then
                     if rm -f "$workspace_file"; then
                         printf 'ctx: removed %s\n' "$workspace_file"

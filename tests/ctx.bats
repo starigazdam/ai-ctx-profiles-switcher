@@ -568,3 +568,27 @@ EOF
     [ -f "$workspace" ]
     grep -q '"folders"' "$workspace"
 }
+
+@test "symlink to a marked workspace is preserved by clear --all" {
+    local proj="$HOME/project-workspace-symlink"
+    local target="$TEST_TMP/marked.code-workspace"
+    local workspace="$proj/project-workspace-symlink.code-workspace"
+    mkdir -p "$proj"
+    printf '{"generatedBy":"ctx"}\n' > "$target"
+    ln -s "$target" "$workspace"
+    unset AI_CONTEXT COPILOT_HOME
+    _ctx_auto_load_dir="$proj"
+    _ctx_clear --all
+    [ -L "$workspace" ]
+}
+
+@test "wrong-case workspace marker is preserved by clear --all" {
+    local proj="$HOME/project-workspace-case"
+    local workspace="$proj/project-workspace-case.code-workspace"
+    mkdir -p "$proj"
+    printf '{"generatedBy":"CTX"}\n' > "$workspace"
+    unset AI_CONTEXT COPILOT_HOME
+    _ctx_auto_load_dir="$proj"
+    _ctx_clear --all
+    [ -f "$workspace" ]
+}

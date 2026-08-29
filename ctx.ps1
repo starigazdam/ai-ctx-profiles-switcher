@@ -211,11 +211,12 @@ function Clear-CtxContext {
 
             $folderName = Split-Path -Leaf (Resolve-Path -LiteralPath $dirOfFile).Path
             $workspaceFile = Join-Path $dirOfFile "$folderName.code-workspace"
-            if (Test-Path -LiteralPath $workspaceFile -PathType Leaf) {
+            $workspaceItem = Get-Item -LiteralPath $workspaceFile -Force -ErrorAction SilentlyContinue
+            if ($workspaceItem -and ($workspaceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
                 $workspaceOwned = $false
                 try {
                     $workspaceData = Get-Content -LiteralPath $workspaceFile -Raw | ConvertFrom-Json
-                    $workspaceOwned = $workspaceData.generatedBy -eq 'ctx'
+                    $workspaceOwned = ($workspaceData.generatedBy -is [string]) -and ($workspaceData.generatedBy -ceq 'ctx')
                 } catch {
                     $workspaceOwned = $false
                 }
