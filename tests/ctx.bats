@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # Test suite for ctx.sh — COPILOT_HOME per-folder skill isolation (issue #1)
-# and general ctx.sh behavior, per plan-issue-1.md section 5.2.
+# and general ctx.sh behavior, per the historical design in
+# docs/design-history-copilot-home.md section 5.2.
 #
 # Every test runs against an isolated $HOME / $AI_CONFIG_ROOT / COPILOT_HOME
 # root (via CTX_COPILOT_DIR / CTX_HOMES_ROOT overrides) inside a temp dir, so
@@ -277,7 +278,7 @@ EOF
 
     # Simulate Copilot CLI's write-tmp + rename(tmp, path), which replaces
     # the symlink itself with a plain regular file (confirmed empirically,
-    # see empirical-test-symlink-hazard.md).
+    # see docs/empirical-symlink-hazard.md).
     rm -f "$home/settings.json"
     echo '{"bashEnv": true}' > "$home/settings.json"
     [ ! -L "$home/settings.json" ]

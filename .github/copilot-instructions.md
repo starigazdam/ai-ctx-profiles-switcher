@@ -65,7 +65,7 @@ Generated workspace files are intentionally **not cleaned on `ctx clear`**
 Copilot CLI writes files like `settings.json` via write-tmp + `rename()`,
 which **replaces a symlink at that path with a plain file** rather than
 writing through it (confirmed empirically against Copilot CLI 1.0.80 — see
-`empirical-test-symlink-hazard.md`). The reconciliation step in
+`docs/empirical-symlink-hazard.md`). The reconciliation step in
 `_ctx_setup_copilot_home` / `Set-CtxCopilotHome` runs on every activation
 and self-heals this: if a shared file/dir is no longer a symlink, its
 content is copied onto the real `~/.copilot/<file>` first, then the plain

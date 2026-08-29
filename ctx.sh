@@ -49,8 +49,8 @@
 #   ctx coding azure              # "coding" profile + "azure" shared context
 #   ctx review dotnet security    # profile + multiple shared contexts
 #   ctx current                   # show active profile/shared/env vars
-#   ctx clear                     # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-#   ctx clear --all               # also delete generated settings.local.json / *.code-workspace
+#   ctx clear                     # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
+#   ctx clear --all               # remove the current context home and workspace artifacts
 #   ctx --help                    # usage help
 #
 # --- AUTO-LOADING (.ctx files) -----------------------------------------
@@ -78,13 +78,10 @@
 #   SKILL DISCOVERY
 #   ----------------
 #   COPILOT_CUSTOM_INSTRUCTIONS_DIRS does not make Copilot CLI discover agent
-#   skills stored in your .ctx entries. To fix this, each resolved directory
-#   is checked for a ".github/skills" subfolder; any that are found are
-#   merged into the "skillDirectories" array of
-#   .github/copilot/settings.local.json next to the .ctx file (creating it
-#   if needed, requires python3). Existing keys/entries in that file are
-#   preserved, and nothing is removed when the context is cleared (run
-#   "ctx clear --all" to delete it instead).
+#   skills stored in your .ctx entries. ctx sets COPILOT_HOME to a per-context
+#   home and links the resolved .github/skills entries into its skills folder.
+#   Shared Copilot files are reconciled against the real Copilot home on every
+#   activation. The cache remains after ctx clear; ctx clear --all removes it.
 #
 #   VS CODE WORKSPACE
 #   ------------------
@@ -120,8 +117,8 @@ Usage:
   ctx <profile> [shared...]   Activate a profile with optional shared contexts
   ctx current                 Show the currently active context
   ctx clear                   Clear the currently active context
-  ctx clear --all             Also remove generated artifacts (settings.local.json,
-                               *.code-workspace) next to the nearest .ctx file
+  ctx clear --all             Remove the current context home and generated
+                               project artifacts next to the nearest .ctx file
   ctx --help | -h             Show this help message
 
 Examples:
