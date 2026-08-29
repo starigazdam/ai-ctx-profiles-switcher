@@ -178,6 +178,7 @@ function Clear-CtxContext {
 
     $prevContext = $env:AI_CONTEXT
     $prevHome = $env:COPILOT_HOME
+    $cleanupFailed = $false
     Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
@@ -199,15 +200,25 @@ function Clear-CtxContext {
             # release once users have upgraded.
             $settingsFile = Join-Path $dirOfFile '.github\copilot\settings.local.json'
             if (Test-Path -LiteralPath $settingsFile -PathType Leaf) {
-                Remove-Item -LiteralPath $settingsFile -Force
-                Write-Host "ctx: removed $settingsFile"
+                try {
+                    Remove-Item -LiteralPath $settingsFile -Force -ErrorAction Stop
+                    Write-Host "ctx: removed $settingsFile"
+                } catch {
+                    $cleanupFailed = $true
+                    Write-Error "ctx: error: failed to remove $settingsFile`: $_" -ErrorAction Continue
+                }
             }
 
             $folderName = Split-Path -Leaf (Resolve-Path -LiteralPath $dirOfFile).Path
             $workspaceFile = Join-Path $dirOfFile "$folderName.code-workspace"
             if (Test-Path -LiteralPath $workspaceFile -PathType Leaf) {
-                Remove-Item -LiteralPath $workspaceFile -Force
-                Write-Host "ctx: removed $workspaceFile"
+                try {
+                    Remove-Item -LiteralPath $workspaceFile -Force -ErrorAction Stop
+                    Write-Host "ctx: removed $workspaceFile"
+                } catch {
+                    $cleanupFailed = $true
+                    Write-Error "ctx: error: failed to remove $workspaceFile`: $_" -ErrorAction Continue
+                }
             }
         } else {
             if ($prevContext) {
@@ -249,7 +260,7 @@ function Clear-CtxContext {
     $Script:CtxAutoLoadDir = $null
     $Script:CtxAutoLoadHomeOverride = $null
     Write-Host "AI context cleared."
-    return $true
+    return (-not $cleanupFailed)
 }
 
 function ctx {

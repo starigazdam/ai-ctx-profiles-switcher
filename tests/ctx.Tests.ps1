@@ -479,7 +479,25 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq $victim }
     }
 
-    It 'Test 27: home validator rejects HOME itself' {
+    It 'Test 27: Clear-CtxContext -All propagates an artifact deletion failure' {
+        $dir = Join-Path $TestDrive 'artifact-failure'
+        $settingsDir = Join-Path $dir '.github\copilot'
+        New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
+        $settingsFile = Join-Path $settingsDir 'settings.local.json'
+        Set-Content -Path $settingsFile -Value '{}'
+        $Script:CtxAutoLoadDir = $dir
+        Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        Mock Remove-Item { }
+        Mock Remove-Item { throw 'simulated artifact deletion failure' } -ParameterFilter { $LiteralPath -eq $settingsFile }
+
+        $result = Clear-CtxContext -All 2>$null
+
+        $result | Should -BeFalse
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq $settingsFile }
+    }
+
+    It 'Test 28: home validator rejects HOME itself' {
         { Get-CtxValidatedHomePath -Path $env:HOME } | Should -Throw '*unsafe home*'
     }
 
