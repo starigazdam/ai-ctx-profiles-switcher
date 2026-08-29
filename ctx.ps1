@@ -177,6 +177,8 @@ function Clear-CtxContext {
     param([switch]$All)
 
     $prevContext = $env:AI_CONTEXT
+    $prevHome = $env:COPILOT_HOME
+    $cleanupFailed = $false
     Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
@@ -198,15 +200,25 @@ function Clear-CtxContext {
             # release once users have upgraded.
             $settingsFile = Join-Path $dirOfFile '.github\copilot\settings.local.json'
             if (Test-Path -LiteralPath $settingsFile -PathType Leaf) {
-                Remove-Item -LiteralPath $settingsFile -Force
-                Write-Host "ctx: removed $settingsFile"
+                try {
+                    Remove-Item -LiteralPath $settingsFile -Force -ErrorAction Stop
+                    Write-Host "ctx: removed $settingsFile"
+                } catch {
+                    $cleanupFailed = $true
+                    Write-Error "ctx: error: failed to remove $settingsFile`: $_" -ErrorAction Continue
+                }
             }
 
             $folderName = Split-Path -Leaf (Resolve-Path -LiteralPath $dirOfFile).Path
             $workspaceFile = Join-Path $dirOfFile "$folderName.code-workspace"
             if (Test-Path -LiteralPath $workspaceFile -PathType Leaf) {
-                Remove-Item -LiteralPath $workspaceFile -Force
-                Write-Host "ctx: removed $workspaceFile"
+                try {
+                    Remove-Item -LiteralPath $workspaceFile -Force -ErrorAction Stop
+                    Write-Host "ctx: removed $workspaceFile"
+                } catch {
+                    $cleanupFailed = $true
+                    Write-Error "ctx: error: failed to remove $workspaceFile`: $_" -ErrorAction Continue
+                }
             }
         } else {
             if ($prevContext) {
@@ -222,17 +234,24 @@ function Clear-CtxContext {
 
         if ($prevContext) {
             if ($Script:CtxAutoLoadHomeOverride) {
-                # This context was loaded from a .ctx file with a "home:"
-                # directive (issue #7): its synthetic COPILOT_HOME lives at
-                # that custom location, not the centralized default.
                 $homeDir = $Script:CtxAutoLoadHomeOverride
             } else {
                 $sanitized = Get-CtxSanitizedContextName -Name $prevContext
                 $homesRoot = Get-CtxCopilotHomeRoot
                 $homeDir = Join-Path $homesRoot $sanitized
             }
-            if (Test-Path -LiteralPath $homeDir -PathType Container) {
-                Remove-Item -LiteralPath $homeDir -Recurse -Force
+            if (-not $prevHome -or $homeDir -ne $prevHome) {
+                Write-Error "ctx: error: refusing to remove unsafe or unselected home: $homeDir" -ErrorAction Continue
+                return $false
+            }
+            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_" -ErrorAction Continue; return $false }
+            if ((Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
+                try {
+                    Remove-Item -LiteralPath $homeDir -Recurse -Force -ErrorAction Stop
+                } catch {
+                    Write-Error "ctx: error: failed to remove $homeDir`: $_" -ErrorAction Continue
+                    return $false
+                }
                 Write-Host "ctx: removed $homeDir"
             }
         }
@@ -241,6 +260,7 @@ function Clear-CtxContext {
     $Script:CtxAutoLoadDir = $null
     $Script:CtxAutoLoadHomeOverride = $null
     Write-Host "AI context cleared."
+    return (-not $cleanupFailed)
 }
 
 function ctx {
@@ -265,8 +285,7 @@ function ctx {
         }
         'clear' {
             $all = $Contexts.Count -gt 1 -and $Contexts[1] -eq '--all'
-            Clear-CtxContext -All:$all
-            return
+            return (Clear-CtxContext -All:$all)
         }
     }
 
@@ -355,6 +374,33 @@ function Get-CtxSanitizedContextName {
     # character is replaced with '_' defensively.
     param([string]$Name)
     return ($Name -replace '[^A-Za-z0-9+._-]', '_')
+}
+
+function Get-CtxValidatedHomePath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Path]::IsPathRooted($Path)) {
+        throw "unsafe home: path must be absolute and non-empty"
+    }
+    $canonical = [System.IO.Path]::GetFullPath($Path)
+    $roots = @($env:HOME, (Get-CtxCopilotHomeRoot)) | Where-Object { $_ }
+    $allowed = $false
+    $isAllowedRoot = $false
+    foreach ($root in $roots) {
+        $rootCanonical = [System.IO.Path]::GetFullPath($root).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        if ($canonical -eq $rootCanonical) { $isAllowedRoot = $true }
+        if ($canonical -ne $rootCanonical -and $canonical.StartsWith($rootCanonical + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true }
+    }
+    if ($isAllowedRoot -or -not $allowed -or $canonical -eq [System.IO.Path]::GetPathRoot($canonical)) { throw "unsafe home: $Path is outside allowed roots or is a root" }
+    $prefix = [System.IO.Path]::GetPathRoot($canonical)
+    foreach ($part in ($canonical.Substring($prefix.Length) -split '[\\/]')) {
+        if (-not $part) { continue }
+        $prefix = Join-Path $prefix $part
+        if (Test-Path -LiteralPath $prefix) {
+            $item = Get-Item -LiteralPath $prefix -Force
+            if ($item.LinkType -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw "unsafe home: symlink or junction component in $Path" }
+        }
+    }
+    return $canonical
 }
 
 function Get-CtxCopilotHomeSharedFiles {
@@ -802,7 +848,7 @@ function Import-CtxFile {
                 Write-Error "ctx: error: duplicate `"home:`" directive in $CtxFile"
                 return $false
             }
-            $homeOverride = $resolvedPath
+            try { $homeOverride = Get-CtxValidatedHomePath -Path $resolvedPath } catch { Write-Error "ctx: error: $_"; return $false }
             continue
         }
 

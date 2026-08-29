@@ -176,6 +176,8 @@ _ctx_clear() {
     # "<folder-name>.code-workspace" file), instead of just leaving them in
     # place for next time.
     local prev_context="${AI_CONTEXT:-}"
+    local prev_home="${COPILOT_HOME:-}"
+    local cleanup_status=0
     unset AI_CONTEXT
     unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
     unset COPILOT_HOME
@@ -197,16 +199,24 @@ _ctx_clear() {
                 # but pre-existing files from older ctx versions are still
                 # removed here for one release. Safe to drop this block in
                 # a future release once users have upgraded.
-                rm -f "$settings_file"
-                printf 'ctx: removed %s\n' "$settings_file"
+                if rm -f "$settings_file"; then
+                    printf 'ctx: removed %s\n' "$settings_file"
+                else
+                    cleanup_status=$?
+                    printf 'ctx: error: failed to remove %s (status %s)\n' "$settings_file" "$cleanup_status" >&2
+                fi
             fi
 
             local folder_name workspace_file
             folder_name="$(basename "$dir_of_file")"
             workspace_file="$dir_of_file/$folder_name.code-workspace"
             if [ -f "$workspace_file" ]; then
-                rm -f "$workspace_file"
-                printf 'ctx: removed %s\n' "$workspace_file"
+                if rm -f "$workspace_file"; then
+                    printf 'ctx: removed %s\n' "$workspace_file"
+                else
+                    cleanup_status=$?
+                    printf 'ctx: error: failed to remove %s (status %s)\n' "$workspace_file" "$cleanup_status" >&2
+                fi
             fi
         else
             if [ -n "$prev_context" ]; then
@@ -223,17 +233,23 @@ _ctx_clear() {
         if [ -n "$prev_context" ]; then
             local sanitized homes_root home_dir
             if [ -n "$_ctx_auto_load_home_override" ]; then
-                # This context was loaded from a .ctx file with a "home:"
-                # directive (issue #7): its synthetic COPILOT_HOME lives at
-                # that custom location, not the centralized default.
                 home_dir="$_ctx_auto_load_home_override"
             else
                 sanitized="$(_ctx_sanitize_context_name "$prev_context")"
                 homes_root="$(_ctx_copilot_home_root)"
                 home_dir="$homes_root/$sanitized"
             fi
-            if [ -d "$home_dir" ]; then
-                rm -rf "$home_dir"
+            if [ -z "$prev_home" ] || [ "$home_dir" != "$prev_home" ] || ! _ctx_validate_home_path "$home_dir" >/dev/null; then
+                printf 'ctx: error: refusing to remove unsafe or unselected home: %s\n' "$home_dir" >&2
+                return 1
+            fi
+            if [ -d "$home_dir" ] && [ ! -L "$home_dir" ]; then
+                local remove_status=0
+                rm -rf -- "$home_dir" || remove_status=$?
+                if [ "$remove_status" -ne 0 ]; then
+                    printf 'ctx: error: failed to remove %s (status %s)\n' "$home_dir" "$remove_status" >&2
+                    return "$remove_status"
+                fi
                 printf 'ctx: removed %s\n' "$home_dir"
             fi
         fi
@@ -243,6 +259,7 @@ _ctx_clear() {
     _ctx_auto_load_dir=""
     _ctx_auto_load_home_override=""
     printf 'AI context cleared.\n'
+    return "$cleanup_status"
 }
 
 ctx() {
@@ -262,7 +279,7 @@ ctx() {
             ;;
         clear)
             _ctx_clear "$2"
-            return 0
+            return $?
             ;;
     esac
 
@@ -383,7 +400,34 @@ _ctx_sanitize_context_name() {
     printf '%s' "$name" | tr -c 'A-Za-z0-9+._-' '_'
 }
 
-# List of files (relative to a COPILOT_HOME dir / ~/.copilot) that get
+_ctx_validate_home_path() {
+    # Print the canonical, safe path. Custom homes may only be descendants
+    # of HOME or CTX_HOMES_ROOT; existing symlink components are forbidden.
+    local candidate="$1" canonical root root_canonical part prefix rest
+    [ -n "$candidate" ] || { printf 'ctx: error: unsafe home: empty path\n' >&2; return 1; }
+    case "$candidate" in /*) ;; *) printf 'ctx: error: unsafe home: path is not absolute: %s\n' "$candidate" >&2; return 1 ;; esac
+    canonical="$(realpath -m -- "$candidate" 2>/dev/null)" || { printf 'ctx: error: unsafe home: %s\n' "$candidate" >&2; return 1; }
+    [ "$canonical" != "/" ] || { printf 'ctx: error: unsafe home: filesystem root\n' >&2; return 1; }
+    local allowed=1 root_is_candidate=0
+    for root in "$HOME" "${CTX_HOMES_ROOT:-}"; do
+        [ -n "$root" ] || continue
+        root_canonical="$(realpath -m -- "$root" 2>/dev/null)" || continue
+        if [ "$canonical" = "$root_canonical" ]; then root_is_candidate=1; fi
+        if [ "$canonical" != "$root_canonical" ] && [[ "$canonical" == "$root_canonical"/* ]]; then allowed=0; fi
+    done
+    [ "$root_is_candidate" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is an allowed root, not a descendant\n' "$candidate" >&2; return 1; }
+    [ "$allowed" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is outside HOME/CTX_HOMES_ROOT\n' "$candidate" >&2; return 1; }
+    rest="${candidate#/}"; prefix="/"
+    IFS='/' read -r -a parts <<< "$rest"
+    for part in "${parts[@]}"; do
+        [ -n "$part" ] || continue
+        prefix="${prefix%/}/$part"
+        [ ! -L "$prefix" ] || { printf 'ctx: error: unsafe home: symlink component in %s\n' "$candidate" >&2; return 1; }
+    done
+    printf '%s\n' "$canonical"
+}
+
+# List of files
 # symlinked back to the real ~/.copilot so global auth/config/session
 # history keep working identically across all contexts. This is also the
 # authoritative list the 3.4a reconciliation loop walks on every
@@ -752,7 +796,9 @@ _ctx_load_ctx_file() {
                 printf 'ctx: error: duplicate "home:" directive in %s\n' "$ctx_file" >&2
                 return 1
             fi
-            home_override="$resolved_path"
+            if ! home_override="$(_ctx_validate_home_path "$resolved_path")"; then
+                return 1
+            fi
             continue
         fi
 

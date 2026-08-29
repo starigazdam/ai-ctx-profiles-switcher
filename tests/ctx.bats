@@ -335,12 +335,133 @@ EOF
     [ "$real_before_ino" = "$real_after_ino" ]
 }
 
+# --- Tests 20-26: safe custom home validation (issue #12) -------------------
+
+@test "home: accepts a canonical nested path under HOME" {
+    _make_profile "review" "review-skill"
+    local proj="$HOME/project-home-valid"
+    local custom="$HOME/.config/ctx/homes/project-valid/nested"
+    mkdir -p "$proj"
+    printf 'home:%s\nreview:%s\n' "$custom" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    _ctx_load_ctx_file "$proj/.ctx"
+    [ "$COPILOT_HOME" = "$custom" ]
+    [ -d "$custom" ]
+}
+
+@test "home: rejects traversal outside HOME" {
+    _make_profile "review"
+    local proj="$TEST_TMP/project-home-traversal"
+    mkdir -p "$proj"
+    printf 'home:../outside\nreview:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    run _ctx_load_ctx_file "$proj/.ctx"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsafe home"* ]]
+    [ -z "${AI_CONTEXT:-}" ]
+    [ ! -d "$TEST_TMP/outside" ]
+}
+
+@test "home: rejects an absolute path outside allowed roots" {
+    _make_profile "review"
+    local proj="$TEST_TMP/project-home-absolute"
+    mkdir -p "$proj"
+    printf 'home:%s\nreview:%s\n' "$TEST_TMP/unrelated" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    run _ctx_load_ctx_file "$proj/.ctx"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsafe home"* ]]
+    [ ! -d "$TEST_TMP/unrelated" ]
+}
+
+@test "home: rejects filesystem root and empty paths" {
+    _make_profile "review"
+    local proj="$TEST_TMP/project-home-boundaries"
+    mkdir -p "$proj"
+    for value in / ''; do
+        printf 'home:%s\nreview:%s\n' "$value" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+        run _ctx_load_ctx_file "$proj/.ctx"
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"unsafe home"* || "$output" == *"invalid .ctx line"* ]]
+    done
+}
+
+@test "home: rejects symlink escape outside allowed roots" {
+    _make_profile "review"
+    local proj="$HOME/project-home-link"
+    local outside="$TEST_TMP/outside-link"
+    mkdir -p "$proj" "$outside"
+    ln -s "$outside" "$proj/link"
+    printf 'home:%s\nreview:%s\n' "$proj/link/child" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    run _ctx_load_ctx_file "$proj/.ctx"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsafe home"* ]]
+    [ ! -d "$outside/child" ]
+}
+
+@test "ctx clear --all refuses an unsafe selected home and preserves it" {
+    _make_profile "review"
+    local victim="$HOME/victim-home"
+    local outside="$TEST_TMP/victim-outside"
+    mkdir -p "$outside"
+    ln -s "$outside" "$victim"
+    printf 'important\n' > "$outside/data.txt"
+    export AI_CONTEXT=review
+    export COPILOT_HOME="$victim"
+    _ctx_auto_load_home_override="$victim"
+
+    run _ctx_clear --all
+    [ "$status" -ne 0 ]
+    [ -f "$victim/data.txt" ]
+    [[ "$output" == *"unsafe home"* ]]
+}
+
+@test "home validator rejects HOME and CTX_HOMES_ROOT themselves" {
+    run _ctx_validate_home_path "$HOME"
+    [ "$status" -ne 0 ]
+    run _ctx_validate_home_path "$CTX_HOMES_ROOT"
+    [ "$status" -ne 0 ]
+}
+
+@test "public ctx clear --all propagates unsafe home failure" {
+    _make_profile "review"
+    local victim="$HOME/public-victim-home"
+    local outside="$TEST_TMP/public-victim-outside"
+    mkdir -p "$outside"
+    ln -s "$outside" "$victim"
+    printf 'important\n' > "$outside/data.txt"
+    export AI_CONTEXT=review
+    export COPILOT_HOME="$victim"
+    _ctx_auto_load_home_override="$victim"
+
+    run ctx clear --all
+    [ "$status" -ne 0 ]
+    [ -f "$victim/data.txt" ]
+    [[ "$output" == *"unsafe home"* ]]
+}
+
+@test "ctx clear --all propagates a valid-home deletion failure" {
+    _make_profile "review"
+    local victim="$CTX_HOMES_ROOT/review"
+    mkdir -p "$victim"
+    export AI_CONTEXT=review
+    export COPILOT_HOME="$victim"
+
+    rm() { return 42; }
+    run ctx clear --all
+    unset -f rm
+
+    [ "$status" -eq 42 ]
+    [[ "$output" != *"ctx: removed $victim"* ]]
+}
+
 # --- Tests 15-18: "home:" directive, custom COPILOT_HOME location (#7) -----
 
 @test "home: directive in .ctx puts COPILOT_HOME at the custom location" {
     _make_profile "review" "review-skill"
 
-    local proj="$TEST_TMP/project-home"
+    local proj="$HOME/project-home"
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
 home: .copilot-ctx
@@ -374,8 +495,8 @@ EOF
 @test "home: directive with absolute path is used as-is" {
     _make_profile "review" "review-skill"
 
-    local proj="$TEST_TMP/project-home-abs"
-    local custom_home="$TEST_TMP/custom-copilot-home"
+    local proj="$HOME/project-home-abs"
+    local custom_home="$HOME/custom-copilot-home"
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
 home: $custom_home
@@ -391,7 +512,7 @@ EOF
 @test "ctx clear --all removes the custom home: location, not the centralized one" {
     _make_profile "review" "review-skill"
 
-    local proj="$TEST_TMP/project-home-clear"
+    local proj="$HOME/project-home-clear"
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
 home: .copilot-ctx
@@ -409,7 +530,7 @@ EOF
 }
 
 @test "duplicate home: directive in .ctx is rejected" {
-    local proj="$TEST_TMP/project-home-dup"
+    local proj="$HOME/project-home-dup"
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
 home: .copilot-ctx-a

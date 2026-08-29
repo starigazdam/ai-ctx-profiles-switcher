@@ -39,3 +39,22 @@ jobs:
           $cfg.Run.Exit = $true
           $cfg.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $cfg
+
+  windows-pester:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck -MinimumVersion 5.0
+
+      - name: Run Pester suite on native Windows
+        shell: pwsh
+        run: |
+          Import-Module Pester -MinimumVersion 5.0
+          $cfg = New-PesterConfiguration
+          $cfg.Run.Path = 'tests/ctx.Tests.ps1'
+          $cfg.Run.Exit = $true
+          $cfg.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $cfg
