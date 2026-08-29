@@ -470,6 +470,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $victim = Join-Path $env:CTX_HOMES_ROOT 'review'
         New-Item -ItemType Directory -Path $victim -Force | Out-Null
         $env:AI_CONTEXT = 'review'; $env:COPILOT_HOME = $victim
+        Mock Remove-Item { } 
         Mock Remove-Item { throw 'simulated deletion failure' } -ParameterFilter { $LiteralPath -eq $victim }
 
         $result = Clear-CtxContext -All 2>$null

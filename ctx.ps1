@@ -176,7 +176,6 @@ function Show-CtxCurrent {
 function Clear-CtxContext {
     param([switch]$All)
 
-    $ErrorActionPreference = 'Stop'
     $prevContext = $env:AI_CONTEXT
     $prevHome = $env:COPILOT_HOME
     Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
