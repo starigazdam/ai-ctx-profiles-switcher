@@ -466,11 +466,23 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         ($Error | Select-Object -First 1).ToString() | Should -Match 'unsafe home'
     }
 
-    It 'Test 26: home validator rejects HOME itself' {
+    It 'Test 26: Clear-CtxContext -All propagates a valid-home deletion failure' {
+        $victim = Join-Path $env:CTX_HOMES_ROOT 'review'
+        New-Item -ItemType Directory -Path $victim -Force | Out-Null
+        $env:AI_CONTEXT = 'review'; $env:COPILOT_HOME = $victim
+        Mock Remove-Item { throw 'simulated deletion failure' } -ParameterFilter { $LiteralPath -eq $victim }
+
+        $result = Clear-CtxContext -All 2>$null
+
+        $result | Should -BeFalse
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq $victim }
+    }
+
+    It 'Test 27: home validator rejects HOME itself' {
         { Get-CtxValidatedHomePath -Path $env:HOME } | Should -Throw '*unsafe home*'
     }
 
-    It 'Test 27: home validator rejects CTX_HOMES_ROOT itself' {
+    It 'Test 28: home validator rejects CTX_HOMES_ROOT itself' {
         { Get-CtxValidatedHomePath -Path $env:CTX_HOMES_ROOT } | Should -Throw '*unsafe home*'
     }
 }

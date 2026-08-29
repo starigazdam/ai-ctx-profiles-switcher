@@ -176,6 +176,7 @@ function Show-CtxCurrent {
 function Clear-CtxContext {
     param([switch]$All)
 
+    $ErrorActionPreference = 'Stop'
     $prevContext = $env:AI_CONTEXT
     $prevHome = $env:COPILOT_HOME
     Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
@@ -231,11 +232,16 @@ function Clear-CtxContext {
             }
             if (-not $prevHome -or $homeDir -ne $prevHome) {
                 Write-Error "ctx: error: refusing to remove unsafe or unselected home: $homeDir"
-                return
+                return $false
             }
-            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_"; return }
+            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_"; return $false }
             if ((Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
-                Remove-Item -LiteralPath $homeDir -Recurse -Force
+                try {
+                    Remove-Item -LiteralPath $homeDir -Recurse -Force -ErrorAction Stop
+                } catch {
+                    Write-Error "ctx: error: failed to remove $homeDir`: $_"
+                    return $false
+                }
                 Write-Host "ctx: removed $homeDir"
             }
         }
@@ -244,6 +250,7 @@ function Clear-CtxContext {
     $Script:CtxAutoLoadDir = $null
     $Script:CtxAutoLoadHomeOverride = $null
     Write-Host "AI context cleared."
+    return $true
 }
 
 function ctx {
@@ -268,8 +275,7 @@ function ctx {
         }
         'clear' {
             $all = $Contexts.Count -gt 1 -and $Contexts[1] -eq '--all'
-            Clear-CtxContext -All:$all
-            return
+            return (Clear-CtxContext -All:$all)
         }
     }
 

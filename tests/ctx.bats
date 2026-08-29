@@ -441,6 +441,21 @@ EOF
     [[ "$output" == *"unsafe home"* ]]
 }
 
+@test "ctx clear --all propagates a valid-home deletion failure" {
+    _make_profile "review"
+    local victim="$CTX_HOMES_ROOT/review"
+    mkdir -p "$victim"
+    export AI_CONTEXT=review
+    export COPILOT_HOME="$victim"
+
+    rm() { return 42; }
+    run ctx clear --all
+    unset -f rm
+
+    [ "$status" -eq 42 ]
+    [[ "$output" != *"ctx: removed $victim"* ]]
+}
+
 # --- Tests 15-18: "home:" directive, custom COPILOT_HOME location (#7) -----
 
 @test "home: directive in .ctx puts COPILOT_HOME at the custom location" {

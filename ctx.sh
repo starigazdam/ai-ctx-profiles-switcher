@@ -235,7 +235,12 @@ _ctx_clear() {
                 return 1
             fi
             if [ -d "$home_dir" ] && [ ! -L "$home_dir" ]; then
-                rm -rf -- "$home_dir"
+                local remove_status=0
+                rm -rf -- "$home_dir" || remove_status=$?
+                if [ "$remove_status" -ne 0 ]; then
+                    printf 'ctx: error: failed to remove %s (status %s)\n' "$home_dir" "$remove_status" >&2
+                    return "$remove_status"
+                fi
                 printf 'ctx: removed %s\n' "$home_dir"
             fi
         fi
