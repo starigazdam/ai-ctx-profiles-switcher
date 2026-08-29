@@ -507,8 +507,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
     It 'workspace created by ctx is marked and removed by clear --all' {
         $proj = Join-Path $Script:TestTmp 'project-workspace'
-        $profile = Join-Path $env:AI_CONFIG_ROOT 'profiles
-eview'
+        $profile = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
         New-Item -ItemType Directory -Path $proj, $profile -Force | Out-Null
         Update-CtxWorkspaceFile -BaseDir $proj -Names @('review') -Dirs @($profile)
 
