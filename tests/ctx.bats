@@ -542,3 +542,29 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"duplicate"* ]]
 }
+
+@test "generated workspace is marked and removed by clear --all" {
+    local proj="$HOME/project-workspace"
+    local profile="$AI_CONFIG_ROOT/profiles/review"
+    mkdir -p "$proj" "$profile"
+    _ctx_update_workspace_file "$proj" review "$profile"
+
+    local workspace="$proj/project-workspace.code-workspace"
+    grep -q '"generatedBy": "ctx"' "$workspace"
+    unset AI_CONTEXT COPILOT_HOME
+    _ctx_auto_load_dir="$proj"
+    _ctx_clear --all
+    [ ! -e "$workspace" ]
+}
+
+@test "pre-existing unmarked workspace is preserved by clear --all" {
+    local proj="$HOME/project-workspace-existing"
+    local workspace="$proj/project-workspace-existing.code-workspace"
+    mkdir -p "$proj"
+    printf '{"folders":[{"path":"."}],"settings":{}}\n' > "$workspace"
+    unset AI_CONTEXT COPILOT_HOME
+    _ctx_auto_load_dir="$proj"
+    _ctx_clear --all
+    [ -f "$workspace" ]
+    grep -q '"folders"' "$workspace"
+}

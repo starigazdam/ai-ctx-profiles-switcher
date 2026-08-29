@@ -50,7 +50,7 @@
 #   ctx review dotnet security    # profile + multiple shared contexts
 #   ctx current                   # show active profile/shared/env vars
 #   ctx clear                     # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
-#   ctx clear --all               # remove the current context home and workspace artifacts
+#   ctx clear --all               # remove the current context home and owned workspace artifacts
 #   ctx --help                    # usage help
 #
 # --- AUTO-LOADING (.ctx files) -----------------------------------------
@@ -170,6 +170,28 @@ _ctx_current() {
     _ctx_print_status "$profile" "$shared_csv" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}"
 }
 
+_ctx_workspace_is_generated() {
+    local workspace_file="$1" python_bin=""
+    if command -v python3 >/dev/null 2>&1; then
+        python_bin="python3"
+    elif command -v python >/dev/null 2>&1; then
+        python_bin="python"
+    else
+        return 1
+    fi
+    "$python_bin" - "$workspace_file" <<'PYEOF'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        workspace = json.load(f)
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(workspace, dict) and workspace.get("generatedBy") == "ctx" else 1)
+PYEOF
+}
+
 _ctx_clear() {
     # $1: optional "--all" to also delete the artifacts ctx generates next
     # to the nearest .ctx file (.github/copilot/settings.local.json and the
@@ -211,11 +233,15 @@ _ctx_clear() {
             folder_name="$(basename "$dir_of_file")"
             workspace_file="$dir_of_file/$folder_name.code-workspace"
             if [ -f "$workspace_file" ]; then
-                if rm -f "$workspace_file"; then
-                    printf 'ctx: removed %s\n' "$workspace_file"
+                if _ctx_workspace_is_generated "$workspace_file"; then
+                    if rm -f "$workspace_file"; then
+                        printf 'ctx: removed %s\n' "$workspace_file"
+                    else
+                        cleanup_status=$?
+                        printf 'ctx: error: failed to remove %s (status %s)\n' "$workspace_file" "$cleanup_status" >&2
+                    fi
                 else
-                    cleanup_status=$?
-                    printf 'ctx: error: failed to remove %s (status %s)\n' "$workspace_file" "$cleanup_status" >&2
+                    printf 'ctx: preserved unowned workspace %s\n' "$workspace_file" >&2
                 fi
             fi
         else
@@ -694,11 +720,13 @@ _ctx_update_workspace_file() {
 
     "$python_bin" - "$workspace_file" "$folder_name" "$@" <<'PYEOF'
 import json
+import os
 import sys
 
 workspace_file = sys.argv[1]
 folder_name = sys.argv[2]
 rest = sys.argv[3:]
+workspace_existed = os.path.exists(workspace_file)
 
 pairs = [(rest[i], rest[i + 1]) for i in range(0, len(rest), 2)]
 
@@ -729,6 +757,8 @@ ctx_entries = [{"path": path, "name": f"ctx: {name}"} for name, path in pairs]
 
 workspace["folders"] = [root_entry] + ctx_entries + user_folders
 workspace.setdefault("settings", {})
+if not workspace_existed:
+    workspace["generatedBy"] = "ctx"
 
 with open(workspace_file, "w", encoding="utf-8") as f:
     json.dump(workspace, f, indent=2)

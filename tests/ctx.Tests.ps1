@@ -501,7 +501,30 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         { Get-CtxValidatedHomePath -Path $env:HOME } | Should -Throw '*unsafe home*'
     }
 
-    It 'Test 28: home validator rejects CTX_HOMES_ROOT itself' {
+    It 'Test 29: home validator rejects CTX_HOMES_ROOT itself' {
         { Get-CtxValidatedHomePath -Path $env:CTX_HOMES_ROOT } | Should -Throw '*unsafe home*'
+    }
+
+    It 'workspace created by ctx is marked and removed by clear --all' {
+        $proj = Join-Path $Script:TestTmp 'project-workspace'
+        $profile = Join-Path $env:AI_CONFIG_ROOT 'profiles
+eview'
+        New-Item -ItemType Directory -Path $proj, $profile -Force | Out-Null
+        Update-CtxWorkspaceFile -BaseDir $proj -Names @('review') -Dirs @($profile)
+
+        $workspace = Join-Path $proj 'project-workspace.code-workspace'
+        ((Get-Content -LiteralPath $workspace -Raw) | ConvertFrom-Json).generatedBy | Should -Be 'ctx'
+        Clear-CtxContext -All | Should -BeTrue
+        Test-Path -LiteralPath $workspace | Should -BeFalse
+    }
+
+    It 'pre-existing unmarked workspace is preserved by clear --all' {
+        $proj = Join-Path $Script:TestTmp 'project-workspace-existing'
+        $workspace = Join-Path $proj 'project-workspace-existing.code-workspace'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath $workspace -Value '{"folders":[{"path":"."}],"settings":{}}'
+        $Script:CtxAutoLoadDir = $proj
+        Clear-CtxContext -All | Should -BeTrue
+        Test-Path -LiteralPath $workspace | Should -BeTrue
     }
 }
