@@ -212,7 +212,9 @@ function Clear-CtxContext {
             $folderName = Split-Path -Leaf (Resolve-Path -LiteralPath $dirOfFile).Path
             $workspaceFile = Join-Path $dirOfFile "$folderName.code-workspace"
             $workspaceItem = Get-Item -LiteralPath $workspaceFile -Force -ErrorAction SilentlyContinue
-            if ($workspaceItem -and ($workspaceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            if ($workspaceItem -and ($workspaceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                Write-Warning "ctx: preserved linked workspace $workspaceFile"
+            } elseif ($workspaceItem) {
                 $workspaceOwned = $false
                 try {
                     $workspaceData = Get-Content -LiteralPath $workspaceFile -Raw | ConvertFrom-Json

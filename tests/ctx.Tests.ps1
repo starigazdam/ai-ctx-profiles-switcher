@@ -507,7 +507,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
     It 'workspace created by ctx is marked and removed by clear --all' {
         $proj = Join-Path $Script:TestTmp 'project-workspace'
-        $profile = Join-Path $env:AI_CONFIG_ROOT 'profileseview'
+        $profile = Join-Path $env:AI_CONFIG_ROOT 'profiles\review'
         New-Item -ItemType Directory -Path $proj, $profile -Force | Out-Null
         Update-CtxWorkspaceFile -BaseDir $proj -Names @('review') -Dirs @($profile)
 
@@ -548,5 +548,22 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $Script:CtxAutoLoadDir = $proj
         Clear-CtxContext -All | Should -BeTrue
         Test-Path -LiteralPath $workspace | Should -BeTrue
+    }
+
+    It 'invalid workspace markers are preserved with warnings' {
+        foreach ($case in @(
+            @{ Name = 'malformed'; Content = '{not-json}' },
+            @{ Name = 'false'; Content = '{"generatedBy":false}' },
+            @{ Name = '123'; Content = '{"generatedBy":123}' },
+            @{ Name = 'null'; Content = '{"generatedBy":null}' }
+        )) {
+            $proj = Join-Path $Script:TestTmp "project-workspace-marker-$($case.Name)"
+            $workspace = Join-Path $proj "project-workspace-marker-$($case.Name).code-workspace"
+            New-Item -ItemType Directory -Path $proj -Force | Out-Null
+            Set-Content -LiteralPath $workspace -Value $case.Content
+            $Script:CtxAutoLoadDir = $proj
+            Clear-CtxContext -All | Should -BeTrue
+            Test-Path -LiteralPath $workspace | Should -BeTrue
+        }
     }
 }

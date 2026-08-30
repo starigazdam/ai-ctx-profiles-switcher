@@ -592,3 +592,24 @@ EOF
     _ctx_clear --all
     [ -f "$workspace" ]
 }
+
+@test "invalid workspace markers are preserved with warnings" {
+    local marker
+    for marker in malformed false 123 null; do
+        local proj="$HOME/project-workspace-marker-$marker"
+        local workspace="$proj/project-workspace-marker-$marker.code-workspace"
+        mkdir -p "$proj"
+        case "$marker" in
+            malformed) printf '{not-json}\n' > "$workspace" ;;
+            false) printf '{"generatedBy":false}\n' > "$workspace" ;;
+            123) printf '{"generatedBy":123}\n' > "$workspace" ;;
+            null) printf '{"generatedBy":null}\n' > "$workspace" ;;
+        esac
+        unset AI_CONTEXT COPILOT_HOME
+        _ctx_auto_load_dir="$proj"
+        run _ctx_clear --all
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"preserved unowned workspace"* ]]
+        [ -f "$workspace" ]
+    done
+}
