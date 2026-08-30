@@ -542,3 +542,81 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"duplicate"* ]]
 }
+
+@test "generated workspace is marked and removed by clear --all" {
+    local proj="$HOME/project-workspace"
+    local profile="$AI_CONFIG_ROOT/profiles/review"
+    mkdir -p "$proj" "$profile"
+    _ctx_update_workspace_file "$proj" review "$profile"
+
+    local workspace="$proj/project-workspace.code-workspace"
+    grep -q '"generatedBy": "ctx"' "$workspace"
+    unset AI_CONTEXT COPILOT_HOME
+    _ctx_auto_load_dir="$proj"
+    _ctx_clear --all
+    [ ! -e "$workspace" ]
+}
+
+@test "pre-existing unmarked workspace is preserved by clear --all" {
+    local proj="$HOME/project-workspace-existing"
+    local workspace="$proj/project-workspace-existing.code-workspace"
+    mkdir -p "$proj"
+    printf '{"folders":[{"path":"."}],"settings":{}}\n' > "$workspace"
+    unset AI_CONTEXT COPILOT_HOME
+    _ctx_auto_load_dir="$proj"
+    _ctx_clear --all
+    [ -f "$workspace" ]
+    grep -q '"folders"' "$workspace"
+}
+
+@test "symlink to a marked workspace is preserved by clear --all" {
+    local proj="$HOME/project-workspace-symlink"
+    local target="$TEST_TMP/marked.code-workspace"
+    local workspace="$proj/project-workspace-symlink.code-workspace"
+    mkdir -p "$proj"
+    printf '{"generatedBy":"ctx"}\n' > "$target"
+    ln -s "$target" "$workspace"
+    unset AI_CONTEXT COPILOT_HOME
+    _ctx_auto_load_dir="$proj"
+    _ctx_clear --all
+    [ -L "$workspace" ]
+}
+
+@test "wrong-case workspace marker is preserved by clear --all" {
+    local proj="$HOME/project-workspace-case"
+    local workspace="$proj/project-workspace-case.code-workspace"
+    mkdir -p "$proj"
+    printf '{"generatedBy":"CTX"}\n' > "$workspace"
+    unset AI_CONTEXT COPILOT_HOME
+    _ctx_auto_load_dir="$proj"
+    _ctx_clear --all
+    [ -f "$workspace" ]
+}
+
+@test "help documents conditional workspace cleanup" {
+    run ctx --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"generatedBy"* ]]
+    [[ "$output" == *"unmarked"*"invalid"*"linked"*"preserved"* ]]
+}
+
+@test "invalid workspace markers are preserved with warnings" {
+    local marker
+    for marker in malformed false 123 null; do
+        local proj="$HOME/project-workspace-marker-$marker"
+        local workspace="$proj/project-workspace-marker-$marker.code-workspace"
+        mkdir -p "$proj"
+        case "$marker" in
+            malformed) printf '{not-json}\n' > "$workspace" ;;
+            false) printf '{"generatedBy":false}\n' > "$workspace" ;;
+            123) printf '{"generatedBy":123}\n' > "$workspace" ;;
+            null) printf '{"generatedBy":null}\n' > "$workspace" ;;
+        esac
+        unset AI_CONTEXT COPILOT_HOME
+        _ctx_auto_load_dir="$proj"
+        run _ctx_clear --all
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"preserved unowned workspace"* ]]
+        [ -f "$workspace" ]
+    done
+}

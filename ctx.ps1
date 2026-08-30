@@ -46,7 +46,7 @@
         ctx review dotnet security     # profile + multiple shared contexts
         ctx current                    # show active profile/shared/env vars
         ctx clear                      # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
-        ctx clear --all                # remove the current context home and workspace artifacts
+        ctx clear --all                # remove the current context home and owned workspace artifacts
         ctx --help                     # usage help
 
     AUTO-LOADING (.ctx files)
@@ -121,6 +121,9 @@ Usage:
   ctx clear                   Clear the currently active context
   ctx clear --all             Remove the current context home and generated
                                project artifacts next to the nearest .ctx file
+                               Workspace files are removed only with the exact
+                               generatedBy: "ctx" marker; unmarked, invalid,
+                               and linked workspaces are preserved with a warning.
   ctx --help | -h             Show this help message
 
 Examples:
@@ -211,13 +214,27 @@ function Clear-CtxContext {
 
             $folderName = Split-Path -Leaf (Resolve-Path -LiteralPath $dirOfFile).Path
             $workspaceFile = Join-Path $dirOfFile "$folderName.code-workspace"
-            if (Test-Path -LiteralPath $workspaceFile -PathType Leaf) {
+            $workspaceItem = Get-Item -LiteralPath $workspaceFile -Force -ErrorAction SilentlyContinue
+            if ($workspaceItem -and ($workspaceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                Write-Warning "ctx: preserved linked workspace $workspaceFile"
+            } elseif ($workspaceItem) {
+                $workspaceOwned = $false
                 try {
-                    Remove-Item -LiteralPath $workspaceFile -Force -ErrorAction Stop
-                    Write-Host "ctx: removed $workspaceFile"
+                    $workspaceData = Get-Content -LiteralPath $workspaceFile -Raw | ConvertFrom-Json
+                    $workspaceOwned = ($workspaceData.generatedBy -is [string]) -and ($workspaceData.generatedBy -ceq 'ctx')
                 } catch {
-                    $cleanupFailed = $true
-                    Write-Error "ctx: error: failed to remove $workspaceFile`: $_" -ErrorAction Continue
+                    $workspaceOwned = $false
+                }
+                if ($workspaceOwned) {
+                    try {
+                        Remove-Item -LiteralPath $workspaceFile -Force -ErrorAction Stop
+                        Write-Host "ctx: removed $workspaceFile"
+                    } catch {
+                        $cleanupFailed = $true
+                        Write-Error "ctx: error: failed to remove $workspaceFile`: $_" -ErrorAction Continue
+                    }
+                } else {
+                    Write-Warning "ctx: preserved unowned workspace $workspaceFile"
                 }
             }
         } else {
@@ -743,7 +760,8 @@ function Update-CtxWorkspaceFile {
     $workspaceFile = Join-Path $BaseDir "$folderName.code-workspace"
 
     $workspace = $null
-    if (Test-Path -LiteralPath $workspaceFile -PathType Leaf) {
+    $workspaceExisted = Test-Path -LiteralPath $workspaceFile -PathType Leaf
+    if ($workspaceExisted) {
         try {
             $raw = Get-Content -LiteralPath $workspaceFile -Raw
             if ($raw -and $raw.Trim()) {
@@ -782,6 +800,10 @@ function Update-CtxWorkspaceFile {
 
     if ($workspace.PSObject.Properties.Match('settings').Count -eq 0) {
         $workspace | Add-Member -MemberType NoteProperty -Name 'settings' -Value ([PSCustomObject]@{})
+    }
+
+    if ($workspace.PSObject.Properties.Match('generatedBy').Count -eq 0 -and -not $workspaceExisted) {
+        $workspace | Add-Member -MemberType NoteProperty -Name 'generatedBy' -Value 'ctx'
     }
 
     ($workspace | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $workspaceFile -Encoding utf8

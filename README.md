@@ -319,6 +319,7 @@ generated `my-service.code-workspace` would contain:
 
 ```json
 {
+  "generatedBy": "ctx",
   "folders": [
     { "path": ".", "name": "root: my-service" },
     { "path": "/home/user/work/ai-config/profiles/review", "name": "ctx: review" },
@@ -336,9 +337,14 @@ generated `my-service.code-workspace` would contain:
   current `.ctx` contents without losing manual additions.
 - Other top-level keys already in the file (`settings`, `extensions`, ...)
   are preserved; requires `python3` (or `python`) to be on `PATH`.
+- A workspace file created by `ctx` carries the machine-readable
+  `generatedBy: "ctx"` ownership marker. Existing workspace files are never
+  marked retroactively.
 - Nothing is removed from the workspace file when the context is cleared —
   like `settings.local.json`, it's project-local and will already be up to
-  date the next time you return. Run `ctx clear --all` to delete it instead.
+  date the next time you return. `ctx clear --all` removes the workspace only
+  when that ownership marker is present; unmarked or invalid files are
+  preserved with a warning.
 
 Disable auto-loading for the session with:
 

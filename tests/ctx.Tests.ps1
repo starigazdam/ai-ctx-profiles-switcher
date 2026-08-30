@@ -501,7 +501,81 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         { Get-CtxValidatedHomePath -Path $env:HOME } | Should -Throw '*unsafe home*'
     }
 
-    It 'Test 28: home validator rejects CTX_HOMES_ROOT itself' {
+    It 'Test 29: home validator rejects CTX_HOMES_ROOT itself' {
         { Get-CtxValidatedHomePath -Path $env:CTX_HOMES_ROOT } | Should -Throw '*unsafe home*'
+    }
+
+    It 'workspace created by ctx is marked and removed by clear --all' {
+        $proj = Join-Path $Script:TestTmp 'project-workspace'
+        $profile = Join-Path $env:AI_CONFIG_ROOT 'profiles\review'
+        New-Item -ItemType Directory -Path $proj, $profile -Force | Out-Null
+        Update-CtxWorkspaceFile -BaseDir $proj -Names @('review') -Dirs @($profile)
+
+        $workspace = Join-Path $proj 'project-workspace.code-workspace'
+        ((Get-Content -LiteralPath $workspace -Raw) | ConvertFrom-Json).generatedBy | Should -Be 'ctx'
+        $Script:CtxAutoLoadDir = $proj
+        Clear-CtxContext -All | Should -BeTrue
+        Test-Path -LiteralPath $workspace | Should -BeFalse
+    }
+
+    It 'pre-existing unmarked workspace is preserved by clear --all' {
+        $proj = Join-Path $Script:TestTmp 'project-workspace-existing'
+        $workspace = Join-Path $proj 'project-workspace-existing.code-workspace'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath $workspace -Value '{"folders":[{"path":"."}],"settings":{}}'
+        $Script:CtxAutoLoadDir = $proj
+        Clear-CtxContext -All | Should -BeTrue
+        Test-Path -LiteralPath $workspace | Should -BeTrue
+    }
+
+    It 'symlink to a marked workspace is preserved by clear --all' {
+        $proj = Join-Path $Script:TestTmp 'project-workspace-symlink'
+        $target = Join-Path $Script:TestTmp 'marked.code-workspace'
+        $workspace = Join-Path $proj 'project-workspace-symlink.code-workspace'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath $target -Value '{"generatedBy":"ctx"}'
+        New-Item -ItemType SymbolicLink -Path $workspace -Target $target -ErrorAction Stop | Out-Null
+        $Script:CtxAutoLoadDir = $proj
+        Clear-CtxContext -All | Should -BeTrue
+        (Get-Item -LiteralPath $workspace -Force).LinkType | Should -Not -BeNullOrEmpty
+    }
+
+    It 'wrong-case workspace marker is preserved by clear --all' {
+        $proj = Join-Path $Script:TestTmp 'project-workspace-case'
+        $workspace = Join-Path $proj 'project-workspace-case.code-workspace'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath $workspace -Value '{"generatedBy":"CTX"}'
+        $Script:CtxAutoLoadDir = $proj
+        Clear-CtxContext -All | Should -BeTrue
+        Test-Path -LiteralPath $workspace | Should -BeTrue
+    }
+
+    It 'invalid workspace markers are preserved with warnings' {
+        foreach ($case in @(
+            @{ Name = 'malformed'; Content = '{not-json}' },
+            @{ Name = 'false'; Content = '{"generatedBy":false}' },
+            @{ Name = '123'; Content = '{"generatedBy":123}' },
+            @{ Name = 'null'; Content = '{"generatedBy":null}' }
+        )) {
+            $proj = Join-Path $Script:TestTmp "project-workspace-marker-$($case.Name)"
+            $workspace = Join-Path $proj "project-workspace-marker-$($case.Name).code-workspace"
+            New-Item -ItemType Directory -Path $proj -Force | Out-Null
+            Set-Content -LiteralPath $workspace -Value $case.Content
+            $Script:CtxAutoLoadDir = $proj
+            Clear-CtxContext -All | Should -BeTrue
+            Test-Path -LiteralPath $workspace | Should -BeTrue
+        }
+    }
+
+    It 'help documents conditional workspace cleanup' {
+        $script:helpOutput = $null
+        Mock Write-Host {
+            param($Object)
+            $script:helpOutput = $Object
+        }
+        Show-CtxUsage
+        $script:helpOutput | Should -Match 'generatedBy'
+        $script:helpOutput | Should -Match 'unmarked, invalid'
+        $script:helpOutput | Should -Match 'linked workspaces are preserved'
     }
 }
