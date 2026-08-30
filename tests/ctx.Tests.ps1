@@ -569,7 +569,10 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
     It 'help documents conditional workspace cleanup' {
         $script:helpOutput = $null
-        Mock Write-Host { $script:helpOutput = $args[0] }
+        Mock Write-Host {
+            param($Object)
+            $script:helpOutput = $Object
+        }
         Show-CtxUsage
         $script:helpOutput | Should -Match 'generatedBy'
         $script:helpOutput | Should -Match 'unmarked, invalid'
