@@ -593,6 +593,13 @@ EOF
     [ -f "$workspace" ]
 }
 
+@test "help documents conditional workspace cleanup" {
+    run ctx --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"generatedBy"* ]]
+    [[ "$output" == *"unmarked"*"invalid"*"linked"*"preserved"* ]]
+}
+
 @test "invalid workspace markers are preserved with warnings" {
     local marker
     for marker in malformed false 123 null; do

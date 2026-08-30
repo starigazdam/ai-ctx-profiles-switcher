@@ -566,4 +566,11 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             Test-Path -LiteralPath $workspace | Should -BeTrue
         }
     }
+
+    It 'help documents conditional workspace cleanup' {
+        $help = Show-CtxUsage | Out-String
+        $help | Should -Match 'generatedBy'
+        $help | Should -Match 'unmarked, invalid'
+        $help | Should -Match 'linked workspaces are preserved'
+    }
 }

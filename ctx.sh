@@ -119,6 +119,9 @@ Usage:
   ctx clear                   Clear the currently active context
   ctx clear --all             Remove the current context home and generated
                                project artifacts next to the nearest .ctx file
+                               Workspace files are removed only with the exact
+                               generatedBy: "ctx" marker; unmarked, invalid,
+                               and linked workspaces are preserved with a warning.
   ctx --help | -h             Show this help message
 
 Examples:
