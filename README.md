@@ -108,8 +108,9 @@ $env:AI_CONFIG_ROOT = "C:\path\to\ai-config"      # PowerShell
 ctx review                     # activate the "review" profile
 ctx coding azure                # "coding" profile + "azure" shared context
 ctx review dotnet security      # profile + multiple shared contexts
-ctx current                     # show the active profile/shared/env vars
-ctx clear                       # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
+ctx current                   # show the active profile/shared/env vars
+ctx check                     # read-only audit against the nearest .ctx file
+ctx clear                     # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
 ctx clear --all                 # remove the current context home and generated artifacts
 ctx --help                      # usage help
 ```
@@ -144,6 +145,17 @@ ctx: available profiles:
   - incident
   - review
 ```
+
+### Checking activation drift
+
+`ctx check` reads the nearest `.ctx` file and reports deterministic `CHECK PASS`,
+`CHECK FAIL`, and `CHECK SKIP` lines for the shell environment, expected
+`COPILOT_HOME` links and skills, Copilot's optional JSON skill listing, and an
+adjacent workspace file. It exits 0 only when all applicable checks pass (a
+missing `.ctx` is a successful no-op) and non-zero when drift is found. The
+command is strictly read-only: it never repairs, writes, deletes, or unsets.
+Environment checks describe only the shell in which `ctx check` runs; invoking
+it from another shell cannot validate that shell's activation state.
 
 ## Tab completion
 

@@ -620,3 +620,83 @@ EOF
         [ -f "$workspace" ]
     done
 }
+
+@test "ctx check reports a matching .ctx activation without changing state" {
+    local proj="$HOME/project-check"
+    local profile="$AI_CONFIG_ROOT/profiles/review"
+    _make_profile review review-skill
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$profile" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    local home="$COPILOT_HOME"
+    local before_ctx="$(stat -c '%Y %s' "$proj/.ctx")"
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS AI_CONTEXT"* ]]
+    [[ "$output" == *"ctx check: PASS"* ]]
+    [ "$home" = "$COPILOT_HOME" ]
+    [ "$(stat -c '%Y %s' "$proj/.ctx")" = "$before_ctx" ]
+}
+
+@test "ctx check detects environment and link drift without repairing it" {
+    local proj="$HOME/project-check-drift"
+    local profile="$AI_CONFIG_ROOT/profiles/review"
+    _make_profile review review-skill
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$profile" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    local home="$COPILOT_HOME"
+    cd "$proj"
+    export AI_CONTEXT=wrong
+    rm -f "$home/settings.json"
+    printf 'drift' > "$home/settings.json"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL AI_CONTEXT"* ]]
+    [[ "$output" == *"CHECK FAIL link:settings.json"* ]]
+    [ -f "$home/settings.json" ]
+    [ ! -L "$home/settings.json" ]
+}
+
+@test "ctx check succeeds with no nearest .ctx and does not clear the shell" {
+    export AI_CONTEXT=manual
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=manual-dir
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no .ctx file found"* ]]
+    [ "$AI_CONTEXT" = manual ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = manual-dir ]
+}
+
+@test "ctx check detects workspace folder drift" {
+    local proj="$HOME/project-check-workspace"
+    local profile="$AI_CONFIG_ROOT/profiles/review"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$profile" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    printf '{"generatedBy":"ctx","folders":[]}' > "$proj/project-check-workspace.code-workspace"
+    cd "$proj"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL workspace"* ]]
+}
+
+@test "ctx check uses a fake copilot skill list without auth or network" {
+    local proj="$HOME/project-check-copilot"
+    _make_profile review review-skill
+    mkdir -p "$proj" "$TEST_TMP/bin"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    cd "$proj"
+    cat > "$TEST_TMP/bin/copilot" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = skill ] && [ "$2" = list ] && [ "$3" = --json ] || exit 9
+printf '{"skills":[{"name":"review-skill"}]}\n'
+EOF
+    chmod +x "$TEST_TMP/bin/copilot"
+    PATH="$TEST_TMP/bin:$PATH" run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS skills"* ]]
+}

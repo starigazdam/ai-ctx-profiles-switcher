@@ -117,7 +117,8 @@ function Show-CtxUsage {
     @'
 Usage:
   ctx <profile> [shared...]   Activate a profile with optional shared contexts
-  ctx current                 Show the currently active context
+  ctx current                   Show the currently active context
+  ctx check                    Read-only audit against the nearest .ctx file
   ctx clear                   Clear the currently active context
   ctx clear --all             Remove the current context home and generated
                                project artifacts next to the nearest .ctx file
@@ -299,6 +300,9 @@ function ctx {
         'current' {
             Show-CtxCurrent
             return
+        }
+        'check' {
+            return (Test-CtxActivation)
         }
         'clear' {
             $all = $Contexts.Count -gt 1 -and $Contexts[1] -eq '--all'
@@ -906,6 +910,68 @@ function Import-CtxFile {
     $sharedCsv = ($names | Select-Object -Skip 1) -join ', '
     Write-CtxStatus -ProfileName $names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv
     return $true
+}
+
+function Test-CtxActivation {
+    # Read-only audit of the nearest .ctx activation. This function deliberately
+    # does not call Import-CtxFile or Set-CtxCopilotHome.
+    $ctxFile = Find-CtxFile
+    if (-not $ctxFile) { Write-Output 'ctx check: no .ctx file found; nothing to check'; return $true }
+    $dir = Split-Path -Parent $ctxFile
+    $names = @(); $dirs = @(); $homeOverride = $null; $failures = 0
+    foreach ($raw in Get-Content -LiteralPath $ctxFile) {
+        $line = $raw.Trim(); if (-not $line -or $line.StartsWith('#')) { continue }
+        $i = $line.IndexOf(':')
+        if ($i -lt 1) { Write-Output 'CHECK FAIL parser: invalid .ctx line'; $failures++; continue }
+        $name = $line.Substring(0,$i).Trim(); $path = $line.Substring($i+1).Trim()
+        if (-not $name -or -not $path) { Write-Output "CHECK FAIL parser: invalid or missing entry $name"; $failures++; continue }
+        $resolved = if ([IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dir $path }
+        if ($name -ceq 'home') {
+            if ($homeOverride) { Write-Output 'CHECK FAIL parser: duplicate home directive'; $failures++; continue }
+            try { $homeOverride = Get-CtxValidatedHomePath -Path $resolved } catch { Write-Output 'CHECK FAIL COPILOT_HOME: invalid home directive'; $failures++ }
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { Write-Output "CHECK FAIL parser: invalid or missing entry $name"; $failures++; continue }
+        $names += $name; $dirs += $resolved
+    }
+    if ($names.Count -eq 0) { Write-Output 'CHECK FAIL parser: .ctx has no entries'; return $false }
+    $expectedContext = $names -join '+'; $expectedDirs = $dirs -join ','
+    if ($env:AI_CONTEXT -ceq $expectedContext) { Write-Output 'CHECK PASS AI_CONTEXT' } else { Write-Output "CHECK FAIL AI_CONTEXT: expected $expectedContext, got $(if($env:AI_CONTEXT){$env:AI_CONTEXT}else{'<unset>'})"; $failures++ }
+    if ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq $expectedDirs) { Write-Output 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS' } else { Write-Output "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected $expectedDirs, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"; $failures++ }
+    $expectedHome = if ($homeOverride) { $homeOverride } else { Join-Path (Get-CtxCopilotHomeRoot) (Get-CtxSanitizedContextName -Name $expectedContext) }
+    if ($env:COPILOT_HOME -ceq $expectedHome -and (Test-Path -LiteralPath $expectedHome -PathType Container)) { Write-Output 'CHECK PASS COPILOT_HOME' } else { Write-Output "CHECK FAIL COPILOT_HOME: expected $expectedHome, got $(if($env:COPILOT_HOME){$env:COPILOT_HOME}else{'<unset>'})"; $failures++ }
+    foreach ($f in (Get-CtxCopilotHomeSharedFiles) + (Get-CtxCopilotHomeSharedDirs)) {
+        $link = Join-Path $expectedHome $f; $target = Join-Path (Get-CtxCopilotDir) $f
+        if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link).TrimEnd('\','/') -eq $target.TrimEnd('\','/'))) { Write-Output "CHECK PASS link:$f" } else { Write-Output "CHECK FAIL link:${f}: expected link to $target"; $failures++ }
+    }
+    $desired = @{}
+    foreach ($rd in $dirs) { $skillDir = Join-Path $rd '.github\skills'; if (Test-Path -LiteralPath $skillDir -PathType Container) { foreach ($s in Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name) { $desired[$s.Name] = $s.FullName } } }
+    foreach ($name in ($desired.Keys | Sort-Object)) {
+        $link = Join-Path $expectedHome "skills\$name"
+        if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $desired[$name])) { Write-Output "CHECK PASS skill:$name" } else { Write-Output "CHECK FAIL skill:$name: missing or wrong target"; $failures++ }
+    }
+    if (Get-Command copilot -ErrorAction SilentlyContinue) {
+        try {
+            $items = @( & copilot skill list --json 2>$null | ConvertFrom-Json )
+            $reported = @($items | ForEach-Object { $_.name })
+            foreach ($name in ($desired.Keys | Sort-Object)) { if ($reported -contains $name) { Write-Output "CHECK PASS skills:$name" } else { Write-Output "CHECK FAIL skills:${name}: copilot did not report expected skill"; $failures++ } }
+        } catch { Write-Output 'CHECK SKIP skills: copilot skill list --json failed' }
+    } else { Write-Output 'CHECK SKIP skills: copilot unavailable' }
+    $workspace = Join-Path $dir "$(Split-Path -Leaf $dir).code-workspace"
+    if (Test-Path -LiteralPath $workspace -PathType Leaf) {
+        try {
+            $w = Get-Content -LiteralPath $workspace -Raw | ConvertFrom-Json
+            $pairs = @($w.folders | ForEach-Object { "$($_.path)`n$($_.name)" })
+            $rootName = "root: $(Split-Path -Leaf $dir)"
+            $ok = $pairs -contains ".`n$rootName"
+            for ($j=0; $j -lt $names.Count; $j++) { if ($pairs -notcontains "$($dirs[$j])`nctx: $($names[$j])") { $ok = $false } }
+            $marker = if ($w.generatedBy -ceq 'ctx') { 'ctx' } else { 'unmarked' }
+            Write-Output "CHECK PASS workspace marker=$marker"
+            if (-not $ok) { Write-Output 'CHECK FAIL workspace: missing expected folder(s)'; $failures++ }
+        } catch { Write-Output 'CHECK FAIL workspace: invalid JSON'; $failures++ }
+    } else { Write-Output 'CHECK SKIP workspace: no adjacent workspace file' }
+    if ($failures -eq 0) { Write-Output 'ctx check: PASS'; return $true }
+    Write-Output "ctx check: FAIL ($failures)"; return $false
 }
 
 function Invoke-CtxAutoLoad {

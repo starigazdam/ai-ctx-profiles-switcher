@@ -578,4 +578,31 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $script:helpOutput | Should -Match 'unmarked, invalid'
         $script:helpOutput | Should -Match 'linked workspaces are preserved'
     }
+
+    It 'ctx check reports no .ctx as a successful read-only no-op' {
+        $outside = Join-Path $Script:TestTmp 'outside'
+        New-Item -ItemType Directory -Path $outside -Force | Out-Null
+        Set-Location $outside
+        $env:AI_CONTEXT = 'manual'
+        $result = @(Test-CtxActivation)
+        $result[-1] | Should -BeTrue
+        $env:AI_CONTEXT | Should -Be 'manual'
+    }
+
+    It 'ctx check detects environment and link drift without repairing it' {
+        $proj = Join-Path $Script:TestTmp 'project-check'
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        Set-Location $proj
+        $env:AI_CONTEXT = 'wrong'
+        $settings = Join-Path $env:COPILOT_HOME 'settings.json'
+        Remove-Item -LiteralPath $settings -Force
+        Set-Content -LiteralPath $settings -Value 'drift'
+        $result = @(Test-CtxActivation)
+        $result[-1] | Should -BeFalse
+        Test-CtxIsLink -Path $settings | Should -BeFalse
+        $env:AI_CONTEXT | Should -Be 'wrong'
+    }
 }

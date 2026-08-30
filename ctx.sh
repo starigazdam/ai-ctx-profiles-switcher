@@ -115,7 +115,8 @@ _ctx_usage() {
     cat <<'EOF'
 Usage:
   ctx <profile> [shared...]   Activate a profile with optional shared contexts
-  ctx current                 Show the currently active context
+  ctx current                   Show the currently active context
+  ctx check                    Read-only audit against the nearest .ctx file
   ctx clear                   Clear the currently active context
   ctx clear --all             Remove the current context home and generated
                                project artifacts next to the nearest .ctx file
@@ -307,6 +308,10 @@ ctx() {
         current)
             _ctx_current
             return 0
+            ;;
+        check)
+            _ctx_check
+            return $?
             ;;
         clear)
             _ctx_clear "$2"
@@ -890,6 +895,125 @@ _ctx_load_ctx_file() {
     fi
 
     _ctx_print_status "$first_name" "$shared_csv" "$dirs_csv"
+}
+
+_ctx_check() {
+    local ctx_file dir_of_file line name path resolved_path home_override=""
+    local expected_context="" expected_dirs="" first=1
+    local -a names=() dirs=()
+    local failures=0
+
+    if ! ctx_file="$(_ctx_find_ctx_file)"; then
+        printf 'ctx check: no .ctx file found; nothing to check\n'
+        return 0
+    fi
+    dir_of_file="$(dirname "$ctx_file")"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        [ -z "$line" ] && continue
+        case "$line" in '#'* ) continue ;; esac
+        case "$line" in *:*) ;; *) printf 'CHECK FAIL parser: invalid .ctx line\n'; failures=$((failures+1)); continue ;; esac
+        name="${line%%:*}"; path="${line#*:}"
+        name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+        path="${path#"${path%%[![:space:]]*}"}"; path="${path%"${path##*[![:space:]]}"}"
+        case "$path" in /*) resolved_path="$path" ;; *) resolved_path="$dir_of_file/$path" ;; esac
+        if [ "$name" = home ]; then
+            if [ -n "$home_override" ]; then printf 'CHECK FAIL parser: duplicate home directive\n'; failures=$((failures+1)); continue; fi
+            if ! home_override="$(_ctx_validate_home_path "$resolved_path" 2>/dev/null)"; then
+                printf 'CHECK FAIL COPILOT_HOME: invalid home directive\n'; failures=$((failures+1)); continue
+            fi
+            continue
+        fi
+        if [ -z "$name" ] || [ -z "$path" ] || [ ! -d "$resolved_path" ]; then
+            printf 'CHECK FAIL parser: invalid or missing entry %s\n' "$name"; failures=$((failures+1)); continue
+        fi
+        names+=("$name"); dirs+=("$resolved_path")
+        if [ "$first" -eq 1 ]; then expected_context="$name"; expected_dirs="$resolved_path"; first=0
+        else expected_context="$expected_context+$name"; expected_dirs="$expected_dirs,$resolved_path"; fi
+    done < "$ctx_file"
+    if [ "${#names[@]}" -eq 0 ]; then printf 'CHECK FAIL parser: .ctx has no entries\n'; return 1; fi
+
+    if [ "${AI_CONTEXT:-}" = "$expected_context" ]; then printf 'CHECK PASS AI_CONTEXT\n'; else printf 'CHECK FAIL AI_CONTEXT: expected %s, got %s\n' "$expected_context" "${AI_CONTEXT:-<unset>}"; failures=$((failures+1)); fi
+    if [ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" = "$expected_dirs" ]; then printf 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n'; else printf 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected %s, got %s\n' "$expected_dirs" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-<unset>}"; failures=$((failures+1)); fi
+
+    local expected_home
+    if [ -n "$home_override" ]; then expected_home="$home_override"; else expected_home="$(_ctx_copilot_home_root)/$(_ctx_sanitize_context_name "$expected_context")"; fi
+    if [ "${COPILOT_HOME:-}" = "$expected_home" ] && [ -d "$expected_home" ]; then printf 'CHECK PASS COPILOT_HOME\n'; else printf 'CHECK FAIL COPILOT_HOME: expected %s, got %s\n' "$expected_home" "${COPILOT_HOME:-<unset>}"; failures=$((failures+1)); fi
+
+    local f target current
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
+        if [ -L "$expected_home/$f" ] && [ "$(readlink "$expected_home/$f")" = "$target" ]; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected symlink to %s\n' "$f" "$target"; failures=$((failures+1)); fi
+    done <<EOF
+$(_ctx_copilot_home_shared_files)
+EOF
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
+        if [ -L "$expected_home/$f" ] && [ "$(readlink "$expected_home/$f")" = "$target" ]; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected symlink to %s\n' "$f" "$target"; failures=$((failures+1)); fi
+    done <<EOF
+$(_ctx_copilot_home_shared_dirs)
+EOF
+
+    local -A desired=() actual=()
+    local rd skill_dir s skill_name
+    for rd in "${dirs[@]}"; do
+        skill_dir="$rd/.github/skills"
+        [ -d "$skill_dir" ] || continue
+        for s in "$skill_dir"/*/; do [ -d "$s" ] || continue; skill_name="$(basename "$s")"; desired["$skill_name"]="${s%/}"; done
+    done
+    for s in "$expected_home/skills"/*; do [ -e "$s" ] || continue; actual["$(basename "$s")"]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"; done
+    local sorted_skills
+    sorted_skills="$(printf '%s\n' "${!desired[@]}" | sort)"
+    while IFS= read -r skill_name; do
+        [ -n "$skill_name" ] || continue
+        if [ "${actual[$skill_name]:-}" = "${desired[$skill_name]}" ]; then printf 'CHECK PASS skill:%s\n' "$skill_name"; else printf 'CHECK FAIL skill:%s: missing or wrong target\n' "$skill_name"; failures=$((failures+1)); fi
+    done <<< "$sorted_skills"
+    sorted_skills="$(printf '%s\n' "${!actual[@]}" | sort)"
+    while IFS= read -r skill_name; do
+        [ -n "$skill_name" ] || continue
+        [ -n "${desired[$skill_name]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }
+    done <<< "$sorted_skills"
+
+    if command -v copilot >/dev/null 2>&1; then
+        local copilot_json
+        if copilot_json="$(COPILOT_HOME="$expected_home" copilot skill list --json 2>/dev/null)"; then
+            local missing
+            missing="$(printf '%s' "$copilot_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); xs=d if isinstance(d,list) else d.get("skills", []); print("\n".join(sorted(x.get("name", "") for x in xs if isinstance(x,dict) and x.get("name"))))' 2>/dev/null || true)"
+            for skill_name in "${!desired[@]}"; do
+                if printf '%s\n' "$missing" | grep -Fxq "$skill_name"; then printf 'CHECK PASS skills:%s\n' "$skill_name"; else printf 'CHECK FAIL skills:%s: copilot did not report expected skill\n' "$skill_name"; failures=$((failures+1)); fi
+            done
+        else printf 'CHECK SKIP skills: copilot skill list --json failed\n'; fi
+    else
+        printf 'CHECK SKIP skills: copilot unavailable\n'
+    fi
+
+    local workspace="$dir_of_file/$(basename "$dir_of_file").code-workspace"
+    if [ -e "$workspace" ] && [ ! -L "$workspace" ]; then
+        if python3 - "$workspace" "${names[@]}" "${dirs[@]}" <<'PYEOF'
+import json, sys
+p=sys.argv[1]; n=len(sys.argv[2:])//2; names=sys.argv[2:2+n]; dirs=sys.argv[2+n:]
+try:
+    with open(p, encoding='utf-8') as f: w=json.load(f)
+    folders=w.get('folders', []) if isinstance(w,dict) else []
+    wanted=[('.', 'root: '+p.rsplit('/',2)[-2])] + list(zip(dirs, ['ctx: '+x for x in names]))
+    have={(x.get('path'),x.get('name')) for x in folders if isinstance(x,dict)}
+    missing=[x for x in wanted if x not in have]
+    print('CHECK PASS workspace marker='+('ctx' if w.get('generatedBy') == 'ctx' else 'unmarked'))
+    if missing:
+        print('CHECK FAIL workspace: missing expected folder(s)')
+        sys.exit(1)
+except Exception:
+    print('CHECK FAIL workspace: invalid JSON')
+    sys.exit(1)
+PYEOF
+        then :; else failures=$((failures+1)); fi
+    else
+        printf 'CHECK SKIP workspace: no adjacent workspace file\n'
+    fi
+    if [ "$failures" -eq 0 ]; then printf 'ctx check: PASS\n'; return 0; fi
+    printf 'ctx check: FAIL (%s)\n' "$failures"; return 1
 }
 
 # --- Shell integration (completion + chdir hooks) -----------------------
