@@ -700,3 +700,73 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"CHECK PASS skills"* ]]
 }
+
+
+@test "direct ctx check preserves diagnostics and returns a scalar status" {
+    local proj="$HOME/project-check-direct"
+    _make_profile review review-skill
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    cd "$proj"
+    ctx check >/dev/null
+    [ "$?" -eq 0 ]
+    export AI_CONTEXT=wrong
+    if ctx check >/dev/null; then false; else [ "$?" -eq 1 ]; fi
+}
+
+@test "ctx check accepts hardlink fallback for shared files" {
+    local proj="$HOME/project-check-hardlink"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    rm -f "$COPILOT_HOME/settings.json"
+    : > "$CTX_COPILOT_DIR/settings.json"
+    ln "$CTX_COPILOT_DIR/settings.json" "$COPILOT_HOME/settings.json"
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx check: PASS"* ]]
+}
+
+@test "ctx check skips malformed optional copilot JSON" {
+    local proj="$HOME/project-check-copilot-malformed"
+    _make_profile review review-skill
+    mkdir -p "$proj" "$TEST_TMP/bin"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    rm -f "$proj/project-check-copilot-malformed.code-workspace"
+    cd "$proj"
+    cat > "$TEST_TMP/bin/copilot" <<'EOF'
+#!/usr/bin/env bash
+printf '{not-json}\n'
+EOF
+    chmod +x "$TEST_TMP/bin/copilot"
+    PATH="$TEST_TMP/bin:$PATH" run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK SKIP skills: copilot skill list --json malformed"* ]]
+}
+
+@test "ctx check uses python fallback for optional copilot JSON" {
+    local proj="$HOME/project-check-copilot-python"
+    _make_profile review review-skill
+    mkdir -p "$proj" "$TEST_TMP/bin"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    rm -f "$proj/project-check-copilot-python.code-workspace"
+    cd "$proj"
+    cat > "$TEST_TMP/bin/copilot" <<'EOF'
+#!/usr/bin/env bash
+printf '{"skills":[{"name":"review-skill"}]}\n'
+EOF
+    cat > "$TEST_TMP/bin/python" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'review-skill\n'
+EOF
+    chmod +x "$TEST_TMP/bin/copilot" "$TEST_TMP/bin/python"
+    PATH="$TEST_TMP/bin:/usr/bin" run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS skills:review-skill"* ]]
+}

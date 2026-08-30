@@ -174,6 +174,27 @@ _ctx_current() {
     _ctx_print_status "$profile" "$shared_csv" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}"
 }
 
+_ctx_file_identity() {
+    local path="$1" result
+    if command -v stat >/dev/null 2>&1; then
+        result="$(stat -c '%d:%i' -- "$path" 2>/dev/null)" || result=""
+        [ -n "$result" ] || result="$(stat -f '%d:%i' -- "$path" 2>/dev/null)"
+    fi
+    [ -n "$result" ] || return 1
+    printf '%s\n' "$result"
+}
+
+_ctx_link_matches() {
+    local link="$1" target="$2" link_target
+    if [ -L "$link" ]; then
+        link_target="$(readlink "$link")"
+        [ "$link_target" = "$target" ]
+        return
+    fi
+    [ -f "$link" ] && [ -f "$target" ] || return 1
+    [ "$(_ctx_file_identity "$link")" = "$(_ctx_file_identity "$target")" ]
+}
+
 _ctx_workspace_is_generated() {
     local workspace_file="$1" python_bin=""
     if command -v python3 >/dev/null 2>&1; then
@@ -944,14 +965,14 @@ _ctx_check() {
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
-        if [ -L "$expected_home/$f" ] && [ "$(readlink "$expected_home/$f")" = "$target" ]; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected symlink to %s\n' "$f" "$target"; failures=$((failures+1)); fi
+        if _ctx_link_matches "$expected_home/$f" "$target"; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected link to %s\n' "$f" "$target"; failures=$((failures+1)); fi
     done <<EOF
 $(_ctx_copilot_home_shared_files)
 EOF
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
-        if [ -L "$expected_home/$f" ] && [ "$(readlink "$expected_home/$f")" = "$target" ]; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected symlink to %s\n' "$f" "$target"; failures=$((failures+1)); fi
+        if _ctx_link_matches "$expected_home/$f" "$target"; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected link to %s\n' "$f" "$target"; failures=$((failures+1)); fi
     done <<EOF
 $(_ctx_copilot_home_shared_dirs)
 EOF
@@ -980,10 +1001,21 @@ EOF
         local copilot_json
         if copilot_json="$(COPILOT_HOME="$expected_home" copilot skill list --json 2>/dev/null)"; then
             local missing
-            missing="$(printf '%s' "$copilot_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); xs=d if isinstance(d,list) else d.get("skills", []); print("\n".join(sorted(x.get("name", "") for x in xs if isinstance(x,dict) and x.get("name"))))' 2>/dev/null || true)"
-            for skill_name in "${!desired[@]}"; do
-                if printf '%s\n' "$missing" | grep -Fxq "$skill_name"; then printf 'CHECK PASS skills:%s\n' "$skill_name"; else printf 'CHECK FAIL skills:%s: copilot did not report expected skill\n' "$skill_name"; failures=$((failures+1)); fi
-            done
+            local json_bin=""
+            if command -v python3 >/dev/null 2>&1; then json_bin="python3"; elif command -v python >/dev/null 2>&1; then json_bin="python"; fi
+            if [ -z "$json_bin" ]; then
+                printf 'CHECK SKIP skills: no python interpreter available\n'
+            else
+                local missing parse_status=0
+                missing="$(printf '%s' "$copilot_json" | "$json_bin" -c 'import json,sys; d=json.load(sys.stdin); xs=d if isinstance(d,list) else d.get("skills", []); print("\n".join(sorted(x.get("name", "") for x in xs if isinstance(x,dict) and x.get("name"))))' 2>/dev/null)" || parse_status=$?
+                if [ "$parse_status" -ne 0 ]; then
+                    printf 'CHECK SKIP skills: copilot skill list --json malformed\n'
+                else
+                    for skill_name in "${!desired[@]}"; do
+                        if printf '%s\n' "$missing" | grep -Fxq "$skill_name"; then printf 'CHECK PASS skills:%s\n' "$skill_name"; else printf 'CHECK FAIL skills:%s: copilot did not report expected skill\n' "$skill_name"; failures=$((failures+1)); fi
+                    done
+                fi
+            fi
         else printf 'CHECK SKIP skills: copilot skill list --json failed\n'; fi
     else
         printf 'CHECK SKIP skills: copilot unavailable\n'

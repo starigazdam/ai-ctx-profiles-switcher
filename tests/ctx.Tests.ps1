@@ -606,3 +606,47 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:AI_CONTEXT | Should -Be 'wrong'
     }
 }
+
+    It 'direct ctx check returns a scalar Boolean status while preserving diagnostics' {
+        $proj = Join-Path $Script:TestTmp 'project-check-direct'
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        Set-Location $proj
+        $result = ctx check
+        $result.GetType().Name | Should -Be 'Boolean'
+        $result | Should -BeTrue
+        $env:AI_CONTEXT = 'wrong'
+        $result = ctx check
+        $result.GetType().Name | Should -Be 'Boolean'
+        $result | Should -BeFalse
+    }
+
+    It 'ctx check accepts a hardlink fallback for shared files' {
+        $proj = Join-Path $Script:TestTmp 'project-check-hardlink'
+        $reviewDir = New-CtxTestProfile -Name 'review'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        $link = Join-Path $env:COPILOT_HOME 'settings.json'
+        Remove-Item -LiteralPath $link -Force
+        New-Item -ItemType HardLink -Path $link -Target (Join-Path $env:CTX_COPILOT_DIR 'settings.json') | Out-Null
+        Set-Location $proj
+        (ctx check) | Should -BeTrue
+    }
+
+    It 'ctx check detects an unexpected stale skill deterministically' {
+        $proj = Join-Path $Script:TestTmp 'project-check-stale'
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        $stale = Join-Path $env:COPILOT_HOME 'skills\stale-skill'
+        New-Item -ItemType Directory -Path $stale -Force | Out-Null
+        Set-Location $proj
+        $result = @(Test-CtxActivation)
+        $result[-1] | Should -BeFalse
+        ($result -join "`n") | Should -Match 'CHECK FAIL skill:stale-skill: unexpected skill'
+    }
+}
