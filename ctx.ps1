@@ -948,7 +948,7 @@ function Test-CtxActivation {
     foreach ($rd in $dirs) { $skillDir = Join-Path $rd '.github\skills'; if (Test-Path -LiteralPath $skillDir -PathType Container) { foreach ($s in Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name) { $desired[$s.Name] = $s.FullName } } }
     foreach ($name in ($desired.Keys | Sort-Object)) {
         $link = Join-Path $expectedHome "skills\$name"
-        if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $desired[$name])) { Write-Output "CHECK PASS skill:$name" } else { Write-Output "CHECK FAIL skill:$name: missing or wrong target"; $failures++ }
+        if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $desired[$name])) { Write-Output "CHECK PASS skill:$name" } else { Write-Output "CHECK FAIL skill:${name}: missing or wrong target"; $failures++ }
     }
     if (Get-Command copilot -ErrorAction SilentlyContinue) {
         try {
