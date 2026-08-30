@@ -568,9 +568,11 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
     }
 
     It 'help documents conditional workspace cleanup' {
-        $help = Show-CtxUsage | Out-String
-        $help | Should -Match 'generatedBy'
-        $help | Should -Match 'unmarked, invalid'
-        $help | Should -Match 'linked workspaces are preserved'
+        $script:helpOutput = $null
+        Mock Write-Host { $script:helpOutput = $args[0] }
+        Show-CtxUsage
+        $script:helpOutput | Should -Match 'generatedBy'
+        $script:helpOutput | Should -Match 'unmarked, invalid'
+        $script:helpOutput | Should -Match 'linked workspaces are preserved'
     }
 }
