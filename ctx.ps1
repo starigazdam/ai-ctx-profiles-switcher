@@ -497,6 +497,40 @@ function New-CtxLink {
 
 function Get-CtxFileIdentity {
     param([string]$Path)
+    if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+        try {
+            if (-not ('CtxFileIdentity.Native' -as [type])) {
+                Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+namespace CtxFileIdentity {
+    public static class Native {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BY_HANDLE_FILE_INFORMATION {
+            public uint FileAttributes, CreationTimeLow, CreationTimeHigh;
+            public uint LastAccessTimeLow, LastAccessTimeHigh, LastWriteTimeLow, LastWriteTimeHigh;
+            public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+        }
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        public static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern bool GetFileInformationByHandle(SafeFileHandle handle, out BY_HANDLE_FILE_INFORMATION info);
+    }
+}
+'@
+            }
+            $handle = [CtxFileIdentity.Native]::CreateFile($Path, 0x80, 0x7, [IntPtr]::Zero, 3, 0x80, [IntPtr]::Zero)
+            if ($handle -and -not $handle.IsInvalid) {
+                $info = New-Object CtxFileIdentity.Native+BY_HANDLE_FILE_INFORMATION
+                if ([CtxFileIdentity.Native]::GetFileInformationByHandle($handle, [ref]$info)) {
+                    return "$($info.VolumeSerialNumber):$($info.FileIndexHigh):$($info.FileIndexLow)"
+                }
+            }
+        } catch { }
+        return $null
+    }
     foreach ($statArgs in @(@('-c', '%d:%i'), @('-f', '%d:%i'))) {
         try {
             $value = (& stat @statArgs -- $Path 2>$null).Trim()
@@ -508,8 +542,8 @@ function Get-CtxFileIdentity {
 
 function Test-CtxIsLink {
     param([string]$Path, [string]$Target)
-    if (-not (Test-Path -LiteralPath $Path)) { return $false }
-    $item = Get-Item -LiteralPath $Path -Force
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return $false }
     if ([bool]($item.LinkType) -or [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $true }
     if (-not $Target -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
         try {
@@ -551,7 +585,8 @@ function Resolve-CtxLink {
 
     $linkPath = Join-Path $HomeDir $Name
 
-    if (Test-Path -LiteralPath $linkPath) {
+    $linkItem = Get-Item -LiteralPath $linkPath -Force -ErrorAction SilentlyContinue
+    if ($linkItem) {
         if (Test-CtxIsLink -Path $linkPath -Target $RealTarget) {
             $currentTarget = Get-CtxLinkTarget -Path $linkPath -Target $RealTarget
             # Compare as raw strings (normalising separators) rather than via
@@ -888,7 +923,7 @@ function Import-CtxFile {
 
         $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
 
-        if ($name -eq 'home') {
+        if ($name -ieq 'home') {
             if ($homeOverride) {
                 Write-Error "ctx: error: duplicate `"home:`" directive in $CtxFile"
                 return $false
@@ -945,7 +980,7 @@ function Test-CtxActivation {
         $name = $line.Substring(0,$i).Trim(); $path = $line.Substring($i+1).Trim()
         if (-not $name -or -not $path) { Write-Host "CHECK FAIL parser: invalid or missing entry $name"; $failures++; continue }
         $resolved = if ([IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dir $path }
-        if ($name -eq 'home') {
+        if ($name -ieq 'home') {
             if ($homeOverride) { Write-Host 'CHECK FAIL parser: duplicate home directive'; $failures++; continue }
             try { $homeOverride = Get-CtxValidatedHomePath -Path $resolved } catch { Write-Host 'CHECK FAIL COPILOT_HOME: invalid home directive'; $failures++ }
             continue

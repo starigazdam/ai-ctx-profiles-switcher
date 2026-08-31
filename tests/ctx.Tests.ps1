@@ -631,6 +631,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $link = Join-Path $env:COPILOT_HOME 'settings.json'
         Remove-Item -LiteralPath $link -Force
         New-Item -ItemType HardLink -Path $link -Target (Join-Path $env:CTX_COPILOT_DIR 'settings.json') | Out-Null
+        (Get-CtxFileIdentity -Path $link) | Should -Be (Get-CtxFileIdentity -Path (Join-Path $env:CTX_COPILOT_DIR 'settings.json'))
         Set-Location $proj
         (ctx check) | Should -BeTrue
     }
@@ -663,18 +664,44 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $first = @(Test-CtxActivation)
         $second = @(Test-CtxActivation)
         ($first -join "`n") | Should -Be ($second -join "`n")
-        ($first -join "`n") | Should -Match 'CHECK PASS skills:alpha-skill'
-        ($first -join "`n") | Should -Match 'CHECK PASS skills:zeta-skill'
+        ($first -join "`n") | Should -Match 'CHECK SKIP skills: copilot probe disabled in read-only check'
+        ($first -join "`n") | Should -Match 'CHECK SKIP skills: copilot probe disabled in read-only check'
     }
 
     It 'ctx check treats mixed-case HOME like Import-CtxFile' {
         $proj = Join-Path $Script:TestTmp 'project-check-home-case'
-        $override = Join-Path $Script:TestTmp 'custom-copilot-home'
+        $override = Join-Path $env:HOME 'custom-copilot-home'
         $reviewDir = New-CtxTestProfile -Name 'review'
         New-Item -ItemType Directory -Path $proj, $override -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "HOME:$override`nreview:$reviewDir"
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
         Set-Location $proj
         (Test-CtxActivation) | Should -BeTrue
+    }
+
+    It 'activation treats mixed-case HOME as a directive and excludes it from AI_CONTEXT' {
+        $proj = Join-Path $env:HOME 'project-activation-home-case'
+        $override = Join-Path $env:HOME 'custom-copilot-home'
+        $reviewDir = New-CtxTestProfile -Name 'review'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "HoMe:$override`nreview:$reviewDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Should -BeTrue
+        $env:COPILOT_HOME | Should -Be $override
+        $env:AI_CONTEXT | Should -Be 'review'
+        $env:AI_CONTEXT | Should -Not -Match 'HoMe'
+    }
+
+    It 'reactivation removes a dangling stale skill link' {
+        $proj = Join-Path $env:HOME 'project-dangling-skill'
+        $reviewDir = New-CtxTestProfile -Name 'review'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        $stale = Join-Path $env:COPILOT_HOME 'skills\stale-skill'
+        New-Item -ItemType SymbolicLink -Path $stale -Target (Join-Path $Script:TestTmp 'missing-skill') | Out-Null
+        (Get-Item -LiteralPath $stale -Force).LinkType | Should -Not -BeNullOrEmpty
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        Test-Path -LiteralPath $stale | Should -BeFalse
+        Get-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 }

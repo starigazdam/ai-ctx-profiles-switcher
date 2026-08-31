@@ -692,13 +692,15 @@ EOF
     cd "$proj"
     cat > "$TEST_TMP/bin/copilot" <<'EOF'
 #!/usr/bin/env bash
+printf 'called' > "$TEST_TMP/copilot-called"
 [ "$1" = skill ] && [ "$2" = list ] && [ "$3" = --json ] || exit 9
 printf '{"skills":[{"name":"review-skill"}]}\n'
 EOF
     chmod +x "$TEST_TMP/bin/copilot"
     PATH="$TEST_TMP/bin:$PATH" run ctx check
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CHECK PASS skills"* ]]
+    [[ "$output" == *"CHECK SKIP skills: copilot probe disabled in read-only check"* ]]
+    [ ! -e "$TEST_TMP/copilot-called" ]
 }
 
 
@@ -745,7 +747,7 @@ EOF
     chmod +x "$TEST_TMP/bin/copilot"
     PATH="$TEST_TMP/bin:$PATH" run ctx check
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CHECK SKIP skills: copilot skill list --json malformed"* ]]
+    [[ "$output" == *"CHECK SKIP skills: copilot probe disabled in read-only check"* ]]
 }
 
 @test "ctx check uses python fallback for optional copilot JSON" {
@@ -768,7 +770,7 @@ EOF
     chmod +x "$TEST_TMP/bin/copilot" "$TEST_TMP/bin/python"
     PATH="$TEST_TMP/bin:/usr/bin" run ctx check
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CHECK PASS skills:review-skill"* ]]
+    [[ "$output" == *"CHECK SKIP skills: copilot probe disabled in read-only check"* ]]
 }
 
 @test "ctx check reports optional copilot skills in deterministic order" {
@@ -791,7 +793,7 @@ EOF
     PATH="$TEST_TMP/bin:$PATH" run ctx check
     [ "$status" -eq 0 ]
     [ "$output" = "$first" ]
-    [[ "$output" == *$'CHECK PASS skills:alpha-skill\nCHECK PASS skills:zeta-skill'* ]]
+    [[ "$output" == *"CHECK SKIP skills: copilot probe disabled in read-only check"* ]]
 }
 
 @test "ctx check skips workspace audit when no python interpreter exists" {
@@ -814,7 +816,7 @@ EOF
 
 @test "ctx check treats mixed-case HOME like the activation parser" {
     local proj="$HOME/project-check-home-case"
-    local override="$TEST_TMP/custom-copilot-home"
+    local override="$HOME/custom-copilot-home"
     _make_profile review
     mkdir -p "$proj" "$override"
     printf 'HOME:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
@@ -823,4 +825,33 @@ EOF
     run ctx check
     [ "$status" -eq 0 ]
     [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
+}
+
+@test "activation treats mixed-case HOME as a directive and excludes it from AI_CONTEXT" {
+    local proj="$HOME/project-activation-home-case"
+    local override="$HOME/custom-copilot-home"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'HoMe:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    _ctx_load_ctx_file "$proj/.ctx"
+
+    [ "$COPILOT_HOME" = "$override" ]
+    [ "$AI_CONTEXT" = "review" ]
+    [[ "$AI_CONTEXT" != *"HoMe"* ]]
+}
+
+@test "reactivation removes a dangling stale skill symlink" {
+    local proj="$HOME/project-dangling-skill"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    ln -s "$TEST_TMP/missing-skill" "$COPILOT_HOME/skills/stale-skill"
+    [ -L "$COPILOT_HOME/skills/stale-skill" ]
+
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+
+    [ ! -e "$COPILOT_HOME/skills/stale-skill" ]
+    [ ! -L "$COPILOT_HOME/skills/stale-skill" ]
 }

@@ -636,7 +636,7 @@ EOF
     if [ -d "$home_dir/skills" ]; then
         local existing
         for existing in "$home_dir/skills"/*; do
-            [ -e "$existing" ] || continue
+            [ -e "$existing" ] || [ -L "$existing" ] || continue
             local ename
             ename="$(basename "$existing")"
             if [ -z "${desired_skills[$ename]:-}" ]; then
@@ -852,7 +852,7 @@ _ctx_load_ctx_file() {
             *) resolved_path="$dir_of_file/$path" ;;
         esac
 
-        if [ "$name" = "home" ]; then
+        if [ "${name,,}" = "home" ]; then
             if [ -n "$home_override" ]; then
                 printf 'ctx: error: duplicate "home:" directive in %s\n' "$ctx_file" >&2
                 return 1
@@ -938,7 +938,7 @@ _ctx_check() {
         name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
         path="${path#"${path%%[![:space:]]*}"}"; path="${path%"${path##*[![:space:]]}"}"
         case "$path" in /*) resolved_path="$path" ;; *) resolved_path="$dir_of_file/$path" ;; esac
-        if [ "$name" = home ]; then
+        if [ "${name,,}" = home ]; then
             if [ -n "$home_override" ]; then printf 'CHECK FAIL parser: duplicate home directive\n'; failures=$((failures+1)); continue; fi
             if ! home_override="$(_ctx_validate_home_path "$resolved_path" 2>/dev/null)"; then
                 printf 'CHECK FAIL COPILOT_HOME: invalid home directive\n'; failures=$((failures+1)); continue
@@ -984,7 +984,7 @@ EOF
         [ -d "$skill_dir" ] || continue
         for s in "$skill_dir"/*/; do [ -d "$s" ] || continue; skill_name="$(basename "$s")"; desired["$skill_name"]="${s%/}"; done
     done
-    for s in "$expected_home/skills"/*; do [ -e "$s" ] || continue; actual["$(basename "$s")"]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"; done
+    for s in "$expected_home/skills"/*; do [ -e "$s" ] || [ -L "$s" ] || continue; actual["$(basename "$s")"]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"; done
     local sorted_skills
     sorted_skills="$(printf '%s\n' "${!desired[@]}" | sort)"
     while IFS= read -r skill_name; do
@@ -997,31 +997,9 @@ EOF
         [ -n "${desired[$skill_name]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }
     done <<< "$sorted_skills"
 
-    if command -v copilot >/dev/null 2>&1; then
-        local copilot_json
-        if copilot_json="$(COPILOT_HOME="$expected_home" copilot skill list --json 2>/dev/null)"; then
-            local missing
-            local json_bin=""
-            if command -v python3 >/dev/null 2>&1; then json_bin="python3"; elif command -v python >/dev/null 2>&1; then json_bin="python"; fi
-            if [ -z "$json_bin" ]; then
-                printf 'CHECK SKIP skills: no python interpreter available\n'
-            else
-                local missing parse_status=0
-                missing="$(printf '%s' "$copilot_json" | "$json_bin" -c 'import json,sys; d=json.load(sys.stdin); xs=d if isinstance(d,list) else d.get("skills", []); print("\n".join(sorted(x.get("name", "") for x in xs if isinstance(x,dict) and x.get("name"))))' 2>/dev/null)" || parse_status=$?
-                if [ "$parse_status" -ne 0 ]; then
-                    printf 'CHECK SKIP skills: copilot skill list --json malformed\n'
-                else
-                    sorted_skills="$(printf '%s\n' "${!desired[@]}" | sort)"
-                    while IFS= read -r skill_name; do
-                        [ -n "$skill_name" ] || continue
-                        if printf '%s\n' "$missing" | grep -Fxq "$skill_name"; then printf 'CHECK PASS skills:%s\n' "$skill_name"; else printf 'CHECK FAIL skills:%s: copilot did not report expected skill\n' "$skill_name"; failures=$((failures+1)); fi
-                    done <<< "$sorted_skills"
-                fi
-            fi
-        else printf 'CHECK SKIP skills: copilot skill list --json failed\n'; fi
-    else
-        printf 'CHECK SKIP skills: copilot unavailable\n'
-    fi
+    # Strict check is read-only: do not invoke external copilot commands.
+    # Even a seemingly informational probe may write caches/state.
+    printf 'CHECK SKIP skills: copilot probe disabled in read-only check\n'
 
     local workspace="$dir_of_file/$(basename "$dir_of_file").code-workspace"
     if [ -e "$workspace" ] && [ ! -L "$workspace" ]; then
