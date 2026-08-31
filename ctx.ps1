@@ -117,7 +117,8 @@ function Show-CtxUsage {
     @'
 Usage:
   ctx <profile> [shared...]   Activate a profile with optional shared contexts
-  ctx current                 Show the currently active context
+  ctx current                   Show the currently active context
+  ctx check                    Read-only audit against the nearest .ctx file
   ctx clear                   Clear the currently active context
   ctx clear --all             Remove the current context home and generated
                                project artifacts next to the nearest .ctx file
@@ -299,6 +300,9 @@ function ctx {
         'current' {
             Show-CtxCurrent
             return
+        }
+        'check' {
+            return (Test-CtxActivation)
         }
         'clear' {
             $all = $Contexts.Count -gt 1 -and $Contexts[1] -eq '--all'
@@ -491,22 +495,75 @@ function New-CtxLink {
     return $false
 }
 
-function Test-CtxIsLink {
+function Get-CtxFileIdentity {
     param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return $false
+    if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+        try {
+            if (-not ('CtxFileIdentity.Native' -as [type])) {
+                Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+namespace CtxFileIdentity {
+    public static class Native {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BY_HANDLE_FILE_INFORMATION {
+            public uint FileAttributes, CreationTimeLow, CreationTimeHigh;
+            public uint LastAccessTimeLow, LastAccessTimeHigh, LastWriteTimeLow, LastWriteTimeHigh;
+            public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;
+        }
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        public static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        public static extern bool GetFileInformationByHandle(SafeFileHandle handle, out BY_HANDLE_FILE_INFORMATION info);
     }
-    $item = Get-Item -LiteralPath $Path -Force
-    return [bool]($item.LinkType) -or [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+}
+'@
+            }
+            $handle = [CtxFileIdentity.Native]::CreateFile($Path, 0x80, 0x7, [IntPtr]::Zero, 3, 0x80, [IntPtr]::Zero)
+            if ($handle -and -not $handle.IsInvalid) {
+                $info = New-Object CtxFileIdentity.Native+BY_HANDLE_FILE_INFORMATION
+                if ([CtxFileIdentity.Native]::GetFileInformationByHandle($handle, [ref]$info)) {
+                    return "$($info.VolumeSerialNumber):$($info.FileIndexHigh):$($info.FileIndexLow)"
+                }
+            }
+        } catch { }
+        return $null
+    }
+    foreach ($statArgs in @(@('-c', '%d:%i'), @('-f', '%d:%i'))) {
+        try {
+            $value = (& stat @statArgs -- $Path 2>$null).Trim()
+            if ($value) { return $value }
+        } catch { }
+    }
+    return $null
+}
+
+function Test-CtxIsLink {
+    param([string]$Path, [string]$Target)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return $false }
+    if ([bool]($item.LinkType) -or [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $true }
+    if (-not $Target -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        try {
+            $linkCount = (& stat -c '%h' -- $Path 2>$null).Trim()
+            if ($linkCount -and [int]$linkCount -gt 1) { return $true }
+        } catch { }
+    }
+    if ($Target -and (Test-Path -LiteralPath $Path -PathType Leaf) -and (Test-Path -LiteralPath $Target -PathType Leaf)) {
+        $left = Get-CtxFileIdentity -Path $Path
+        $right = Get-CtxFileIdentity -Path $Target
+        return [bool]($left -and $right -and $left -eq $right)
+    }
+    return $false
 }
 
 function Get-CtxLinkTarget {
-    param([string]$Path)
+    param([string]$Path, [string]$Target)
     $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Target) {
-        # Target can be an array on some PS versions/link types.
-        return @($item.Target)[0]
-    }
+    if ($item.Target) { return @($item.Target)[0] }
+    if ($Target -and (Test-CtxIsLink -Path $Path -Target $Target)) { return $Target }
     return $null
 }
 
@@ -528,9 +585,10 @@ function Resolve-CtxLink {
 
     $linkPath = Join-Path $HomeDir $Name
 
-    if (Test-Path -LiteralPath $linkPath) {
-        if (Test-CtxIsLink -Path $linkPath) {
-            $currentTarget = Get-CtxLinkTarget -Path $linkPath
+    $linkItem = Get-Item -LiteralPath $linkPath -Force -ErrorAction SilentlyContinue
+    if ($linkItem) {
+        if (Test-CtxIsLink -Path $linkPath -Target $RealTarget) {
+            $currentTarget = Get-CtxLinkTarget -Path $linkPath -Target $RealTarget
             # Compare as raw strings (normalising separators) rather than via
             # Resolve-Path: when neither target exists yet (e.g. settings.json,
             # mcp-config.json not yet written by Copilot), Resolve-Path returns
@@ -671,7 +729,7 @@ function Set-CtxCopilotHome {
         $link = Join-Path $skillsHome $name
         $needsCreate = $true
         if (Test-Path -LiteralPath $link) {
-            if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $target)) {
+            if ((Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target) -eq $target)) {
                 $needsCreate = $false
             } else {
                 Remove-Item -LiteralPath $link -Recurse -Force
@@ -865,7 +923,7 @@ function Import-CtxFile {
 
         $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
 
-        if ($name -eq 'home') {
+        if ($name -ieq 'home') {
             if ($homeOverride) {
                 Write-Error "ctx: error: duplicate `"home:`" directive in $CtxFile"
                 return $false
@@ -906,6 +964,73 @@ function Import-CtxFile {
     $sharedCsv = ($names | Select-Object -Skip 1) -join ', '
     Write-CtxStatus -ProfileName $names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv
     return $true
+}
+
+function Test-CtxActivation {
+    # Read-only audit of the nearest .ctx activation. This function deliberately
+    # does not call Import-CtxFile or Set-CtxCopilotHome.
+    $ctxFile = Find-CtxFile
+    if (-not $ctxFile) { Write-Host 'ctx check: no .ctx file found; nothing to check'; return $true }
+    $dir = Split-Path -Parent $ctxFile
+    $names = @(); $dirs = @(); $homeOverride = $null; $failures = 0
+    foreach ($raw in Get-Content -LiteralPath $ctxFile) {
+        $line = $raw.Trim(); if (-not $line -or $line.StartsWith('#')) { continue }
+        $i = $line.IndexOf(':')
+        if ($i -lt 1) { Write-Host 'CHECK FAIL parser: invalid .ctx line'; $failures++; continue }
+        $name = $line.Substring(0,$i).Trim(); $path = $line.Substring($i+1).Trim()
+        if (-not $name -or -not $path) { Write-Host "CHECK FAIL parser: invalid or missing entry $name"; $failures++; continue }
+        $resolved = if ([IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dir $path }
+        if ($name -ieq 'home') {
+            if ($homeOverride) { Write-Host 'CHECK FAIL parser: duplicate home directive'; $failures++; continue }
+            try { $homeOverride = Get-CtxValidatedHomePath -Path $resolved } catch { Write-Host 'CHECK FAIL COPILOT_HOME: invalid home directive'; $failures++ }
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { Write-Host "CHECK FAIL parser: invalid or missing entry $name"; $failures++; continue }
+        $names += $name; $dirs += $resolved
+    }
+    if ($names.Count -eq 0) { Write-Host 'CHECK FAIL parser: .ctx has no entries'; return $false }
+    $expectedContext = $names -join '+'; $expectedDirs = $dirs -join ','
+    if ($env:AI_CONTEXT -ceq $expectedContext) { Write-Host 'CHECK PASS AI_CONTEXT' } else { Write-Host "CHECK FAIL AI_CONTEXT: expected $expectedContext, got $(if($env:AI_CONTEXT){$env:AI_CONTEXT}else{'<unset>'})"; $failures++ }
+    if ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq $expectedDirs) { Write-Host 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS' } else { Write-Host "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected $expectedDirs, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"; $failures++ }
+    $expectedHome = if ($homeOverride) { $homeOverride } else { Join-Path (Get-CtxCopilotHomeRoot) (Get-CtxSanitizedContextName -Name $expectedContext) }
+    if ($env:COPILOT_HOME -ceq $expectedHome -and (Test-Path -LiteralPath $expectedHome -PathType Container)) { Write-Host 'CHECK PASS COPILOT_HOME' } else { Write-Host "CHECK FAIL COPILOT_HOME: expected $expectedHome, got $(if($env:COPILOT_HOME){$env:COPILOT_HOME}else{'<unset>'})"; $failures++ }
+    foreach ($f in (Get-CtxCopilotHomeSharedFiles) + (Get-CtxCopilotHomeSharedDirs)) {
+        $link = Join-Path $expectedHome $f; $target = Join-Path (Get-CtxCopilotDir) $f
+        if ((Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target).TrimEnd('\','/') -eq $target.TrimEnd('\','/'))) { Write-Host "CHECK PASS link:$f" } else { Write-Host "CHECK FAIL link:${f}: expected link to $target"; $failures++ }
+    }
+    $desired = @{}
+    foreach ($rd in $dirs) { $skillDir = Join-Path $rd '.github\skills'; if (Test-Path -LiteralPath $skillDir -PathType Container) { foreach ($s in Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name) { $desired[$s.Name] = $s.FullName } } }
+    foreach ($name in ($desired.Keys | Sort-Object)) {
+        $link = Join-Path $expectedHome "skills\$name"
+        if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $desired[$name])) { Write-Host "CHECK PASS skill:$name" } else { Write-Host "CHECK FAIL skill:${name}: missing or wrong target"; $failures++ }
+    }
+    $actualSkillNames = @()
+    $skillsHome = Join-Path $expectedHome 'skills'
+    if (Test-Path -LiteralPath $skillsHome -PathType Container) {
+        $actualSkillNames = @(Get-ChildItem -LiteralPath $skillsHome -Force | Sort-Object Name | Select-Object -ExpandProperty Name)
+    }
+    foreach ($actualName in $actualSkillNames) {
+        if (-not $desired.ContainsKey($actualName)) {
+            Write-Host "CHECK FAIL skill:${actualName}: unexpected skill"
+            $failures++
+        }
+    }
+    Write-Host 'CHECK SKIP skills: copilot probe disabled in read-only check'
+    $workspace = Join-Path $dir "$(Split-Path -Leaf $dir).code-workspace"
+    if (Test-Path -LiteralPath $workspace -PathType Leaf) {
+        try {
+            $w = Get-Content -LiteralPath $workspace -Raw | ConvertFrom-Json
+            $pairs = @($w.folders | ForEach-Object { "$($_.path)`n$($_.name)" })
+            $rootName = "root: $(Split-Path -Leaf $dir)"
+            $ok = $pairs -contains ".`n$rootName"
+            for ($j=0; $j -lt $names.Count; $j++) { if ($pairs -notcontains "$($dirs[$j])`nctx: $($names[$j])") { $ok = $false } }
+            $marker = if ($w.generatedBy -ceq 'ctx') { 'ctx' } else { 'unmarked' }
+            Write-Host "CHECK PASS workspace marker=$marker"
+            if (-not $ok) { Write-Host 'CHECK FAIL workspace: missing expected folder(s)'; $failures++ }
+        } catch { Write-Host 'CHECK FAIL workspace: invalid JSON'; $failures++ }
+    } else { Write-Host 'CHECK SKIP workspace: no adjacent workspace file' }
+    if ($failures -eq 0) { Write-Host 'ctx check: PASS'; return $true }
+    Write-Host "ctx check: FAIL ($failures)"; return $false
 }
 
 function Invoke-CtxAutoLoad {

@@ -61,7 +61,48 @@ EOF
     [ "$target" = "$(readlink -f "$AI_CONFIG_ROOT/profiles/review/.github/skills/review-skill")" ]
 }
 
-# --- Test 2: shared-file symlinks point at the real ~/.copilot -------------
+@test "zsh supports manual activation with shared contexts" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+
+    _make_profile review "review-skill"
+    mkdir -p "$AI_CONFIG_ROOT/shared/azure/.github/skills/azure-skill"
+    printf '%s\n' '# azure skill' > "$AI_CONFIG_ROOT/shared/azure/.github/skills/azure-skill/SKILL.md"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        ctx review azure >/dev/null || exit
+        [ "$AI_CONTEXT" = review+azure ] || exit
+        [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$2/profiles/review,$2/shared/azure" ] || exit
+        [ -L "$COPILOT_HOME/skills/review-skill" ] || exit
+        [ -L "$COPILOT_HOME/skills/azure-skill" ] || exit
+    ' -- "$CTX_SRC" "$AI_CONFIG_ROOT"
+
+    [ "$status" -eq 0 ]
+}
+
+@test "BSD stat fallback does not pass GNU-only option separator" {
+    local target="$TEST_TMP/stat-target"
+    printf 'target\n' > "$target"
+
+    stat() {
+        if [ "$1" = "-c" ]; then
+            return 1
+        fi
+        [ "$1" = "-f" ] && [ "$2" = "%d:%i" ] || return 2
+        [ "$3" != "--" ] || return 3
+        printf '42:99\n'
+    }
+
+    run _ctx_file_identity "$target"
+    [ "$status" -eq 0 ]
+    [ "$output" = "42:99" ]
+}
+
+# --- Test 2: shared-file symlinks point at the real copilot dir -------------
 
 @test "shared files symlink back to the real copilot dir" {
     _make_profile "review"
@@ -619,4 +660,267 @@ EOF
         [[ "$output" == *"preserved unowned workspace"* ]]
         [ -f "$workspace" ]
     done
+}
+
+@test "ctx check reports a matching .ctx activation without changing state" {
+    local proj="$HOME/project-check"
+    local profile="$AI_CONFIG_ROOT/profiles/review"
+    _make_profile review review-skill
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$profile" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    local home="$COPILOT_HOME"
+    local before_ctx="$(stat -c '%Y %s' "$proj/.ctx")"
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS AI_CONTEXT"* ]]
+    [[ "$output" == *"ctx check: PASS"* ]]
+    [ "$home" = "$COPILOT_HOME" ]
+    [ "$(stat -c '%Y %s' "$proj/.ctx")" = "$before_ctx" ]
+}
+
+@test "ctx check detects environment and link drift without repairing it" {
+    local proj="$HOME/project-check-drift"
+    local profile="$AI_CONFIG_ROOT/profiles/review"
+    _make_profile review review-skill
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$profile" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    local home="$COPILOT_HOME"
+    cd "$proj"
+    export AI_CONTEXT=wrong
+    rm -f "$home/settings.json"
+    printf 'drift' > "$home/settings.json"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL AI_CONTEXT"* ]]
+    [[ "$output" == *"CHECK FAIL link:settings.json"* ]]
+    [ -f "$home/settings.json" ]
+    [ ! -L "$home/settings.json" ]
+}
+
+@test "ctx check succeeds with no nearest .ctx and does not clear the shell" {
+    export AI_CONTEXT=manual
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=manual-dir
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no .ctx file found"* ]]
+    [ "$AI_CONTEXT" = manual ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = manual-dir ]
+}
+
+@test "ctx check detects workspace folder drift" {
+    local proj="$HOME/project-check-workspace"
+    local profile="$AI_CONFIG_ROOT/profiles/review"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$profile" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    printf '{"generatedBy":"ctx","folders":[]}' > "$proj/project-check-workspace.code-workspace"
+    cd "$proj"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL workspace"* ]]
+}
+
+@test "ctx check uses a fake copilot skill list without auth or network" {
+    local proj="$HOME/project-check-copilot"
+    _make_profile review review-skill
+    mkdir -p "$proj" "$TEST_TMP/bin"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    cd "$proj"
+    cat > "$TEST_TMP/bin/copilot" <<'EOF'
+#!/usr/bin/env bash
+printf 'called' > "$TEST_TMP/copilot-called"
+[ "$1" = skill ] && [ "$2" = list ] && [ "$3" = --json ] || exit 9
+printf '{"skills":[{"name":"review-skill"}]}\n'
+EOF
+    chmod +x "$TEST_TMP/bin/copilot"
+    PATH="$TEST_TMP/bin:$PATH" run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK SKIP skills: copilot probe disabled in read-only check"* ]]
+    [ ! -e "$TEST_TMP/copilot-called" ]
+}
+
+
+@test "direct ctx check preserves diagnostics and returns a scalar status" {
+    local proj="$HOME/project-check-direct"
+    _make_profile review review-skill
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    cd "$proj"
+    ctx check >/dev/null
+    [ "$?" -eq 0 ]
+    export AI_CONTEXT=wrong
+    if ctx check >/dev/null; then false; else [ "$?" -eq 1 ]; fi
+}
+
+@test "ctx check accepts hardlink fallback for shared files" {
+    local proj="$HOME/project-check-hardlink"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    rm -f "$COPILOT_HOME/settings.json"
+    : > "$CTX_COPILOT_DIR/settings.json"
+    ln "$CTX_COPILOT_DIR/settings.json" "$COPILOT_HOME/settings.json"
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx check: PASS"* ]]
+}
+
+@test "ctx check skips malformed optional copilot JSON" {
+    local proj="$HOME/project-check-copilot-malformed"
+    _make_profile review review-skill
+    mkdir -p "$proj" "$TEST_TMP/bin"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    rm -f "$proj/project-check-copilot-malformed.code-workspace"
+    cd "$proj"
+    cat > "$TEST_TMP/bin/copilot" <<'EOF'
+#!/usr/bin/env bash
+printf '{not-json}\n'
+EOF
+    chmod +x "$TEST_TMP/bin/copilot"
+    PATH="$TEST_TMP/bin:$PATH" run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK SKIP skills: copilot probe disabled in read-only check"* ]]
+}
+
+@test "ctx check uses python fallback for optional copilot JSON" {
+    local proj="$HOME/project-check-copilot-python"
+    _make_profile review review-skill
+    mkdir -p "$proj" "$TEST_TMP/bin"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    rm -f "$proj/project-check-copilot-python.code-workspace"
+    cd "$proj"
+    cat > "$TEST_TMP/bin/copilot" <<'EOF'
+#!/usr/bin/env bash
+printf '{"skills":[{"name":"review-skill"}]}\n'
+EOF
+    cat > "$TEST_TMP/bin/python" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'review-skill\n'
+EOF
+    chmod +x "$TEST_TMP/bin/copilot" "$TEST_TMP/bin/python"
+    PATH="$TEST_TMP/bin:/usr/bin" run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK SKIP skills: copilot probe disabled in read-only check"* ]]
+}
+
+@test "ctx check reports optional copilot skills in deterministic order" {
+    local proj="$HOME/project-check-copilot-order"
+    _make_profile review zeta-skill
+    mkdir -p "$AI_CONFIG_ROOT/profiles/review/.github/skills/alpha-skill" "$proj" "$TEST_TMP/bin"
+    printf '%s\n' '---' 'name: alpha-skill' 'description: alpha' '---' > "$AI_CONFIG_ROOT/profiles/review/.github/skills/alpha-skill/SKILL.md"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    rm -f "$proj/project-check-copilot-order.code-workspace"
+    cat > "$TEST_TMP/bin/copilot" <<'EOF'
+#!/usr/bin/env bash
+printf '[{"name":"zeta-skill"},{"name":"alpha-skill"}]\n'
+EOF
+    chmod +x "$TEST_TMP/bin/copilot"
+    cd "$proj"
+    PATH="$TEST_TMP/bin:$PATH" run ctx check
+    [ "$status" -eq 0 ]
+    local first="$output"
+    PATH="$TEST_TMP/bin:$PATH" run ctx check
+    [ "$status" -eq 0 ]
+    [ "$output" = "$first" ]
+    [[ "$output" == *"CHECK SKIP skills: copilot probe disabled in read-only check"* ]]
+}
+
+@test "ctx check skips workspace audit when no python interpreter exists" {
+    local proj="$HOME/project-check-workspace-no-python"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    printf '{"generatedBy":"ctx","folders":[]}' > "$proj/project-check-workspace-no-python.code-workspace"
+    cd "$proj"
+    command() {
+        if [ "$1" = -v ] && { [ "$2" = python3 ] || [ "$2" = python ]; }; then return 1; fi
+        builtin command "$@"
+    }
+    export -f command
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK SKIP workspace: no python interpreter available"* ]]
+}
+
+@test "ctx check treats mixed-case HOME like the activation parser" {
+    local proj="$HOME/project-check-home-case"
+    local override="$HOME/custom-copilot-home"
+    _make_profile review
+    mkdir -p "$proj" "$override"
+    printf 'HOME:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
+}
+
+@test "activation treats mixed-case HOME as a directive and excludes it from AI_CONTEXT" {
+    local proj="$HOME/project-activation-home-case"
+    local override="$HOME/custom-copilot-home"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'HoMe:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    _ctx_load_ctx_file "$proj/.ctx"
+
+    [ "$COPILOT_HOME" = "$override" ]
+    [ "$AI_CONTEXT" = "review" ]
+    [[ "$AI_CONTEXT" != *"HoMe"* ]]
+}
+
+@test "zsh supports mixed-case HOME in .ctx activation and ctx check" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+
+    local proj="$HOME/project-zsh-home-case"
+    local override="$HOME/custom-zsh-copilot-home"
+    _make_profile review
+    mkdir -p "$proj" "$override"
+    printf 'HoMe:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        _ctx_load_ctx_file "$2" >/dev/null || exit
+        rm -f "$4/project-zsh-home-case.code-workspace"
+        [ "$COPILOT_HOME" = "$3" ] || exit
+        [ "$AI_CONTEXT" = review ] || exit
+        cd "$4" || exit
+        ctx check
+    ' -- "$CTX_SRC" "$proj/.ctx" "$override" "$proj"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
+    [[ "$output" == *"ctx check: PASS"* ]]
+}
+
+@test "reactivation removes a dangling stale skill symlink" {
+    local proj="$HOME/project-dangling-skill"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    ln -s "$TEST_TMP/missing-skill" "$COPILOT_HOME/skills/stale-skill"
+    [ -L "$COPILOT_HOME/skills/stale-skill" ]
+
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+
+    [ ! -e "$COPILOT_HOME/skills/stale-skill" ]
+    [ ! -L "$COPILOT_HOME/skills/stale-skill" ]
 }

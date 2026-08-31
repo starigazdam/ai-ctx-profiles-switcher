@@ -111,11 +111,18 @@ _ctx_root() {
     printf '%s\n' "${AI_CONFIG_ROOT:-$HOME/work/ai-config}"
 }
 
+# Lowercase a context name without shell-specific case conversion syntax.
+# `${name,,}` is not supported by zsh, despite ctx.sh supporting both shells.
+_ctx_lowercase() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 _ctx_usage() {
     cat <<'EOF'
 Usage:
   ctx <profile> [shared...]   Activate a profile with optional shared contexts
-  ctx current                 Show the currently active context
+  ctx current                   Show the currently active context
+  ctx check                    Read-only audit against the nearest .ctx file
   ctx clear                   Clear the currently active context
   ctx clear --all             Remove the current context home and generated
                                project artifacts next to the nearest .ctx file
@@ -171,6 +178,28 @@ _ctx_current() {
     fi
 
     _ctx_print_status "$profile" "$shared_csv" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}"
+}
+
+_ctx_file_identity() {
+    local path="$1" result
+    if command -v stat >/dev/null 2>&1; then
+        result="$(stat -c '%d:%i' -- "$path" 2>/dev/null)" || result=""
+        # BSD/macOS stat does not accept GNU's `--` option separator.
+        [ -n "$result" ] || result="$(stat -f '%d:%i' "$path" 2>/dev/null)"
+    fi
+    [ -n "$result" ] || return 1
+    printf '%s\n' "$result"
+}
+
+_ctx_link_matches() {
+    local link="$1" target="$2" link_target
+    if [ -L "$link" ]; then
+        link_target="$(readlink "$link")"
+        [ "$link_target" = "$target" ]
+        return
+    fi
+    [ -f "$link" ] && [ -f "$target" ] || return 1
+    [ "$(_ctx_file_identity "$link")" = "$(_ctx_file_identity "$target")" ]
 }
 
 _ctx_workspace_is_generated() {
@@ -308,6 +337,10 @@ ctx() {
             _ctx_current
             return 0
             ;;
+        check)
+            _ctx_check
+            return $?
+            ;;
         clear)
             _ctx_clear "$2"
             return $?
@@ -369,7 +402,11 @@ ctx() {
     fi
 
     local -a resolved_dirs_manual=()
-    IFS=',' read -r -a resolved_dirs_manual <<< "$dirs_csv"
+    if [ -n "${ZSH_VERSION:-}" ]; then
+        resolved_dirs_manual=("${(@s:,:)dirs_csv}")
+    else
+        IFS=',' read -r -a resolved_dirs_manual <<< "$dirs_csv"
+    fi
 
     _ctx_setup_copilot_home "$AI_CONTEXT" "" "${resolved_dirs_manual[@]}"
 
@@ -449,8 +486,9 @@ _ctx_validate_home_path() {
     [ "$root_is_candidate" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is an allowed root, not a descendant\n' "$candidate" >&2; return 1; }
     [ "$allowed" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is outside HOME/CTX_HOMES_ROOT\n' "$candidate" >&2; return 1; }
     rest="${candidate#/}"; prefix="/"
-    IFS='/' read -r -a parts <<< "$rest"
-    for part in "${parts[@]}"; do
+    while [ -n "$rest" ]; do
+        part="${rest%%/*}"
+        if [ "$rest" = "$part" ]; then rest=""; else rest="${rest#*/}"; fi
         [ -n "$part" ] || continue
         prefix="${prefix%/}/$part"
         [ ! -L "$prefix" ] || { printf 'ctx: error: unsafe home: symlink component in %s\n' "$candidate" >&2; return 1; }
@@ -594,23 +632,23 @@ EOF
     # Reconcile skills/: desired (name -> target) pairs come from each
     # resolved dir's .github/skills subfolder, if present.
     local -A desired_skills=()
+    local -a desired_skill_names=()
     local rd skill_dir sname
     for rd in "${resolved_dirs[@]}"; do
         skill_dir="$rd/.github/skills"
         [ -d "$skill_dir" ] || continue
         local s
-        for s in "$skill_dir"/*/; do
-            [ -d "$s" ] || continue
+        while IFS= read -r s; do
             sname="$(basename "$s")"
-            desired_skills["$sname"]="${s%/}"
-        done
+            [ -n "${desired_skills[$sname]+set}" ] || desired_skill_names+=("$sname")
+            desired_skills[$sname]="${s%/}"
+        done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
     done
 
     # Remove stale skill symlinks no longer in desired set.
     if [ -d "$home_dir/skills" ]; then
         local existing
-        for existing in "$home_dir/skills"/*; do
-            [ -e "$existing" ] || continue
+        while IFS= read -r existing; do
             local ename
             ename="$(basename "$existing")"
             if [ -z "${desired_skills[$ename]:-}" ]; then
@@ -619,12 +657,12 @@ EOF
                 # (Remove-Item -Recurse -Force).
                 rm -rf "$existing"
             fi
-        done
+        done < <(find "$home_dir/skills" -mindepth 1 -maxdepth 1 -print)
     fi
 
     # Create/repair desired skill symlinks (idempotent).
     local name target link
-    for name in "${!desired_skills[@]}"; do
+    for name in "${desired_skill_names[@]}"; do
         target="${desired_skills[$name]}"
         link="$home_dir/skills/$name"
         if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
@@ -789,9 +827,10 @@ _ctx_load_ctx_file() {
     dir_of_file="$(dirname "$ctx_file")"
 
     local ai_context="" dirs_csv="" first_name="" home_override=""
-    local line name path resolved_path
+    local line name entry_path resolved_path
     local -a resolved_dirs=()
     local -a resolved_names=()
+    local -a workspace_pairs=()
 
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"
@@ -808,25 +847,25 @@ _ctx_load_ctx_file() {
         esac
 
         name="${line%%:*}"
-        path="${line#*:}"
+        entry_path="${line#*:}"
         # Trim leading/trailing whitespace so "home: .copilot-ctx" (with a
         # space after the colon, as shown in docs/examples) parses the same
         # as "home:.copilot-ctx" - matches ctx.ps1's .Trim() on both sides.
         name="${name#"${name%%[![:space:]]*}"}"
         name="${name%"${name##*[![:space:]]}"}"
-        path="${path#"${path%%[![:space:]]*}"}"
-        path="${path%"${path##*[![:space:]]}"}"
-        if [ -z "$name" ] || [ -z "$path" ]; then
+        entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"
+        entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
+        if [ -z "$name" ] || [ -z "$entry_path" ]; then
             printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2
             return 1
         fi
 
-        case "$path" in
-            /*) resolved_path="$path" ;;
-            *) resolved_path="$dir_of_file/$path" ;;
+        case "$entry_path" in
+            /*) resolved_path="$entry_path" ;;
+            *) resolved_path="$dir_of_file/$entry_path" ;;
         esac
 
-        if [ "$name" = "home" ]; then
+        if [ "$(_ctx_lowercase "$name")" = "home" ]; then
             if [ -n "$home_override" ]; then
                 printf 'ctx: error: duplicate "home:" directive in %s\n' "$ctx_file" >&2
                 return 1
@@ -852,6 +891,7 @@ _ctx_load_ctx_file() {
         fi
         resolved_dirs+=("$resolved_path")
         resolved_names+=("$name")
+        workspace_pairs+=("$name" "$resolved_path")
     done < "$ctx_file"
 
     if [ -z "$ai_context" ]; then
@@ -868,11 +908,6 @@ _ctx_load_ctx_file() {
     # Create/update "<folder-name>.code-workspace" next to the .ctx file so
     # this project and its .ctx dependencies can be browsed together in one
     # VS Code window (name/path pairs, alternating).
-    local -a workspace_pairs=()
-    local i
-    for ((i = 0; i < ${#resolved_names[@]}; i++)); do
-        workspace_pairs+=("${resolved_names[$i]}" "${resolved_dirs[$i]}")
-    done
     _ctx_update_workspace_file "$dir_of_file" "${workspace_pairs[@]}"
 
     export AI_CONTEXT="$ai_context"
@@ -890,6 +925,129 @@ _ctx_load_ctx_file() {
     fi
 
     _ctx_print_status "$first_name" "$shared_csv" "$dirs_csv"
+}
+
+_ctx_check() {
+    local ctx_file dir_of_file line name entry_path resolved_path home_override=""
+    local expected_context="" expected_dirs="" first=1
+    local -a names=() dirs=()
+    local failures=0
+
+    if ! ctx_file="$(_ctx_find_ctx_file)"; then
+        printf 'ctx check: no .ctx file found; nothing to check\n'
+        return 0
+    fi
+    dir_of_file="$(dirname "$ctx_file")"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        [ -z "$line" ] && continue
+        case "$line" in '#'* ) continue ;; esac
+        case "$line" in *:*) ;; *) printf 'CHECK FAIL parser: invalid .ctx line\n'; failures=$((failures+1)); continue ;; esac
+        name="${line%%:*}"; entry_path="${line#*:}"
+        name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+        entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"; entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
+        case "$entry_path" in /*) resolved_path="$entry_path" ;; *) resolved_path="$dir_of_file/$entry_path" ;; esac
+        if [ "$(_ctx_lowercase "$name")" = home ]; then
+            if [ -n "$home_override" ]; then printf 'CHECK FAIL parser: duplicate home directive\n'; failures=$((failures+1)); continue; fi
+            if ! home_override="$(_ctx_validate_home_path "$resolved_path" 2>/dev/null)"; then
+                printf 'CHECK FAIL COPILOT_HOME: invalid home directive\n'; failures=$((failures+1)); continue
+            fi
+            continue
+        fi
+        if [ -z "$name" ] || [ -z "$entry_path" ] || [ ! -d "$resolved_path" ]; then
+            printf 'CHECK FAIL parser: invalid or missing entry %s\n' "$name"; failures=$((failures+1)); continue
+        fi
+        names+=("$name"); dirs+=("$resolved_path")
+        if [ "$first" -eq 1 ]; then expected_context="$name"; expected_dirs="$resolved_path"; first=0
+        else expected_context="$expected_context+$name"; expected_dirs="$expected_dirs,$resolved_path"; fi
+    done < "$ctx_file"
+    if [ "${#names[@]}" -eq 0 ]; then printf 'CHECK FAIL parser: .ctx has no entries\n'; return 1; fi
+
+    if [ "${AI_CONTEXT:-}" = "$expected_context" ]; then printf 'CHECK PASS AI_CONTEXT\n'; else printf 'CHECK FAIL AI_CONTEXT: expected %s, got %s\n' "$expected_context" "${AI_CONTEXT:-<unset>}"; failures=$((failures+1)); fi
+    if [ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" = "$expected_dirs" ]; then printf 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n'; else printf 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected %s, got %s\n' "$expected_dirs" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-<unset>}"; failures=$((failures+1)); fi
+
+    local expected_home
+    if [ -n "$home_override" ]; then expected_home="$home_override"; else expected_home="$(_ctx_copilot_home_root)/$(_ctx_sanitize_context_name "$expected_context")"; fi
+    if [ "${COPILOT_HOME:-}" = "$expected_home" ] && [ -d "$expected_home" ]; then printf 'CHECK PASS COPILOT_HOME\n'; else printf 'CHECK FAIL COPILOT_HOME: expected %s, got %s\n' "$expected_home" "${COPILOT_HOME:-<unset>}"; failures=$((failures+1)); fi
+
+    local f target current
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
+        if _ctx_link_matches "$expected_home/$f" "$target"; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected link to %s\n' "$f" "$target"; failures=$((failures+1)); fi
+    done <<EOF
+$(_ctx_copilot_home_shared_files)
+EOF
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
+        if _ctx_link_matches "$expected_home/$f" "$target"; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected link to %s\n' "$f" "$target"; failures=$((failures+1)); fi
+    done <<EOF
+$(_ctx_copilot_home_shared_dirs)
+EOF
+
+    local -A desired=() actual=()
+    local -a desired_names=() actual_names=()
+    local rd skill_dir s skill_name
+    for rd in "${dirs[@]}"; do
+        skill_dir="$rd/.github/skills"
+        [ -d "$skill_dir" ] || continue
+        while IFS= read -r s; do
+            skill_name="$(basename "$s")"
+            [ -n "${desired[$skill_name]+set}" ] || desired_names+=("$skill_name")
+            desired["$skill_name"]="${s%/}"
+        done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
+    done
+    while IFS= read -r s; do
+        skill_name="$(basename "$s")"
+        actual_names+=("$skill_name")
+        actual["$skill_name"]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"
+    done < <(find "$expected_home/skills" -mindepth 1 -maxdepth 1 -print)
+    local sorted_skills
+    sorted_skills="$(printf '%s\n' "${desired_names[@]}" | sort)"
+    while IFS= read -r skill_name; do
+        [ -n "$skill_name" ] || continue
+        if [ "${actual[$skill_name]:-}" = "${desired[$skill_name]}" ]; then printf 'CHECK PASS skill:%s\n' "$skill_name"; else printf 'CHECK FAIL skill:%s: missing or wrong target\n' "$skill_name"; failures=$((failures+1)); fi
+    done <<< "$sorted_skills"
+    sorted_skills="$(printf '%s\n' "${actual_names[@]}" | sort)"
+    while IFS= read -r skill_name; do
+        [ -n "$skill_name" ] || continue
+        [ -n "${desired[$skill_name]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }
+    done <<< "$sorted_skills"
+
+    # Strict check is read-only: do not invoke external copilot commands.
+    # Even a seemingly informational probe may write caches/state.
+    printf 'CHECK SKIP skills: copilot probe disabled in read-only check\n'
+
+    local workspace="$dir_of_file/$(basename "$dir_of_file").code-workspace"
+    if [ -e "$workspace" ] && [ ! -L "$workspace" ]; then
+        local workspace_bin=""
+        if command -v python3 >/dev/null 2>&1; then workspace_bin="python3"; elif command -v python >/dev/null 2>&1; then workspace_bin="python"; fi
+        if [ -z "$workspace_bin" ]; then
+            printf 'CHECK SKIP workspace: no python interpreter available\n'
+        elif "$workspace_bin" - "$workspace" "${names[@]}" "${dirs[@]}" <<'PYEOF'
+import json, sys
+p=sys.argv[1]; n=len(sys.argv[2:])//2; names=sys.argv[2:2+n]; dirs=sys.argv[2+n:]
+try:
+    with open(p, encoding='utf-8') as f: w=json.load(f)
+    folders=w.get('folders', []) if isinstance(w,dict) else []
+    wanted=[('.', 'root: '+p.rsplit('/',2)[-2])] + list(zip(dirs, ['ctx: '+x for x in names]))
+    have={(x.get('path'),x.get('name')) for x in folders if isinstance(x,dict)}
+    missing=[x for x in wanted if x not in have]
+    print('CHECK PASS workspace marker='+('ctx' if w.get('generatedBy') == 'ctx' else 'unmarked'))
+    if missing:
+        print('CHECK FAIL workspace: missing expected folder(s)')
+        sys.exit(1)
+except Exception:
+    print('CHECK FAIL workspace: invalid JSON')
+    sys.exit(1)
+PYEOF
+        then :; else failures=$((failures+1)); fi
+    else
+        printf 'CHECK SKIP workspace: no adjacent workspace file\n'
+    fi
+    if [ "$failures" -eq 0 ]; then printf 'ctx check: PASS\n'; return 0; fi
+    printf 'ctx check: FAIL (%s)\n' "$failures"; return 1
 }
 
 # --- Shell integration (completion + chdir hooks) -----------------------
