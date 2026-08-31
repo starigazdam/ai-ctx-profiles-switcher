@@ -711,4 +711,81 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Test-Path -LiteralPath $stale | Should -BeFalse
         Get-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
+
+
+    It 'Issue 4: ctx check shares parser semantics for profiles, direct paths, and home directives without writes' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $direct = Join-Path $Script:TestTmp 'direct-check'
+        $proj = Join-Path $env:HOME 'project-check-parser-parity'
+        $override = Join-Path $env:HOME 'check-parser-home'
+        New-Item -ItemType Directory -Path $direct, $proj, $override -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "HoMe:$override`nreview:@profile`nlocal:$direct"
+        Import-CtxFile -CtxFile $ctxFile | Should -BeTrue
+        $beforeContext = $env:AI_CTX_PROFILES; $beforeDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS; $beforeHome = $env:COPILOT_HOME
+        $beforeWrite = (Get-Item -LiteralPath $ctxFile).LastWriteTimeUtc
+        Set-Location $proj
+
+        (Test-CtxActivation) | Should -BeTrue
+        $env:AI_CTX_PROFILES | Should -Be $beforeContext
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $beforeDirs
+        $env:COPILOT_HOME | Should -Be $beforeHome
+        (Get-Item -LiteralPath $ctxFile).LastWriteTimeUtc | Should -Be $beforeWrite
+    }
+
+    It 'Issue 4: ctx check rejects duplicate labels, targets, and reserved home labels read-only' {
+        New-CtxTestProfile -Name 'review' | Out-Null
+        $proj = Join-Path $env:HOME 'project-check-parser-invalid'
+        $duplicate = Join-Path $Script:TestTmp 'duplicate-target'
+        New-Item -ItemType Directory -Path $proj, $duplicate -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$duplicate`nReview:$duplicate`nhome:$(Join-Path $env:HOME 'check-a')`nHOME:$(Join-Path $env:HOME 'check-b')"
+        $env:AI_CTX_PROFILES = 'previous'; $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $beforeWrite = (Get-Item -LiteralPath $ctxFile).LastWriteTimeUtc
+        Set-Location $proj
+
+        (Test-CtxActivation) | Should -BeFalse
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        (Get-Item -LiteralPath $ctxFile).LastWriteTimeUtc | Should -Be $beforeWrite
+    }
+
+    It 'Issue 4: manual and @profile traversal cannot escape profiles before state changes' {
+        New-CtxTestProfile -Name 'review' | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'escaped') -Force | Out-Null
+        $env:AI_CTX_PROFILES = 'previous'; $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx ../escaped } finally { $ErrorActionPreference = $previous }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'invalid profile identifier'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+
+        $proj = Join-Path $env:HOME 'project-profile-traversal'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "../escaped:@profile`nreview:@profile"
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile $ctxFile } finally { $ErrorActionPreference = $previous }
+        $result | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'invalid profile identifier'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+    }
+
+
+
+    It 'Issue 4: ctx check rejects canonical duplicate targets read-only' {
+        $proj = Join-Path $env:HOME 'project-check-canonical-target'
+        $target = Join-Path $Script:TestTmp 'canonical-target'
+        New-Item -ItemType Directory -Path $proj, $target -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "one:$target`ntwo:$(Join-Path $target '.')"
+        $env:AI_CTX_PROFILES = 'previous'; $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        Set-Location $proj
+
+        (Test-CtxActivation) | Should -BeFalse
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+    }
+
 }

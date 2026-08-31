@@ -1,6 +1,6 @@
 # ctx — Portable Context Switcher for GitHub Copilot CLI
 
-`ctx` composes AI agent configuration directories (profiles + profiles)
+`ctx` composes AI agent configuration directories (profiles)
 stored in a directory tree such as:
 
 ```

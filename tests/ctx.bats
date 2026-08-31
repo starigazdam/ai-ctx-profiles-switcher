@@ -979,3 +979,86 @@ EOF
     [ ! -e "$COPILOT_HOME/skills/stale-skill" ]
     [ ! -L "$COPILOT_HOME/skills/stale-skill" ]
 }
+
+
+# --- Issue #4 parser parity and profile-boundary regressions ----------------
+
+@test "ctx check shares .ctx parsing for profiles, direct paths, and home directives without writes" {
+    _make_profile review review-skill
+    local direct="$TEST_TMP/direct-check"
+    local proj="$HOME/project-check-parser-parity"
+    local override="$HOME/check-parser-home"
+    mkdir -p "$direct" "$proj" "$override"
+    printf 'HoMe:%s\nreview:@profile\nlocal:%s\n' "$override" "$direct" > "$proj/.ctx"
+
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    local before_ctx="$AI_CTX_PROFILES" before_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" before_home="$COPILOT_HOME"
+    local before_file="$(stat -c '%Y %s' "$proj/.ctx")"
+    cd "$proj"
+    run ctx check
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS AI_CTX_PROFILES"* ]]
+    [ "$AI_CTX_PROFILES" = "$before_ctx" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$before_dirs" ]
+    [ "$COPILOT_HOME" = "$before_home" ]
+    [ "$(stat -c '%Y %s' "$proj/.ctx")" = "$before_file" ]
+}
+
+@test "ctx check rejects activation-invalid labels, targets, and home directives read-only" {
+    _make_profile review
+    local proj="$HOME/project-check-parser-invalid"
+    local duplicate="$TEST_TMP/duplicate-target"
+    mkdir -p "$proj" "$duplicate"
+    printf 'review:%s\nReview:%s\nhome:%s\nHOME:%s\n' "$duplicate" "$duplicate" "$HOME/check-a" "$HOME/check-b" > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    local before_file="$(stat -c '%Y %s' "$proj/.ctx")"
+    cd "$proj"
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate .ctx entry label"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$(stat -c '%Y %s' "$proj/.ctx")" = "$before_file" ]
+}
+
+@test "manual and @profile traversal cannot escape profiles before state changes" {
+    _make_profile review
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/escaped"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+
+    run ctx ../escaped
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid profile identifier"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+
+    local proj="$HOME/project-profile-traversal"
+    mkdir -p "$proj"
+    printf '../escaped:@profile\nreview:@profile\n' > "$proj/.ctx"
+    run _ctx_load_ctx_file "$proj/.ctx"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid profile identifier"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+}
+
+
+@test "ctx check rejects canonical duplicate targets read-only" {
+    local proj="$HOME/project-check-canonical-target"
+    local target="$TEST_TMP/canonical-target"
+    mkdir -p "$proj" "$target"
+    printf 'one:%s\ntwo:%s/.\n' "$target" "$target" > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    cd "$proj"
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"same directory"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+}

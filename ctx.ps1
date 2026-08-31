@@ -280,6 +280,26 @@ function Clear-CtxContext {
     return (-not $cleanupFailed)
 }
 
+function Resolve-CtxProfileIdentifier {
+    # Profiles are identifiers, not paths. The canonical target must remain an
+    # immediate child of the canonical profiles root, including through links.
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name) -or $Name -in @('.', '..') -or $Name -match '[\\/]') {
+        throw "invalid profile identifier `"$Name`""
+    }
+    $profilesRoot = Join-Path (Get-CtxRoot) 'profiles'
+    $rootCanonical = [System.IO.Path]::GetFullPath($profilesRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $candidate = Join-Path $profilesRoot $Name
+    if (-not (Test-Path -LiteralPath $candidate -PathType Container)) {
+        throw "unknown profile `"$Name`" (looked in $profilesRoot)"
+    }
+    $canonical = (Resolve-Path -LiteralPath $candidate).Path.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    if (-not ([string]::Equals((Split-Path -Parent $canonical), $rootCanonical, [System.StringComparison]::OrdinalIgnoreCase))) {
+        throw "invalid profile identifier `"$Name`""
+    }
+    return $canonical
+}
+
 function ctx {
     param(
         [Parameter(ValueFromRemainingArguments = $true)]
@@ -323,18 +343,11 @@ function ctx {
         $key = $name.ToLowerInvariant()
         if ($seenNames.ContainsKey($key)) { Write-Error "ctx: error: duplicate profile `"$name`""; return }
         $seenNames[$key] = $name
-        $profileDir = Join-Path (Join-Path $root 'profiles') $name
-        if (-not (Test-Path -LiteralPath $profileDir -PathType Container)) {
-            Write-Error "ctx: error: unknown profile `"$name`" (looked in $root\profiles)"
-            $availableRoot = Join-Path $root 'profiles'
-            if (Test-Path -LiteralPath $availableRoot -PathType Container) { Get-ChildItem -LiteralPath $availableRoot -Directory | ForEach-Object { Write-Host "  - $($_.Name)" } }
-            return
-        }
+        try { $profileDir = Resolve-CtxProfileIdentifier -Name $name } catch { Write-Error "ctx: error: $_"; return }
         $profileNames += $name
         $dirsList += $profileDir
     }
 
-    $profileDir = Join-Path (Join-Path $root 'profiles') $profileName
     $dirsCsv = $dirsList -join ','
     $sharedCsv = ""
 
@@ -863,128 +876,61 @@ function Find-CtxFile {
     return $null
 }
 
-function Import-CtxFile {
-    # Parses a .ctx file where each non-empty, non-comment line is
-    # "<context-name>:<path-to-folder>". Relative paths are resolved
-    # against the directory containing the .ctx file. Sets AI_CTX_PROFILES and
-    # COPILOT_CUSTOM_INSTRUCTIONS_DIRS directly from the parsed entries.
-    #
-    # An optional line "home:<path>" (issue #7) is a reserved directive,
-    # not a profile entry: it overrides where this .ctx
-    # file's synthetic COPILOT_HOME is created, instead of the centralized
-    # default. Its path resolves the same way (relative to the .ctx file's
-    # directory unless absolute), and the directory does not need to
-    # pre-exist (it's created on demand, same as the centralized default).
+function Parse-CtxFile {
+    # Side-effect-free .ctx parser shared by Import-CtxFile and Test-CtxActivation.
+    # It validates all labels/targets before either caller changes state.
     param([string]$CtxFile)
-
     $dirOfFile = Split-Path -Parent $CtxFile
-    $names = @()
-    $dirs = @()
-    $seenLabels = @{}
-    $seenTargets = @{}
-    $homeOverride = $null
-
+    $names = @(); $dirs = @(); $seenLabels = @{}; $seenTargets = @{}; $homeOverride = $null
     foreach ($rawLine in Get-Content -LiteralPath $CtxFile) {
         $line = $rawLine.Trim()
-        if (-not $line -or $line.StartsWith('#')) {
-            continue
-        }
-
+        if (-not $line -or $line.StartsWith('#')) { continue }
         $sepIndex = $line.IndexOf(':')
-        if ($sepIndex -lt 1) {
-            Write-Error "ctx: error: invalid .ctx line in $CtxFile (expected <name>:<path>): $line"
-            return $false
-        }
-
-        $name = $line.Substring(0, $sepIndex).Trim()
-        $path = $line.Substring($sepIndex + 1).Trim()
-        if (-not $name -or -not $path) {
-            Write-Error "ctx: error: invalid .ctx line in $CtxFile (expected <name>:<path>): $line"
-            return $false
-        }
-
+        if ($sepIndex -lt 1) { throw "invalid .ctx line in $CtxFile (expected <name>:<path>): $line" }
+        $name = $line.Substring(0, $sepIndex).Trim(); $path = $line.Substring($sepIndex + 1).Trim()
+        if (-not $name -or -not $path) { throw "invalid .ctx line in $CtxFile (expected <name>:<path>): $line" }
         $labelKey = $name.ToLowerInvariant()
         if ($name -ine 'home') {
-            if ($seenLabels.ContainsKey($labelKey)) { Write-Error "ctx: error: duplicate .ctx entry label `"$name`"; first declared as `"$($seenLabels[$labelKey])`""; return $false }
+            if ($seenLabels.ContainsKey($labelKey)) { throw "duplicate .ctx entry label `"$name`"; first declared as `"$($seenLabels[$labelKey])`"" }
             $seenLabels[$labelKey] = $name
         }
-        if ($path -ceq '@profile') {
-            $resolvedPath = Join-Path (Join-Path (Get-CtxRoot) 'profiles') $name
-            if (-not (Test-Path -LiteralPath $resolvedPath -PathType Container)) { Write-Error "ctx: error: unknown profile `"$name`" (looked in $(Join-Path (Get-CtxRoot) 'profiles'))"; return $false }
-        } else {
-            $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
-        }
-
+        if ($path -ceq '@profile') { $resolvedPath = Resolve-CtxProfileIdentifier -Name $name }
+        else { $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path } }
         if ($name -ieq 'home') {
-            if ($homeOverride) {
-                Write-Error "ctx: error: duplicate `"home:`" directive in $CtxFile"
-                return $false
-            }
-            try { $homeOverride = Get-CtxValidatedHomePath -Path $resolvedPath } catch { Write-Error "ctx: error: $_"; return $false }
+            if ($homeOverride) { throw "duplicate `"home:`" directive in $CtxFile" }
+            $homeOverride = Get-CtxValidatedHomePath -Path $resolvedPath
             continue
         }
-
-        if (-not (Test-Path -LiteralPath $resolvedPath -PathType Container)) {
-            Write-Error "ctx: error: .ctx entry `"$name`" in $CtxFile points to missing directory: $resolvedPath"
-            return $false
-        }
-
+        if (-not (Test-Path -LiteralPath $resolvedPath -PathType Container)) { throw ".ctx entry `"$name`" in $CtxFile points to missing directory: $resolvedPath" }
         $canonical = [System.IO.Path]::GetFullPath($resolvedPath)
-        if ($seenTargets.ContainsKey($canonical)) { Write-Error "ctx: error: .ctx entries `"$($seenTargets[$canonical])`" and `"$name`" resolve to the same directory"; return $false }
-        $seenTargets[$canonical] = $name
-        $names += $name
-        $dirs += $resolvedPath
+        if ($seenTargets.ContainsKey($canonical)) { throw ".ctx entries `"$($seenTargets[$canonical])`" and `"$name`" resolve to the same directory" }
+        $seenTargets[$canonical] = $name; $names += $name; $dirs += $resolvedPath
     }
-
-    if ($names.Count -eq 0) {
-        Write-Error "ctx: error: .ctx file is empty or invalid: $CtxFile"
-        return $false
-    }
-
-    # Setting COPILOT_CUSTOM_INSTRUCTIONS_DIRS alone does not make Copilot CLI
-    # load skills from these directories. Genuine per-folder, session-
-    # isolated skill discovery is provided via COPILOT_HOME (see
-    # Set-CtxCopilotHome) rather than settings.local.json's
-    # skillDirectories, which Copilot CLI silently ignores (issue #1).
-
-    Update-CtxWorkspaceFile -BaseDir $dirOfFile -Names $names -Dirs $dirs
-
-    $dirsCsv = $dirs -join ','
-    $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
-    $env:AI_CTX_PROFILES = $names -join '+'
-
-    Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirs -HomeOverride $homeOverride
-    $Script:CtxAutoLoadHomeOverride = $homeOverride
-
-    $sharedCsv = ($names | Select-Object -Skip 1) -join ', '
-    Write-CtxStatus -ProfileName $names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv
-    return $true
+    if ($names.Count -eq 0) { throw ".ctx file is empty or invalid: $CtxFile" }
+    return [PSCustomObject]@{ Dir = $dirOfFile; Names = @($names); Dirs = @($dirs); HomeOverride = $homeOverride; Context = ($names -join '+') }
 }
 
+function Import-CtxFile {
+    param([string]$CtxFile)
+    try { $parsed = Parse-CtxFile -CtxFile $CtxFile } catch { Write-Error "ctx: error: $_"; return $false }
+    Update-CtxWorkspaceFile -BaseDir $parsed.Dir -Names $parsed.Names -Dirs $parsed.Dirs
+    $dirsCsv = $parsed.Dirs -join ','
+    $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
+    $env:AI_CTX_PROFILES = $parsed.Context
+    Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride
+    $Script:CtxAutoLoadHomeOverride = $parsed.HomeOverride
+    $sharedCsv = ($parsed.Names | Select-Object -Skip 1) -join ', '
+    Write-CtxStatus -ProfileName $parsed.Names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv
+    return $true
+}
 function Test-CtxActivation {
     # Read-only audit of the nearest .ctx activation. This function deliberately
     # does not call Import-CtxFile or Set-CtxCopilotHome.
     $ctxFile = Find-CtxFile
     if (-not $ctxFile) { Write-Host 'ctx check: no .ctx file found; nothing to check'; return $true }
-    $dir = Split-Path -Parent $ctxFile
-    $names = @(); $dirs = @(); $homeOverride = $null; $failures = 0
-    foreach ($raw in Get-Content -LiteralPath $ctxFile) {
-        $line = $raw.Trim(); if (-not $line -or $line.StartsWith('#')) { continue }
-        $i = $line.IndexOf(':')
-        if ($i -lt 1) { Write-Host 'CHECK FAIL parser: invalid .ctx line'; $failures++; continue }
-        $name = $line.Substring(0,$i).Trim(); $path = $line.Substring($i+1).Trim()
-        if (-not $name -or -not $path) { Write-Host "CHECK FAIL parser: invalid or missing entry $name"; $failures++; continue }
-        $resolved = if ([IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dir $path }
-        if ($name -ieq 'home') {
-            if ($homeOverride) { Write-Host 'CHECK FAIL parser: duplicate home directive'; $failures++; continue }
-            try { $homeOverride = Get-CtxValidatedHomePath -Path $resolved } catch { Write-Host 'CHECK FAIL COPILOT_HOME: invalid home directive'; $failures++ }
-            continue
-        }
-        if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { Write-Host "CHECK FAIL parser: invalid or missing entry $name"; $failures++; continue }
-        $names += $name; $dirs += $resolved
-    }
-    if ($names.Count -eq 0) { Write-Host 'CHECK FAIL parser: .ctx has no entries'; return $false }
-    $expectedContext = $names -join '+'; $expectedDirs = $dirs -join ','
+    try { $parsed = Parse-CtxFile -CtxFile $ctxFile } catch { Write-Host 'CHECK FAIL parser: invalid .ctx file'; return $false }
+    $dir = $parsed.Dir; $names = @($parsed.Names); $dirs = @($parsed.Dirs); $homeOverride = $parsed.HomeOverride; $failures = 0
+    $expectedContext = $parsed.Context; $expectedDirs = $dirs -join ','
     if ($env:AI_CTX_PROFILES -ceq $expectedContext) { Write-Host 'CHECK PASS AI_CTX_PROFILES' } else { Write-Host "CHECK FAIL AI_CTX_PROFILES: expected $expectedContext, got $(if($env:AI_CTX_PROFILES){$env:AI_CTX_PROFILES}else{'<unset>'})"; $failures++ }
     if ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq $expectedDirs) { Write-Host 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS' } else { Write-Host "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected $expectedDirs, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"; $failures++ }
     $expectedHome = if ($homeOverride) { $homeOverride } else { Join-Path (Get-CtxCopilotHomeRoot) (Get-CtxSanitizedContextName -Name $expectedContext) }
