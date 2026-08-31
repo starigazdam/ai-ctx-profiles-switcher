@@ -825,6 +825,7 @@ _ctx_load_ctx_file() {
     local line name entry_path resolved_path
     local -a resolved_dirs=()
     local -a resolved_names=()
+    local -a workspace_pairs=()
 
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"
@@ -885,6 +886,7 @@ _ctx_load_ctx_file() {
         fi
         resolved_dirs+=("$resolved_path")
         resolved_names+=("$name")
+        workspace_pairs+=("$name" "$resolved_path")
     done < "$ctx_file"
 
     if [ -z "$ai_context" ]; then
@@ -901,11 +903,6 @@ _ctx_load_ctx_file() {
     # Create/update "<folder-name>.code-workspace" next to the .ctx file so
     # this project and its .ctx dependencies can be browsed together in one
     # VS Code window (name/path pairs, alternating).
-    local -a workspace_pairs=()
-    local i
-    for ((i = 0; i < ${#resolved_names[@]}; i++)); do
-        workspace_pairs+=("${resolved_names[$i]}" "${resolved_dirs[$i]}")
-    done
     _ctx_update_workspace_file "$dir_of_file" "${workspace_pairs[@]}"
 
     export AI_CONTEXT="$ai_context"
