@@ -723,14 +723,14 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Set-Content -LiteralPath $ctxFile -Value "HoMe:$override`nreview:@profile`nlocal:$direct"
         Import-CtxFile -CtxFile $ctxFile | Should -BeTrue
         $beforeContext = $env:AI_CTX_PROFILES; $beforeDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS; $beforeHome = $env:COPILOT_HOME
-        $beforeWrite = (Get-Item -LiteralPath $ctxFile).LastWriteTimeUtc
+        $beforeWrite = (Get-Item -LiteralPath $ctxFile -Force).LastWriteTimeUtc
         Set-Location $proj
 
         (Test-CtxActivation) | Should -BeTrue
         $env:AI_CTX_PROFILES | Should -Be $beforeContext
         $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $beforeDirs
         $env:COPILOT_HOME | Should -Be $beforeHome
-        (Get-Item -LiteralPath $ctxFile).LastWriteTimeUtc | Should -Be $beforeWrite
+        (Get-Item -LiteralPath $ctxFile -Force).LastWriteTimeUtc | Should -Be $beforeWrite
     }
 
     It 'Issue 4: ctx check rejects duplicate labels, targets, and reserved home labels read-only' {
@@ -741,13 +741,13 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $ctxFile = Join-Path $proj '.ctx'
         Set-Content -LiteralPath $ctxFile -Value "review:$duplicate`nReview:$duplicate`nhome:$(Join-Path $env:HOME 'check-a')`nHOME:$(Join-Path $env:HOME 'check-b')"
         $env:AI_CTX_PROFILES = 'previous'; $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
-        $beforeWrite = (Get-Item -LiteralPath $ctxFile).LastWriteTimeUtc
+        $beforeWrite = (Get-Item -LiteralPath $ctxFile -Force).LastWriteTimeUtc
         Set-Location $proj
 
         (Test-CtxActivation) | Should -BeFalse
         $env:AI_CTX_PROFILES | Should -Be 'previous'
         $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
-        (Get-Item -LiteralPath $ctxFile).LastWriteTimeUtc | Should -Be $beforeWrite
+        (Get-Item -LiteralPath $ctxFile -Force).LastWriteTimeUtc | Should -Be $beforeWrite
     }
 
     It 'Issue 4: manual and @profile traversal cannot escape profiles before state changes' {
