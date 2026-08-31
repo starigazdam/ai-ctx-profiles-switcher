@@ -575,6 +575,36 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "home validator walks the existing ancestor chain when the synthetic homes root itself does not yet exist" {
+    # Contract: when AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT (or any part of
+    # the candidate path) has not been created yet, validation must not
+    # be skipped for the portion of the path that DOES already exist -
+    # it must walk up to the first existing ancestor and validate that,
+    # failing closed rather than assuming an as-yet-nonexistent root is
+    # automatically safe.
+    local fresh_root="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT"
+    local outside="$TEST_TMP/ancestor-swap-outside"
+    mkdir -p "$outside"
+    # $fresh_root itself does not exist yet (setup() only sets the env
+    # var, it does not mkdir it), but its parent ($HOME/.config/ctx) also
+    # does not exist - walk up further to $HOME, which does exist and is
+    # a real directory, so this must validate successfully.
+    run _ctx_validate_home_path "$fresh_root/context-name"
+    [ "$status" -eq 0 ]
+
+    # Now make the first existing ancestor of the (still nonexistent)
+    # root - $HOME/.config - a symlink to somewhere outside the allowed
+    # roots; that existing ancestor must be rejected even though the
+    # leaf path is still nonexistent, instead of validation being
+    # skipped because the literal root itself isn't there.
+    mkdir -p "$(dirname "$HOME/.config")"
+    rm -rf "$HOME/.config"
+    ln -s "$outside" "$HOME/.config"
+    run _ctx_validate_home_path "$fresh_root/context-name"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsafe home"* || "$output" == *"symlink"* ]]
+}
+
 @test "public ctx clear --all propagates unsafe home failure" {
     _make_profile "review"
     local victim="$HOME/public-victim-home"
