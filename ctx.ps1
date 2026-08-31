@@ -262,6 +262,14 @@ function Clear-CtxContext {
                 return $false
             }
             try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_" -ErrorAction Continue; return $false }
+            # TOCTOU hardening (issue #17): revalidate immediately before
+            # the recursive delete below, unconditionally - see the
+            # comment block above Get-CtxValidatedHomePath for the
+            # attacker model and limitations. Invoke-CtxToctouHook is the
+            # same test-only seam used in Set-CtxCopilotHome, absent in
+            # normal operation.
+            Invoke-CtxToctouHook
+            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_" -ErrorAction Continue; return $false }
             if ((Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
                 try {
                     Remove-Item -LiteralPath $homeDir -Recurse -Force -ErrorAction Stop
@@ -390,6 +398,104 @@ function Get-CtxSanitizedContextName {
     return ($Name -replace '[^A-Za-z0-9+._-]', '_')
 }
 
+# --- TOCTOU hardening (issue #17) ------------------------------------------
+#
+# Attacker model: a *different-user* process on a shared/multi-user machine
+# that can write to some ancestor directory of a candidate COPILOT_HOME path
+# swaps that ancestor for a symlink/junction/reparse point, or relaxes its
+# ACL to grant itself write access, in the window between validation
+# (Get-CtxValidatedHomePath) and the later filesystem operation (creating
+# or recursively deleting the home directory). Explicitly OUT OF SCOPE:
+# same-user races - a same-user attacker already runs with the same
+# filesystem permissions ctx itself uses, so there is no privilege boundary
+# to defend there.
+#
+# Mitigations:
+#   1. Every existing ancestor component is checked for a reparse point
+#      (symlink/junction) - unchanged from prior hardening (issue #16).
+#   2. On Windows, every existing ancestor component's ACL is checked so
+#      that only trusted principals - the current user (as owner) and the
+#      well-known SYSTEM / built-in Administrators principals, resolved via
+#      non-localized SIDs (WellKnownSidType) rather than display names, so
+#      this works on non-English Windows installs - may hold write access.
+#      An ordinary/unknown principal with write access to an ancestor could
+#      perform the swap in (1) above, so such a path is rejected even
+#      without an existing reparse point.
+#   3. Callers (Set-CtxCopilotHome, Clear-CtxContext -All) re-invoke this
+#      validation unconditionally, immediately before the filesystem
+#      operation, rather than trusting the .ctx-parse-time check alone.
+#      $Script:CtxToctouHook is a test-only seam (a no-op unless a test
+#      assigns a scriptblock to it) used to deterministically arrange an
+#      ancestor swap between the two checks; it does not run in normal
+#      operation.
+#
+# Limitations: this narrows, but cannot eliminate, the race window between
+# the final validation and the filesystem call - true atomicity would
+# require OS-level primitives (e.g. O_NOFOLLOW-style openat semantics) that
+# .NET/PowerShell do not expose portably. ACL validation failures fail
+# closed (treated as unsafe) rather than silently proceeding.
+
+$Script:CtxToctouHook = $null
+
+function Invoke-CtxToctouHook {
+    # Test-only seam: no-op in normal operation. Tests set
+    # $Script:CtxToctouHook to a scriptblock that mutates the filesystem
+    # (e.g. replacing an ancestor with a symlink) to deterministically
+    # arrange a TOCTOU race between validation and use.
+    if ($Script:CtxToctouHook) {
+        & $Script:CtxToctouHook
+    }
+}
+
+function Get-CtxTrustedAclSids {
+    # Well-known, non-localized SIDs for principals that are always trusted
+    # to legitimately hold write access to ancestor directories, so ordinary
+    # Windows-inherited ACLs (which typically grant SYSTEM and built-in
+    # Administrators full control) do not cause false-positive rejections.
+    # Resolved via WellKnownSidType rather than name strings so this is
+    # correct on non-English Windows installs.
+    return @(
+        (New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null))
+    )
+}
+
+function Test-CtxAncestorAclTrusted {
+    # Windows-only: rejects (returns $false) if $Path's ACL grants write
+    # access to any principal other than the current user, SYSTEM, or
+    # built-in Administrators (see Get-CtxTrustedAclSids). Fails closed
+    # (returns $false) if the ACL cannot be read at all. No-op ($true) on
+    # non-Windows, where this ACL model does not apply - symlink/reparse
+    # detection above is the cross-platform mitigation.
+    param([string]$Path)
+    if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return $true }
+    try {
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    $trusted = @(Get-CtxTrustedAclSids)
+    $currentUserSid = $null
+    try { $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User } catch { }
+    $writeRights = [System.Security.AccessControl.FileSystemRights]::Write -bor `
+        [System.Security.AccessControl.FileSystemRights]::Modify -bor `
+        [System.Security.AccessControl.FileSystemRights]::FullControl -bor `
+        [System.Security.AccessControl.FileSystemRights]::CreateFiles -bor `
+        [System.Security.AccessControl.FileSystemRights]::CreateDirectories -bor `
+        [System.Security.AccessControl.FileSystemRights]::Delete
+    foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+        if (($rule.FileSystemRights -band $writeRights) -eq 0) { continue }
+        $sid = $null
+        try { $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) } catch { return $false }
+        if ($currentUserSid -and $sid -eq $currentUserSid) { continue }
+        $isTrusted = $false
+        foreach ($t in $trusted) { if ($sid -eq $t) { $isTrusted = $true; break } }
+        if (-not $isTrusted) { return $false }
+    }
+    return $true
+}
+
 function Get-CtxValidatedHomePath {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Path]::IsPathRooted($Path)) {
@@ -412,6 +518,7 @@ function Get-CtxValidatedHomePath {
         if (Test-Path -LiteralPath $prefix) {
             $item = Get-Item -LiteralPath $prefix -Force
             if ($item.LinkType -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw "unsafe home: symlink or junction component in $Path" }
+            if (-not (Test-CtxAncestorAclTrusted -Path $prefix)) { throw "unsafe home: untrusted writable ACL on ancestor component in $Path" }
         }
     }
     return $canonical
@@ -666,6 +773,20 @@ function Set-CtxCopilotHome {
         $homeDir = Join-Path $homesRoot $sanitized
     }
     $copilotDir = Get-CtxCopilotDir
+
+    # TOCTOU hardening (issue #17): revalidate immediately before the
+    # filesystem operation below, unconditionally (not only when $homeDir
+    # is missing) - see the comment block above Get-CtxValidatedHomePath
+    # for the attacker model and limitations. Invoke-CtxToctouHook is the
+    # test-only seam used to deterministically arrange an ancestor swap
+    # between the earlier .ctx-parse-time validation and this check.
+    Invoke-CtxToctouHook
+    try {
+        $null = Get-CtxValidatedHomePath -Path $homeDir
+    } catch {
+        Write-Warning "ctx: warning: $_"
+        return
+    }
 
     if (-not (Test-Path -LiteralPath (Join-Path $homeDir 'skills'))) {
         try {
