@@ -605,7 +605,6 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Test-CtxIsLink -Path $settings | Should -BeFalse
         $env:AI_CONTEXT | Should -Be 'wrong'
     }
-}
 
     It 'direct ctx check returns a scalar Boolean status while preserving diagnostics' {
         $proj = Join-Path $Script:TestTmp 'project-check-direct'
