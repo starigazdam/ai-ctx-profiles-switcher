@@ -659,13 +659,18 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
-        function copilot { return '{"skills":[{"name":"zeta-skill"},{"name":"alpha-skill"}]}' }
+        $script:copilotProbeCalls = 0
+        function copilot {
+            $script:copilotProbeCalls++
+            return '{"skills":[{"name":"zeta-skill"},{"name":"alpha-skill"}]}'
+        }
         Set-Location $proj
         $first = @(Test-CtxActivation)
         $second = @(Test-CtxActivation)
         ($first -join "`n") | Should -Be ($second -join "`n")
         ($first -join "`n") | Should -Match 'CHECK SKIP skills: copilot probe disabled in read-only check'
         ($first -join "`n") | Should -Match 'CHECK SKIP skills: copilot probe disabled in read-only check'
+        $script:copilotProbeCalls | Should -Be 0
     }
 
     It 'ctx check treats mixed-case HOME like Import-CtxFile' {

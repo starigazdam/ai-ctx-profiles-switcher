@@ -1015,14 +1015,7 @@ function Test-CtxActivation {
             $failures++
         }
     }
-    if (Get-Command copilot -ErrorAction SilentlyContinue) {
-        try {
-            $parsed = (& copilot skill list --json 2>$null | Out-String) | ConvertFrom-Json
-            $items = if ($parsed -is [array]) { @($parsed) } elseif ($null -ne $parsed.skills) { @($parsed.skills) } else { @() }
-            $reported = @($items | ForEach-Object { $_.name })
-            foreach ($name in ($desired.Keys | Sort-Object)) { if ($reported -contains $name) { Write-Host "CHECK PASS skills:$name" } else { Write-Host "CHECK FAIL skills:${name}: copilot did not report expected skill"; $failures++ } }
-        } catch { Write-Host 'CHECK SKIP skills: copilot skill list --json failed' }
-    } else { Write-Host 'CHECK SKIP skills: copilot unavailable' }
+    Write-Host 'CHECK SKIP skills: copilot probe disabled in read-only check'
     $workspace = Join-Path $dir "$(Split-Path -Leaf $dir).code-workspace"
     if (Test-Path -LiteralPath $workspace -PathType Leaf) {
         try {
