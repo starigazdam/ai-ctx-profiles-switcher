@@ -184,7 +184,8 @@ _ctx_file_identity() {
     local path="$1" result
     if command -v stat >/dev/null 2>&1; then
         result="$(stat -c '%d:%i' -- "$path" 2>/dev/null)" || result=""
-        [ -n "$result" ] || result="$(stat -f '%d:%i' -- "$path" 2>/dev/null)"
+        # BSD/macOS stat does not accept GNU's `--` option separator.
+        [ -n "$result" ] || result="$(stat -f '%d:%i' "$path" 2>/dev/null)"
     fi
     [ -n "$result" ] || return 1
     printf '%s\n' "$result"
@@ -401,7 +402,11 @@ ctx() {
     fi
 
     local -a resolved_dirs_manual=()
-    IFS=',' read -r -a resolved_dirs_manual <<< "$dirs_csv"
+    if [ -n "${ZSH_VERSION:-}" ]; then
+        resolved_dirs_manual=("${(@s:,:)dirs_csv}")
+    else
+        IFS=',' read -r -a resolved_dirs_manual <<< "$dirs_csv"
+    fi
 
     _ctx_setup_copilot_home "$AI_CONTEXT" "" "${resolved_dirs_manual[@]}"
 
@@ -636,7 +641,7 @@ EOF
         while IFS= read -r s; do
             sname="$(basename "$s")"
             [ -n "${desired_skills[$sname]+set}" ] || desired_skill_names+=("$sname")
-            desired_skills["$sname"]="${s%/}"
+            desired_skills[$sname]="${s%/}"
         done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
     done
 

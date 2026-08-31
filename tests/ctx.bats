@@ -61,7 +61,48 @@ EOF
     [ "$target" = "$(readlink -f "$AI_CONFIG_ROOT/profiles/review/.github/skills/review-skill")" ]
 }
 
-# --- Test 2: shared-file symlinks point at the real ~/.copilot -------------
+@test "zsh supports manual activation with shared contexts" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+
+    _make_profile review "review-skill"
+    mkdir -p "$AI_CONFIG_ROOT/shared/azure/.github/skills/azure-skill"
+    printf '%s\n' '# azure skill' > "$AI_CONFIG_ROOT/shared/azure/.github/skills/azure-skill/SKILL.md"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        ctx review azure >/dev/null || exit
+        [ "$AI_CONTEXT" = review+azure ] || exit
+        [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$2/profiles/review,$2/shared/azure" ] || exit
+        [ -L "$COPILOT_HOME/skills/review-skill" ] || exit
+        [ -L "$COPILOT_HOME/skills/azure-skill" ] || exit
+    ' -- "$CTX_SRC" "$AI_CONFIG_ROOT"
+
+    [ "$status" -eq 0 ]
+}
+
+@test "BSD stat fallback does not pass GNU-only option separator" {
+    local target="$TEST_TMP/stat-target"
+    printf 'target\n' > "$target"
+
+    stat() {
+        if [ "$1" = "-c" ]; then
+            return 1
+        fi
+        [ "$1" = "-f" ] && [ "$2" = "%d:%i" ] || return 2
+        [ "$3" != "--" ] || return 3
+        printf '42:99\n'
+    }
+
+    run _ctx_file_identity "$target"
+    [ "$status" -eq 0 ]
+    [ "$output" = "42:99" ]
+}
+
+# --- Test 2: shared-file symlinks point at the real copilot dir -------------
 
 @test "shared files symlink back to the real copilot dir" {
     _make_profile "review"
