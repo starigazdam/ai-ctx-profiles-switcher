@@ -1011,9 +1011,11 @@ EOF
                 if [ "$parse_status" -ne 0 ]; then
                     printf 'CHECK SKIP skills: copilot skill list --json malformed\n'
                 else
-                    for skill_name in "${!desired[@]}"; do
+                    sorted_skills="$(printf '%s\n' "${!desired[@]}" | sort)"
+                    while IFS= read -r skill_name; do
+                        [ -n "$skill_name" ] || continue
                         if printf '%s\n' "$missing" | grep -Fxq "$skill_name"; then printf 'CHECK PASS skills:%s\n' "$skill_name"; else printf 'CHECK FAIL skills:%s: copilot did not report expected skill\n' "$skill_name"; failures=$((failures+1)); fi
-                    done
+                    done <<< "$sorted_skills"
                 fi
             fi
         else printf 'CHECK SKIP skills: copilot skill list --json failed\n'; fi
@@ -1023,7 +1025,11 @@ EOF
 
     local workspace="$dir_of_file/$(basename "$dir_of_file").code-workspace"
     if [ -e "$workspace" ] && [ ! -L "$workspace" ]; then
-        if python3 - "$workspace" "${names[@]}" "${dirs[@]}" <<'PYEOF'
+        local workspace_bin=""
+        if command -v python3 >/dev/null 2>&1; then workspace_bin="python3"; elif command -v python >/dev/null 2>&1; then workspace_bin="python"; fi
+        if [ -z "$workspace_bin" ]; then
+            printf 'CHECK SKIP workspace: no python interpreter available\n'
+        elif "$workspace_bin" - "$workspace" "${names[@]}" "${dirs[@]}" <<'PYEOF'
 import json, sys
 p=sys.argv[1]; n=len(sys.argv[2:])//2; names=sys.argv[2:2+n]; dirs=sys.argv[2+n:]
 try:

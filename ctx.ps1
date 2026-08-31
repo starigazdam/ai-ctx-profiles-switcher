@@ -945,7 +945,7 @@ function Test-CtxActivation {
         $name = $line.Substring(0,$i).Trim(); $path = $line.Substring($i+1).Trim()
         if (-not $name -or -not $path) { Write-Host "CHECK FAIL parser: invalid or missing entry $name"; $failures++; continue }
         $resolved = if ([IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dir $path }
-        if ($name -ceq 'home') {
+        if ($name -eq 'home') {
             if ($homeOverride) { Write-Host 'CHECK FAIL parser: duplicate home directive'; $failures++; continue }
             try { $homeOverride = Get-CtxValidatedHomePath -Path $resolved } catch { Write-Host 'CHECK FAIL COPILOT_HOME: invalid home directive'; $failures++ }
             continue
@@ -982,7 +982,8 @@ function Test-CtxActivation {
     }
     if (Get-Command copilot -ErrorAction SilentlyContinue) {
         try {
-            $items = @( & copilot skill list --json 2>$null | ConvertFrom-Json )
+            $parsed = (& copilot skill list --json 2>$null | Out-String) | ConvertFrom-Json
+            $items = if ($parsed -is [array]) { @($parsed) } elseif ($null -ne $parsed.skills) { @($parsed.skills) } else { @() }
             $reported = @($items | ForEach-Object { $_.name })
             foreach ($name in ($desired.Keys | Sort-Object)) { if ($reported -contains $name) { Write-Host "CHECK PASS skills:$name" } else { Write-Host "CHECK FAIL skills:${name}: copilot did not report expected skill"; $failures++ } }
         } catch { Write-Host 'CHECK SKIP skills: copilot skill list --json failed' }

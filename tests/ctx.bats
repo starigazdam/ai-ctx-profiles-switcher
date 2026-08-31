@@ -770,3 +770,57 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"CHECK PASS skills:review-skill"* ]]
 }
+
+@test "ctx check reports optional copilot skills in deterministic order" {
+    local proj="$HOME/project-check-copilot-order"
+    _make_profile review zeta-skill
+    mkdir -p "$AI_CONFIG_ROOT/profiles/review/.github/skills/alpha-skill" "$proj" "$TEST_TMP/bin"
+    printf '%s\n' '---' 'name: alpha-skill' 'description: alpha' '---' > "$AI_CONFIG_ROOT/profiles/review/.github/skills/alpha-skill/SKILL.md"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    rm -f "$proj/project-check-copilot-order.code-workspace"
+    cat > "$TEST_TMP/bin/copilot" <<'EOF'
+#!/usr/bin/env bash
+printf '[{"name":"zeta-skill"},{"name":"alpha-skill"}]\n'
+EOF
+    chmod +x "$TEST_TMP/bin/copilot"
+    cd "$proj"
+    PATH="$TEST_TMP/bin:$PATH" run ctx check
+    [ "$status" -eq 0 ]
+    local first="$output"
+    PATH="$TEST_TMP/bin:$PATH" run ctx check
+    [ "$status" -eq 0 ]
+    [ "$output" = "$first" ]
+    [[ "$output" == *$'CHECK PASS skills:alpha-skill\nCHECK PASS skills:zeta-skill'* ]]
+}
+
+@test "ctx check skips workspace audit when no python interpreter exists" {
+    local proj="$HOME/project-check-workspace-no-python"
+    _make_profile review
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    printf '{"generatedBy":"ctx","folders":[]}' > "$proj/project-check-workspace-no-python.code-workspace"
+    cd "$proj"
+    command() {
+        if [ "$1" = -v ] && { [ "$2" = python3 ] || [ "$2" = python ]; }; then return 1; fi
+        builtin command "$@"
+    }
+    export -f command
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK SKIP workspace: no python interpreter available"* ]]
+}
+
+@test "ctx check treats mixed-case HOME like the activation parser" {
+    local proj="$HOME/project-check-home-case"
+    local override="$TEST_TMP/custom-copilot-home"
+    _make_profile review
+    mkdir -p "$proj" "$override"
+    printf 'HOME:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
+}

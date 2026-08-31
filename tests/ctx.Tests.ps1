@@ -649,4 +649,33 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $result[-1] | Should -BeFalse
         ($result -join "`n") | Should -Match 'CHECK FAIL skill:stale-skill: unexpected skill'
     }
+
+    It 'ctx check normalizes wrapped Copilot skill JSON and preserves sorted diagnostics' {
+        $proj = Join-Path $Script:TestTmp 'project-check-copilot-wrapped'
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'zeta-skill'
+        $alphaDir = Join-Path $reviewDir '.github\skills\alpha-skill'
+        New-Item -ItemType Directory -Path $alphaDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $alphaDir 'SKILL.md') -Value '---`nname: alpha-skill`ndescription: alpha`n---`n'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        function copilot { return '{"skills":[{"name":"zeta-skill"},{"name":"alpha-skill"}]}' }
+        Set-Location $proj
+        $first = @(Test-CtxActivation)
+        $second = @(Test-CtxActivation)
+        ($first -join "`n") | Should -Be ($second -join "`n")
+        ($first -join "`n") | Should -Match 'CHECK PASS skills:alpha-skill'
+        ($first -join "`n") | Should -Match 'CHECK PASS skills:zeta-skill'
+    }
+
+    It 'ctx check treats mixed-case HOME like Import-CtxFile' {
+        $proj = Join-Path $Script:TestTmp 'project-check-home-case'
+        $override = Join-Path $Script:TestTmp 'custom-copilot-home'
+        $reviewDir = New-CtxTestProfile -Name 'review'
+        New-Item -ItemType Directory -Path $proj, $override -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "HOME:$override`nreview:$reviewDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        Set-Location $proj
+        (Test-CtxActivation) | Should -BeTrue
+    }
 }
