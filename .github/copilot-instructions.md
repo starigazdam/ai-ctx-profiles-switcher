@@ -18,7 +18,7 @@ package manager, no test runner. All logic lives in those two files.
 
 ### Two activation modes
 
-1. **Manual** — `ctx <profile> [shared...]`  
+1. **Manual** — `ctx <profile> [profile...]`
    Looks up directories under `$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<profile>` and
    `$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`, validates they exist, then sets
    `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` (comma-separated) and `AI_CTX_PROFILES`
@@ -79,10 +79,10 @@ README, not solved.
 
 | Variable | Set by | Purpose |
 |---|---|---|
-| `AI_CTX_PROFILES` | `ctx` | Human-readable label, `profile+shared1+shared2` |
+| `AI_CTX_PROFILES` | `ctx` | Human-readable label, `profile1+profile2` |
 | `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | `ctx` | Comma-separated paths passed to Copilot CLI |
 | `COPILOT_HOME` | `ctx` | Per-context Copilot CLI home dir for skill isolation (unset when no context is active) |
-| `AI_CTX_PROFILES_CONFIG_ROOT` | User | Root of the profiles/shared tree (default: `$HOME/work/ai-config`) |
+| `AI_CTX_PROFILES_CONFIG_ROOT` | User | Root of the profiles tree (default: `$HOME/work/ai-config`) |
 | `CTX_AUTO_LOAD` | User | Set to `0` to disable `.ctx` auto-loading |
 | `AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT` | User (mainly tests) | Overrides `~/.config/ctx/homes` for `COPILOT_HOME` dirs |
 | `CTX_COPILOT_DIR` | User (mainly tests) | Overrides `~/.copilot` as the shared-file symlink target |
@@ -108,7 +108,7 @@ intentional and unavoidable:
 - On invalid input (unknown profile, missing directory, bad `.ctx` line),
   print a clear error to stderr and **leave the previously active context
   untouched** — never export a partial state.
-- When an unknown profile/shared is requested, list what is available.
+- When an unknown profile is requested, list what is available.
 
 ### Line endings
 

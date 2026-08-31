@@ -4,7 +4,7 @@
     ctx - Portable context switcher for GitHub Copilot CLI (PowerShell edition)
 
 .DESCRIPTION
-    Composes AI agent configuration directories (profiles + shared contexts)
+    Composes AI agent configuration directories (profiles)
     stored under a root directory (default: $HOME\work\ai-config) into the
     COPILOT_CUSTOM_INSTRUCTIONS_DIRS environment variable, for the current
     PowerShell session.
@@ -28,12 +28,11 @@
     DIRECTORY LAYOUT EXPECTED
     -------------------------
         $env:AI_CTX_PROFILES_CONFIG_ROOT (default: $HOME\work\ai-config)
-        |-- profiles\
-        |   |-- review\
-        |   |-- architecture\
-        |   |-- incident\
-        |   `-- coding\
-        `-- shared\
+        `-- profiles\
+            |-- review\
+            |-- architecture\
+            |-- incident\
+            |-- coding\
             |-- dotnet\
             |-- azure\
             |-- terraform\
@@ -42,9 +41,9 @@
     USAGE
     -----
         ctx review                    # activate the "review" profile
-        ctx coding azure               # "coding" profile + "azure" shared context
-        ctx review dotnet security     # profile + multiple shared contexts
-        ctx current                    # show active profile/shared/env vars
+        ctx coding azure               # activate multiple profiles
+        ctx review dotnet security     # activate multiple profiles
+        ctx current                    # show active profiles/env vars
         ctx clear                      # unset AI_CTX_PROFILES / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
         ctx clear --all                # remove the current context home and owned workspace artifacts
         ctx --help                     # usage help
@@ -59,13 +58,13 @@
 
     Example:
         review:C:\work\ai-config\profiles\review
-        dotnet:C:\work\ai-config\shared\dotnet
+        dotnet:C:\work\ai-config\profiles\dotnet
         security:.\local-instructions
 
     Relative paths are resolved against the directory containing the .ctx
     file (not the current working directory). Unlike `ctx <profile>
-    [shared]`, these names are NOT looked up under AI_CTX_PROFILES_CONFIG_ROOT\profiles|
-    shared - the path on each line is used directly. Every path is validated
+    [profile...]`, these names are NOT looked up under AI_CTX_PROFILES_CONFIG_ROOT\profiles
+    - the path on each line is used directly. Every path is validated
     to exist.
 
     When your prompt renders after a `cd`/`Set-Location` into that directory
@@ -116,7 +115,7 @@ function Get-CtxRoot {
 function Show-CtxUsage {
     @'
 Usage:
-  ctx <profile> [shared...]   Activate a profile with optional shared contexts
+  ctx <profile> [profile...]  Activate one or more profiles
   ctx current                   Show the currently active context
   ctx check                    Read-only audit against the nearest .ctx file
   ctx clear                   Clear the currently active context
@@ -133,7 +132,7 @@ Examples:
   ctx review dotnet security
 
 Environment:
-  AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles\ and shared\
+  AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles\
                        (default: $HOME\work\ai-config)
   CTX_AUTO_LOAD        Set to 0 to disable automatic .ctx loading on cd
 '@ | Write-Host
@@ -150,7 +149,7 @@ function Write-CtxStatus {
     Write-Host "[AI Context]"
     Write-Host ""
     Write-Host "Profile : $(if ($ProfileName) { $ProfileName } else { '<none>' })"
-    Write-Host "Shared  : $(if ($SharedCsv) { $SharedCsv } else { '<none>' })"
+    Write-Host "Profiles: $(if ($SharedCsv) { $SharedCsv } else { '<none>' })"
     Write-Host ""
     Write-Host "AI_CTX_PROFILES=$(if ($env:AI_CTX_PROFILES) { $env:AI_CTX_PROFILES } else { '<unset>' })"
     Write-Host "COPILOT_HOME=$(if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { '<unset>' })"
@@ -166,7 +165,7 @@ function Write-CtxStatus {
 function Show-CtxCurrent {
     if (-not $env:AI_CTX_PROFILES) {
         Write-Host "No active AI context."
-        Write-Host 'Run "ctx <profile> [shared...]" to activate one.'
+        Write-Host 'Run "ctx <profile> [profile...]" to activate one.'
         return
     }
 
@@ -637,7 +636,7 @@ function Set-CtxCopilotHome {
     # exports $env:COPILOT_HOME, mirroring _ctx_setup_copilot_home in
     # ctx.sh. $ContextName is the raw context name (e.g. "review+test");
     # $ResolvedDirs is the list of resolved directories for the active
-    # context (profile dir + shared dirs, or .ctx entries). $HomeOverride
+    # context (profile dirs, or .ctx entries). $HomeOverride
     # is an absolute path (from the .ctx file's optional "home:" directive,
     # issue #7) or empty/$null to use the centralized default.
     param(
@@ -871,7 +870,7 @@ function Import-CtxFile {
     # COPILOT_CUSTOM_INSTRUCTIONS_DIRS directly from the parsed entries.
     #
     # An optional line "home:<path>" (issue #7) is a reserved directive,
-    # not a profile/shared-context entry: it overrides where this .ctx
+    # not a profile entry: it overrides where this .ctx
     # file's synthetic COPILOT_HOME is created, instead of the centralized
     # default. Its path resolves the same way (relative to the .ctx file's
     # directory unless absolute), and the directory does not need to

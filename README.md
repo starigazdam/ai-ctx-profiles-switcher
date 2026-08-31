@@ -114,7 +114,7 @@ Restart PowerShell, or run:
 
 ### Custom AI config root
 
-By default `ctx` looks for `profiles/` and `shared/` under `$HOME/work/ai-config`
+By default `ctx` looks for profiles under `$HOME/work/ai-config`
 (`$HOME\work\ai-config` on Windows). Override with:
 
 ```sh
@@ -143,7 +143,7 @@ Example output after `ctx review dotnet security`:
 [AI Context]
 
 Profile : review
-Shared  : dotnet, security
+Profiles: dotnet, security
 
 AI_CTX_PROFILES=review+dotnet+security
 
@@ -155,7 +155,7 @@ COPILOT_CUSTOM_INSTRUCTIONS_DIRS=
 /home/user/work/ai-config/profiles/security
 ```
 
-Unknown profiles/profiles produce a clear error listing what is
+Unknown profiles produce a clear error listing what is
 available:
 
 ```
@@ -184,11 +184,11 @@ it from another shell cannot validate that shell's activation state.
 Completion is registered automatically when `ctx.sh` / `ctx.ps1` is sourced:
 
 - First argument completes: `current`, `clear`, and profile directory names
-- Subsequent arguments complete: shared directory names
+- Subsequent arguments complete: profile directory names
 
 ```sh
 ctx <TAB>            # current  clear  review  architecture  incident  coding
-ctx review <TAB>      # dotnet  azure  terraform  security
+ctx review <TAB>      # profile directory names
 ```
 
 ## Auto-loading with `.ctx` files
@@ -210,14 +210,14 @@ security:./local-instructions
 
 - Relative paths resolve against the directory containing the `.ctx` file
   (not your current working directory).
-- Unlike `ctx <profile> [shared...]`, these names are **not** looked up
-  under `AI_CTX_PROFILES_CONFIG_ROOT/profiles|shared` — the path on each line is used
+- Unlike `ctx <profile> [profile...]`, these names are **not** looked up
+  under `AI_CTX_PROFILES_CONFIG_ROOT/profiles` — the path on each line is used
   directly, so you can point at any folder (including project-local
   instructions that live outside your `ai-config` repo).
 - Every path is validated to exist; an invalid `.ctx` file leaves the
   previously active context untouched and prints a clear error.
 - An optional `home:<path>` line is a reserved directive, not a
-  profile/shared-context entry: it overrides where this `.ctx` file's
+  profile entry: it overrides where this `.ctx` file's
   synthetic `COPILOT_HOME` is created (see [How it
   works](#how-it-works) below) instead of the centralized default. See
   [Choosing a custom COPILOT_HOME location](#choosing-a-custom-copilot_home-location).
@@ -241,7 +241,7 @@ environment variable, which Copilot CLI respects as a full replacement for
 
 #### How it works
 
-Every time a context is activated (`ctx <profile> [shared...]` or `.ctx`
+Every time a context is activated (`ctx <profile> [profile...]` or `.ctx`
 auto-load), `ctx` computes and reconciles a per-context home directory at
 `~/.config/ctx/homes/<context-name>/` (e.g. `~/.config/ctx/homes/review+dotnet/`)
 and exports `COPILOT_HOME` to point at it:
@@ -290,7 +290,7 @@ review:/home/user/work/ai-config/profiles/review
 ```
 
 - `home:` is a reserved directive name — you cannot also define a
-  profile/shared-context entry called `home`.
+  profile entry called `home`.
 - Only one `home:` line is allowed per `.ctx` file; a duplicate is an
   error, same as any other invalid `.ctx` line.
 - The path resolves the same way as any other `.ctx` entry: relative to
@@ -310,7 +310,7 @@ review:/home/user/work/ai-config/profiles/review
 - Add the custom directory to that project's `.gitignore` (e.g.
   `.copilot-ctx/`) so the synthetic home never gets committed.
 - This only applies to `.ctx`-file activation. Manually invoking
-  `ctx <profile> [shared...]` (no `.ctx` file involved) always uses the
+  `ctx <profile> [profile...]` (no `.ctx` file involved) always uses the
   centralized default — there's no `.ctx` file to read a `home:` directive
   from.
 - `ctx clear --all` looks up whichever location was actually used (custom
@@ -422,8 +422,8 @@ only the first context name plus a `(+2)` suffix for the rest (e.g.
   `PSAvoidUsingWriteHost`, which is intentional: `ctx` is an interactive
   status-display command, not a value-returning function meant for pipeline
   composition.
-- Both implementations validate that the AI config root, profile directory,
-  and every shared directory exist before exporting anything, and leave any
+- Both implementations validate that the AI config root and every profile
+  directory exist before exporting anything, and leave any
   previously active context untouched if validation fails.
 - `COPILOT_HOME` is managed automatically by `ctx` whenever a context is
   active (see [Skill discovery](#skill-discovery)); it is exported/unset

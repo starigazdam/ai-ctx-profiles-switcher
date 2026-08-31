@@ -4,7 +4,7 @@
 # ctx.sh - Portable context switcher for GitHub Copilot CLI
 # ==========================================================
 #
-# Composes AI agent configuration directories (profiles + shared contexts)
+# Composes AI agent configuration directories (profiles)
 # stored under a root directory (default: ~/work/ai-config) into the
 # COPILOT_CUSTOM_INSTRUCTIONS_DIRS environment variable, for the current
 # shell session.
@@ -31,12 +31,11 @@
 # DIRECTORY LAYOUT EXPECTED
 # ---------------------------------------------------------------------------
 #   ${AI_CTX_PROFILES_CONFIG_ROOT:-$HOME/work/ai-config}/
-#   ├── profiles/
-#   │   ├── review/
-#   │   ├── architecture/
-#   │   ├── incident/
-#   │   └── coding/
-#   └── shared/
+#   └── profiles/
+#       ├── review/
+#       ├── architecture/
+#       ├── incident/
+#       ├── coding/
 #       ├── dotnet/
 #       ├── azure/
 #       ├── terraform/
@@ -46,9 +45,9 @@
 # USAGE
 # ---------------------------------------------------------------------------
 #   ctx review                    # activate the "review" profile
-#   ctx coding azure              # "coding" profile + "azure" shared context
-#   ctx review dotnet security    # profile + multiple shared contexts
-#   ctx current                   # show active profile/shared/env vars
+#   ctx coding azure              # activate multiple profiles
+#   ctx review dotnet security    # activate multiple profiles
+#   ctx current                   # show active profiles/env vars
 #   ctx clear                     # unset AI_CTX_PROFILES / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
 #   ctx clear --all               # remove the current context home and owned workspace artifacts
 #   ctx --help                    # usage help
@@ -61,12 +60,12 @@
 #
 #   Example:
 #       review:/home/user/work/ai-config/profiles/review
-#       dotnet:/home/user/work/ai-config/shared/dotnet
+#       dotnet:/home/user/work/ai-config/profiles/dotnet
 #       security:./local-instructions
 #
 #   Relative paths are resolved against the directory containing the .ctx
-#   file (not the current working directory). Unlike `ctx <profile> [shared]`,
-#   these names are NOT looked up under AI_CTX_PROFILES_CONFIG_ROOT/profiles|shared - the
+#   file (not the current working directory). Unlike `ctx <profile> [profile...]`,
+#   these names are NOT looked up under AI_CTX_PROFILES_CONFIG_ROOT/profiles - the
 #   path on each line is used directly. Every path is validated to exist.
 #
 #   When your prompt renders after a `cd` into that directory (or a
@@ -120,7 +119,7 @@ _ctx_lowercase() {
 _ctx_usage() {
     cat <<'EOF'
 Usage:
-  ctx <profile> [shared...]   Activate a profile with optional shared contexts
+  ctx <profile> [profile...]  Activate one or more profiles
   ctx current                   Show the currently active context
   ctx check                    Read-only audit against the nearest .ctx file
   ctx clear                   Clear the currently active context
@@ -137,7 +136,7 @@ Examples:
   ctx review dotnet security
 
 Environment:
-  AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles/ and shared/
+  AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles/
                        (default: $HOME/work/ai-config)
   CTX_AUTO_LOAD        Set to 0 to disable automatic .ctx loading on cd
 EOF
@@ -150,7 +149,7 @@ _ctx_print_status() {
 
     printf '\n[AI Context]\n\n'
     printf 'Profile : %s\n' "${profile:-<none>}"
-    printf 'Shared  : %s\n' "${shared_csv:-<none>}"
+    printf 'Profiles: %s\n' "${shared_csv:-<none>}"
     printf '\nAI_CTX_PROFILES=%s\n' "${AI_CTX_PROFILES:-<unset>}"
     printf 'COPILOT_HOME=%s\n' "${COPILOT_HOME:-<unset>}"
     printf '\nCOPILOT_CUSTOM_INSTRUCTIONS_DIRS=\n'
@@ -164,7 +163,7 @@ _ctx_print_status() {
 _ctx_current() {
     if [ -z "${AI_CTX_PROFILES:-}" ]; then
         printf 'No active AI context.\n'
-        printf 'Run "ctx <profile> [shared...]" to activate one.\n'
+        printf 'Run "ctx <profile> [profile...]" to activate one.\n'
         return 0
     fi
 
@@ -795,7 +794,7 @@ _ctx_load_ctx_file() {
     # COPILOT_CUSTOM_INSTRUCTIONS_DIRS directly from the parsed entries.
     #
     # An optional line "home:<path>" (issue #7) is a reserved directive,
-    # not a profile/shared-context entry: it overrides where this .ctx
+    # not a profile entry: it overrides where this .ctx
     # file's synthetic COPILOT_HOME is created, instead of the centralized
     # default under _ctx_copilot_home_root. Its path resolves the same way
     # (relative to the .ctx file's directory unless absolute), and the
