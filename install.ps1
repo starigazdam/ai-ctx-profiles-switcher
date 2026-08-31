@@ -58,8 +58,8 @@ Write-Host "    ctx review dotnet"
 Write-Host "    ctx current"
 Write-Host "    ctx clear"
 Write-Host ""
-Write-Host 'Set $env:AI_CONFIG_ROOT if your ai-config directory is not at $HOME\work\ai-config:'
-Write-Host '    $env:AI_CONFIG_ROOT = "C:\path\to\ai-config"'
+Write-Host 'Set $env:AI_CTX_PROFILES_CONFIG_ROOT if your ai-config directory is not at $HOME\work\ai-config:'
+Write-Host '    $env:AI_CTX_PROFILES_CONFIG_ROOT = "C:\path\to\ai-config"'
 Write-Host ""
 Write-Host "To show the active context in your Oh My Posh prompt, add a segment"
-Write-Host "reading `$env:AI_CONTEXT to your Oh My Posh theme (see README.md)."
+Write-Host "reading `$env:AI_CTX_PROFILES to your Oh My Posh theme (see README.md)."

@@ -19,14 +19,14 @@ The first implementation should use a **project-local adapter**: materialize onl
 
 | Mechanism | Bash | zsh | PowerShell 5.1 | PowerShell 7+ | Suitable ctx mapping |
 |---|---:|---:|---:|---:|---|
-| `CLAUDE.md`, `.claude/rules/` | Yes | Yes | Yes | Yes | profile/shared instructions |
-| `.claude/skills/<name>/SKILL.md` | Yes | Yes | Yes | Yes | profile/shared skills |
+| `CLAUDE.md`, `.claude/rules/` | Yes | Yes | Yes | Yes | profile-owned instructions |
+| `.claude/skills/<name>/SKILL.md` | Yes | Yes | Yes | Yes | profile-owned skills |
 | `.claude/settings.json` and `.local.json` | Yes | Yes | Yes | Yes | project activation policy; must be owned explicitly |
 | `~/.claude/settings.json` | Yes | Yes | Yes | Yes | user defaults; do not rewrite during activation |
 | `CLAUDE_CONFIG_DIR` | Yes | Yes | Yes | Yes | optional isolated Claude state boundary |
 | hooks | Yes | Yes | Yes | Yes | lifecycle/check hooks, not a direct replacement for shell activation |
 | plugins/MCP | Yes | Yes | Yes | Yes | future adapter input; no automatic copying |
-| `--add-dir` | Yes | Yes | Yes | Yes | possible shared read-only instruction source; verify version semantics |
+| `--add-dir` | Yes | Yes | Yes | Yes | possible additional read-only instruction source; verify version semantics |
 
 The platform cells mean the mechanism is documented as a CLI/configuration feature and can be selected from that shell. They do not assert identical quoting, filesystem permissions, junction behavior, or installation support across every Claude Code release.
 
@@ -47,7 +47,7 @@ Sources: [Claude directory](https://code.claude.com/docs/en/claude-directory), [
 | Current ctx concept | Claude Code equivalent | Assessment |
 |---|---|---|
 | profile instructions | profile-owned `CLAUDE.md`, `.claude/rules/`, or an adapter-generated project file | Direct enough, but generated files need ownership markers and cleanup rules. |
-| shared instruction directories | symlinked/shared `.claude/rules/` or `--add-dir` | `.claude/rules/` symlinks are documented; `--add-dir` memory loading has additional opt-in semantics. |
+| additional profile instruction directories | symlinked profile-owned `.claude/rules/` or `--add-dir` | `.claude/rules/` symlinks are documented; `--add-dir` memory loading has additional opt-in semantics. |
 | skills | `.claude/skills/<name>/SKILL.md` | Direct layout match in concept; Claude skill frontmatter and invocation semantics differ from Copilot. |
 | context/session state | `CLAUDE_CONFIG_DIR`, `~/.claude/projects/`, sessions, plugins, and `~/.claude.json` | Not equivalent to instruction content; isolate only as a deliberate state policy. |
 | `.ctx` auto-loading | shell hook that exports env vars before launching Claude Code, or a project-local generated adapter | Claude hooks are Claude lifecycle hooks, not a portable shell `chpwd` mechanism. Keep `.ctx` loading in ctx. |
@@ -55,7 +55,7 @@ Sources: [Claude directory](https://code.claude.com/docs/en/claude-directory), [
 ## Proposed lifecycle and ownership
 
 1. Parse and validate `.ctx` completely before changing the environment; preserve the existing failure-atomic contract.
-2. Resolve profile/shared paths and reject paths outside the permitted roots unless explicitly allowed.
+2. Resolve profile paths and reject paths outside the permitted profile roots unless explicitly allowed.
 3. For the default mode, expose profile instructions and skills through an owned project adapter (prefer symlinked `.claude/rules/` and `.claude/skills/` where the platform supports them). Mark every generated entry.
 4. For isolated state, create a per-context `CLAUDE_CONFIG_DIR` under a user-owned cache root. Never place secrets in a repository. Treat `~/.claude.json`, credentials, transcripts, plugins, and auto-memory as private state.
 5. On clear, remove only entries carrying ctx ownership metadata. `clear --all` may remove empty, fully-owned cache directories after path and symlink checks.
@@ -68,8 +68,8 @@ Do not use per-file symlinks for Claude-managed JSON/database/session files unti
 - `CLAUDE_CONFIG_DIR` can redirect settings, session history, and plugins; redirecting it can accidentally duplicate or expose credentials if permissions are wrong. Create it with restrictive permissions and never copy authentication material by default.
 - Generated project files are executable/configuration inputs. Do not accept arbitrary hook commands or MCP endpoints from untrusted `.ctx` entries without an explicit policy.
 - Canonicalize paths before containment checks; reject traversal, unexpected symlink/junction targets, and deletion of a path that changed identity between validation and cleanup.
-- Two shells activating different contexts must not share a writable state directory. Otherwise settings, sessions, plugins, and auto-memory can leak or race. Default recommendation is read-only shared instructions plus separate state, or no state isolation.
-- Claude Code watches/reloads settings changes according to its documentation. This increases the risk of mutating shared settings while a session is running; activation should not rewrite the user settings file.
+- Two shells activating different contexts must not share a writable state directory. Otherwise settings, sessions, plugins, and auto-memory can leak or race. Default recommendation is read-only profile instructions plus separate state, or no state isolation.
+- Claude Code watches/reloads settings changes according to its documentation. This increases the risk of mutating settings used by another session while a session is running; activation should not rewrite the user settings file.
 
 ## Version detection and CI
 

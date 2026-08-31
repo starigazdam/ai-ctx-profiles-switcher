@@ -4,7 +4,7 @@
 # ctx.sh - Portable context switcher for GitHub Copilot CLI
 # ==========================================================
 #
-# Composes AI agent configuration directories (profiles + shared contexts)
+# Composes AI agent configuration directories (profiles)
 # stored under a root directory (default: ~/work/ai-config) into the
 # COPILOT_CUSTOM_INSTRUCTIONS_DIRS environment variable, for the current
 # shell session.
@@ -30,13 +30,12 @@
 # ---------------------------------------------------------------------------
 # DIRECTORY LAYOUT EXPECTED
 # ---------------------------------------------------------------------------
-#   ${AI_CONFIG_ROOT:-$HOME/work/ai-config}/
-#   ├── profiles/
-#   │   ├── review/
-#   │   ├── architecture/
-#   │   ├── incident/
-#   │   └── coding/
-#   └── shared/
+#   ${AI_CTX_PROFILES_CONFIG_ROOT:-$HOME/work/ai-config}/
+#   └── profiles/
+#       ├── review/
+#       ├── architecture/
+#       ├── incident/
+#       ├── coding/
 #       ├── dotnet/
 #       ├── azure/
 #       ├── terraform/
@@ -46,10 +45,10 @@
 # USAGE
 # ---------------------------------------------------------------------------
 #   ctx review                    # activate the "review" profile
-#   ctx coding azure              # "coding" profile + "azure" shared context
-#   ctx review dotnet security    # profile + multiple shared contexts
-#   ctx current                   # show active profile/shared/env vars
-#   ctx clear                     # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
+#   ctx coding azure              # activate multiple profiles
+#   ctx review dotnet security    # activate multiple profiles
+#   ctx current                   # show active profiles/env vars
+#   ctx clear                     # unset AI_CTX_PROFILES / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
 #   ctx clear --all               # remove the current context home and owned workspace artifacts
 #   ctx --help                    # usage help
 #
@@ -61,16 +60,16 @@
 #
 #   Example:
 #       review:/home/user/work/ai-config/profiles/review
-#       dotnet:/home/user/work/ai-config/shared/dotnet
+#       dotnet:/home/user/work/ai-config/profiles/dotnet
 #       security:./local-instructions
 #
 #   Relative paths are resolved against the directory containing the .ctx
-#   file (not the current working directory). Unlike `ctx <profile> [shared]`,
-#   these names are NOT looked up under AI_CONFIG_ROOT/profiles|shared - the
+#   file (not the current working directory). Unlike `ctx <profile> [profile...]`,
+#   these names are NOT looked up under AI_CTX_PROFILES_CONFIG_ROOT/profiles - the
 #   path on each line is used directly. Every path is validated to exist.
 #
 #   When your prompt renders after a `cd` into that directory (or a
-#   descendant of it), AI_CONTEXT and COPILOT_CUSTOM_INSTRUCTIONS_DIRS are
+#   descendant of it), AI_CTX_PROFILES and COPILOT_CUSTOM_INSTRUCTIONS_DIRS are
 #   set (overwriting any previous value) from the file's contents. Leaving
 #   the directory tree (into a location with no .ctx file) automatically
 #   clears the context.
@@ -108,7 +107,7 @@
 # --- Core implementation -----------------------------------------------
 
 _ctx_root() {
-    printf '%s\n' "${AI_CONFIG_ROOT:-$HOME/work/ai-config}"
+    printf '%s\n' "${AI_CTX_PROFILES_CONFIG_ROOT:-$HOME/work/ai-config}"
 }
 
 # Lowercase a context name without shell-specific case conversion syntax.
@@ -120,7 +119,7 @@ _ctx_lowercase() {
 _ctx_usage() {
     cat <<'EOF'
 Usage:
-  ctx <profile> [shared...]   Activate a profile with optional shared contexts
+  ctx <profile> [profile...]  Activate one or more profiles
   ctx current                   Show the currently active context
   ctx check                    Read-only audit against the nearest .ctx file
   ctx clear                   Clear the currently active context
@@ -137,7 +136,7 @@ Examples:
   ctx review dotnet security
 
 Environment:
-  AI_CONFIG_ROOT      Root directory containing profiles/ and shared/
+  AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles/
                        (default: $HOME/work/ai-config)
   CTX_AUTO_LOAD        Set to 0 to disable automatic .ctx loading on cd
 EOF
@@ -150,8 +149,8 @@ _ctx_print_status() {
 
     printf '\n[AI Context]\n\n'
     printf 'Profile : %s\n' "${profile:-<none>}"
-    printf 'Shared  : %s\n' "${shared_csv:-<none>}"
-    printf '\nAI_CONTEXT=%s\n' "${AI_CONTEXT:-<unset>}"
+    printf 'Profiles: %s\n' "${shared_csv:-<none>}"
+    printf '\nAI_CTX_PROFILES=%s\n' "${AI_CTX_PROFILES:-<unset>}"
     printf 'COPILOT_HOME=%s\n' "${COPILOT_HOME:-<unset>}"
     printf '\nCOPILOT_CUSTOM_INSTRUCTIONS_DIRS=\n'
     if [ -n "$dirs_csv" ]; then
@@ -162,18 +161,18 @@ _ctx_print_status() {
 }
 
 _ctx_current() {
-    if [ -z "${AI_CONTEXT:-}" ]; then
+    if [ -z "${AI_CTX_PROFILES:-}" ]; then
         printf 'No active AI context.\n'
-        printf 'Run "ctx <profile> [shared...]" to activate one.\n'
+        printf 'Run "ctx <profile> [profile...]" to activate one.\n'
         return 0
     fi
 
     local profile shared_csv
-    profile="${AI_CONTEXT%%+*}"
-    if [ "$AI_CONTEXT" = "$profile" ]; then
+    profile="${AI_CTX_PROFILES%%+*}"
+    if [ "$AI_CTX_PROFILES" = "$profile" ]; then
         shared_csv=""
     else
-        shared_csv="${AI_CONTEXT#*+}"
+        shared_csv="${AI_CTX_PROFILES#*+}"
         shared_csv="${shared_csv//+/, }"
     fi
 
@@ -229,10 +228,10 @@ _ctx_clear() {
     # to the nearest .ctx file (.github/copilot/settings.local.json and the
     # "<folder-name>.code-workspace" file), instead of just leaving them in
     # place for next time.
-    local prev_context="${AI_CONTEXT:-}"
+    local prev_context="${AI_CTX_PROFILES:-}"
     local prev_home="${COPILOT_HOME:-}"
     local cleanup_status=0
-    unset AI_CONTEXT
+    unset AI_CTX_PROFILES
     unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
     unset COPILOT_HOME
 
@@ -322,97 +321,64 @@ _ctx_clear() {
     return "$cleanup_status"
 }
 
-ctx() {
-    if [ "$#" -eq 0 ]; then
-        _ctx_usage
-        return 0
-    fi
-
-    case "$1" in
-        -h|--help)
-            _ctx_usage
-            return 0
-            ;;
-        current)
-            _ctx_current
-            return 0
-            ;;
-        check)
-            _ctx_check
-            return $?
-            ;;
-        clear)
-            _ctx_clear "$2"
-            return $?
-            ;;
+_ctx_resolve_profile_identifier() {
+    # Resolve a profile identifier only if its canonical target is an immediate
+    # descendant of the canonical profiles root. This rejects traversal and
+    # profile-root symlinks that escape the configured profiles directory.
+    local name="$1" profiles_root root_canonical candidate canonical
+    case "$name" in
+        ''|.|..|*/*|*\\*)
+            printf 'ctx: error: invalid profile identifier "%s"\n' "$name" >&2
+            return 1 ;;
     esac
-
-    local root profile_name profile_dir
-    root="$(_ctx_root)"
-
-    if [ ! -d "$root" ]; then
-        printf 'ctx: error: AI config root does not exist: %s\n' "$root" >&2
-        return 1
-    fi
-
-    profile_name="$1"
-    shift
-    profile_dir="$root/profiles/$profile_name"
-
-    if [ ! -d "$profile_dir" ]; then
-        printf 'ctx: error: unknown profile "%s" (looked in %s)\n' "$profile_name" "$root/profiles" >&2
+    profiles_root="$(_ctx_root)/profiles"
+    root_canonical="$(realpath -m -- "$profiles_root" 2>/dev/null)" || return 1
+    candidate="$profiles_root/$name"
+    if [ ! -d "$candidate" ]; then
+        printf 'ctx: error: unknown profile "%s" (looked in %s)\n' "$name" "$profiles_root" >&2
         printf 'ctx: available profiles:\n' >&2
-        if [ -d "$root/profiles" ]; then
-            find "$root/profiles" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sed 's/^/  - /' >&2
-        fi
+        [ -d "$profiles_root" ] && find "$profiles_root" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sed 's/^/  - /' >&2
         return 1
     fi
-
-    local dirs_csv shared_csv shared_name shared_dir first
-    dirs_csv="$profile_dir"
-    shared_csv=""
-    first=1
-
-    for shared_name in "$@"; do
-        shared_dir="$root/shared/$shared_name"
-        if [ ! -d "$shared_dir" ]; then
-            printf 'ctx: error: unknown shared context "%s" (looked in %s)\n' "$shared_name" "$root/shared" >&2
-            printf 'ctx: available shared contexts:\n' >&2
-            if [ -d "$root/shared" ]; then
-                find "$root/shared" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sed 's/^/  - /' >&2
-            fi
-            return 1
-        fi
-        dirs_csv="$dirs_csv,$shared_dir"
-        if [ "$first" -eq 1 ]; then
-            shared_csv="$shared_name"
-            first=0
-        else
-            shared_csv="$shared_csv, $shared_name"
-        fi
-    done
-
-    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv"
-
-    if [ -n "$shared_csv" ]; then
-        # shellcheck disable=SC2001 # need sed for portable comma->plus with spaces removed
-        export AI_CONTEXT="${profile_name}+$(printf '%s' "$shared_csv" | sed 's/, /+/g')"
-    else
-        export AI_CONTEXT="$profile_name"
+    canonical="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
+    if [ "$(dirname "$canonical")" != "$root_canonical" ]; then
+        printf 'ctx: error: invalid profile identifier "%s"\n' "$name" >&2
+        return 1
     fi
-
-    local -a resolved_dirs_manual=()
-    if [ -n "${ZSH_VERSION:-}" ]; then
-        resolved_dirs_manual=("${(@s:,:)dirs_csv}")
-    else
-        IFS=',' read -r -a resolved_dirs_manual <<< "$dirs_csv"
-    fi
-
-    _ctx_setup_copilot_home "$AI_CONTEXT" "" "${resolved_dirs_manual[@]}"
-
-    _ctx_print_status "$profile_name" "$shared_csv" "$dirs_csv"
+    printf '%s\n' "$canonical"
 }
 
+ctx() {
+    if [ "$#" -eq 0 ]; then _ctx_usage; return 0; fi
+    case "$1" in
+        -h|--help) _ctx_usage; return 0 ;;
+        current) _ctx_current; return 0 ;;
+        check) _ctx_check; return $? ;;
+        clear) _ctx_clear "$2"; return $? ;;
+    esac
+
+    local root profile_name profile_dir context_name context_lc profile_name_lc
+    root="$(_ctx_root)"
+    if [ ! -d "$root" ]; then printf 'ctx: error: AI config root does not exist: %s\n' "$root" >&2; return 1; fi
+    local dirs_csv=""
+    local -a resolved_dirs_manual=() context_names=() seen_names=()
+    for context_name in "$@"; do
+        context_lc="$(_ctx_lowercase "$context_name")"
+        for profile_name_lc in "${seen_names[@]}"; do
+            if [ "$profile_name_lc" = "$context_lc" ]; then printf 'ctx: error: duplicate profile "%s"\n' "$context_name" >&2; return 1; fi
+        done
+        seen_names+=("$context_lc")
+        if ! profile_dir="$(_ctx_resolve_profile_identifier "$context_name")"; then return 1; fi
+        context_names+=("$context_name"); resolved_dirs_manual+=("$profile_dir")
+        [ -z "$dirs_csv" ] && dirs_csv="$profile_dir" || dirs_csv="$dirs_csv,$profile_dir"
+    done
+    [ "${#context_names[@]}" -gt 0 ] || return 1
+    profile_name="${context_names[0]}"
+    AI_CTX_PROFILES="${context_names[*]}"; AI_CTX_PROFILES="${AI_CTX_PROFILES// /+}"
+    if ! _ctx_setup_copilot_home "$AI_CTX_PROFILES" "" "${resolved_dirs_manual[@]}"; then return 1; fi
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv" AI_CTX_PROFILES
+    _ctx_print_status "$AI_CTX_PROFILES" "" "$dirs_csv"
+}
 # --- Auto-loading via .ctx files ----------------------------------------
 
 _ctx_auto_load_dir=""
@@ -456,8 +422,8 @@ _ctx_auto_load_hook() {
 }
 
 _ctx_copilot_home_root() {
-    printf '%s\n' "${AI_CONFIG_ROOT:+}" >/dev/null # no-op, keeps shellcheck quiet about unused pattern
-    printf '%s\n' "${CTX_HOMES_ROOT:-$HOME/.config/ctx/homes}"
+    printf '%s\n' "${AI_CTX_PROFILES_CONFIG_ROOT:+}" >/dev/null # no-op, keeps shellcheck quiet about unused pattern
+    printf '%s\n' "${AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT:-$HOME/.config/ctx/homes}"
 }
 
 _ctx_sanitize_context_name() {
@@ -470,21 +436,21 @@ _ctx_sanitize_context_name() {
 
 _ctx_validate_home_path() {
     # Print the canonical, safe path. Custom homes may only be descendants
-    # of HOME or CTX_HOMES_ROOT; existing symlink components are forbidden.
+    # of HOME or AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT; existing symlink components are forbidden.
     local candidate="$1" canonical root root_canonical part prefix rest
     [ -n "$candidate" ] || { printf 'ctx: error: unsafe home: empty path\n' >&2; return 1; }
     case "$candidate" in /*) ;; *) printf 'ctx: error: unsafe home: path is not absolute: %s\n' "$candidate" >&2; return 1 ;; esac
     canonical="$(realpath -m -- "$candidate" 2>/dev/null)" || { printf 'ctx: error: unsafe home: %s\n' "$candidate" >&2; return 1; }
     [ "$canonical" != "/" ] || { printf 'ctx: error: unsafe home: filesystem root\n' >&2; return 1; }
     local allowed=1 root_is_candidate=0
-    for root in "$HOME" "${CTX_HOMES_ROOT:-}"; do
+    for root in "$HOME" "${AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT:-}"; do
         [ -n "$root" ] || continue
         root_canonical="$(realpath -m -- "$root" 2>/dev/null)" || continue
         if [ "$canonical" = "$root_canonical" ]; then root_is_candidate=1; fi
         if [ "$canonical" != "$root_canonical" ] && [[ "$canonical" == "$root_canonical"/* ]]; then allowed=0; fi
     done
     [ "$root_is_candidate" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is an allowed root, not a descendant\n' "$candidate" >&2; return 1; }
-    [ "$allowed" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is outside HOME/CTX_HOMES_ROOT\n' "$candidate" >&2; return 1; }
+    [ "$allowed" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is outside HOME/AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT\n' "$candidate" >&2; return 1; }
     rest="${candidate#/}"; prefix="/"
     while [ -n "$rest" ]; do
         part="${rest%%/*}"
@@ -809,161 +775,78 @@ with open(workspace_file, "w", encoding="utf-8") as f:
 PYEOF
 }
 
-_ctx_load_ctx_file() {
-    # Parses a .ctx file where each non-empty, non-comment line is
-    # "<context-name>:<path-to-folder>". Relative paths are resolved
-    # against the directory containing the .ctx file. Sets AI_CONTEXT and
-    # COPILOT_CUSTOM_INSTRUCTIONS_DIRS directly from the parsed entries.
-    #
-    # An optional line "home:<path>" (issue #7) is a reserved directive,
-    # not a profile/shared-context entry: it overrides where this .ctx
-    # file's synthetic COPILOT_HOME is created, instead of the centralized
-    # default under _ctx_copilot_home_root. Its path resolves the same way
-    # (relative to the .ctx file's directory unless absolute), and the
-    # directory does not need to pre-exist (it's created on demand, same
-    # as the centralized default).
-    local ctx_file="$1"
-    local dir_of_file
+_ctx_parse_ctx_file() {
+    # Side-effect-free parser shared by activation and read-only check. Results
+    # are exposed in _ctx_parsed_* globals only after complete validation.
+    local ctx_file="$1" dir_of_file line name entry_path resolved_path canonical_path profile_path label_lc
+    local ai_context="" first_name="" home_override=""
+    local -a dirs=() names=() pairs=()
+    local -A seen_labels=() seen_targets=()
     dir_of_file="$(dirname "$ctx_file")"
-
-    local ai_context="" dirs_csv="" first_name="" home_override=""
-    local line name entry_path resolved_path
-    local -a resolved_dirs=()
-    local -a resolved_names=()
-    local -a workspace_pairs=()
-
     while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"
-        [ -z "$line" ] && continue
-        case "$line" in
-            '#'*) continue ;;
-        esac
-        case "$line" in
-            *:*) : ;;
-            *)
-                printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2
-                return 1
-                ;;
-        esac
-
-        name="${line%%:*}"
-        entry_path="${line#*:}"
-        # Trim leading/trailing whitespace so "home: .copilot-ctx" (with a
-        # space after the colon, as shown in docs/examples) parses the same
-        # as "home:.copilot-ctx" - matches ctx.ps1's .Trim() on both sides.
-        name="${name#"${name%%[![:space:]]*}"}"
-        name="${name%"${name##*[![:space:]]}"}"
-        entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"
-        entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
-        if [ -z "$name" ] || [ -z "$entry_path" ]; then
-            printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2
-            return 1
+        line="${line%$'\r'}"; [ -z "$line" ] && continue
+        case "$line" in '#'*) continue ;; *:*) : ;; *) printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2; return 1 ;; esac
+        name="${line%%:*}"; entry_path="${line#*:}"
+        name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+        entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"; entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
+        if [ -z "$name" ] || [ -z "$entry_path" ]; then printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2; return 1; fi
+        label_lc="$(_ctx_lowercase "$name")"
+        if [ "$label_lc" != home ]; then
+            if [ -n "${seen_labels[$label_lc]+set}" ]; then printf 'ctx: error: duplicate .ctx entry label "%s"; first declared as "%s"\n' "$name" "${seen_labels[$label_lc]}" >&2; return 1; fi
+            seen_labels[$label_lc]="$name"
         fi
-
-        case "$entry_path" in
-            /*) resolved_path="$entry_path" ;;
-            *) resolved_path="$dir_of_file/$entry_path" ;;
-        esac
-
-        if [ "$(_ctx_lowercase "$name")" = "home" ]; then
-            if [ -n "$home_override" ]; then
-                printf 'ctx: error: duplicate "home:" directive in %s\n' "$ctx_file" >&2
-                return 1
-            fi
-            if ! home_override="$(_ctx_validate_home_path "$resolved_path")"; then
-                return 1
-            fi
+        if [ "$entry_path" = '@profile' ]; then
+            if ! profile_path="$(_ctx_resolve_profile_identifier "$name")"; then return 1; fi
+            resolved_path="$profile_path"
+        else
+            case "$entry_path" in /*) resolved_path="$entry_path" ;; *) resolved_path="$dir_of_file/$entry_path" ;; esac
+        fi
+        if [ "$label_lc" = home ]; then
+            if [ -n "$home_override" ]; then printf 'ctx: error: duplicate "home:" directive in %s\n' "$ctx_file" >&2; return 1; fi
+            if ! home_override="$(_ctx_validate_home_path "$resolved_path")"; then return 1; fi
             continue
         fi
-
-        if [ ! -d "$resolved_path" ]; then
-            printf 'ctx: error: .ctx entry "%s" in %s points to missing directory: %s\n' "$name" "$ctx_file" "$resolved_path" >&2
-            return 1
-        fi
-
-        if [ -z "$ai_context" ]; then
-            ai_context="$name"
-            dirs_csv="$resolved_path"
-            first_name="$name"
-        else
-            ai_context="$ai_context+$name"
-            dirs_csv="$dirs_csv,$resolved_path"
-        fi
-        resolved_dirs+=("$resolved_path")
-        resolved_names+=("$name")
-        workspace_pairs+=("$name" "$resolved_path")
+        if [ ! -d "$resolved_path" ]; then printf 'ctx: error: .ctx entry "%s" in %s points to missing directory: %s\n' "$name" "$ctx_file" "$resolved_path" >&2; return 1; fi
+        canonical_path="$(realpath -m -- "$resolved_path" 2>/dev/null)" || return 1
+        if [ -n "${seen_targets[$canonical_path]+set}" ]; then printf 'ctx: error: .ctx entries "%s" and "%s" resolve to the same directory\n' "${seen_targets[$canonical_path]}" "$name" >&2; return 1; fi
+        seen_targets[$canonical_path]="$name"; names+=("$name"); dirs+=("$resolved_path"); pairs+=("$name" "$resolved_path")
+        [ -z "$ai_context" ] && { ai_context="$name"; first_name="$name"; } || ai_context="$ai_context+$name"
     done < "$ctx_file"
-
-    if [ -z "$ai_context" ]; then
-        printf 'ctx: error: .ctx file is empty or invalid: %s\n' "$ctx_file" >&2
-        return 1
-    fi
-
-    # Setting COPILOT_CUSTOM_INSTRUCTIONS_DIRS alone does not make Copilot CLI
-    # load skills from these directories. Genuine per-folder, session-
-    # isolated skill discovery is provided via COPILOT_HOME (see
-    # _ctx_setup_copilot_home) rather than settings.local.json's
-    # skillDirectories, which Copilot CLI silently ignores (issue #1).
-
-    # Create/update "<folder-name>.code-workspace" next to the .ctx file so
-    # this project and its .ctx dependencies can be browsed together in one
-    # VS Code window (name/path pairs, alternating).
-    _ctx_update_workspace_file "$dir_of_file" "${workspace_pairs[@]}"
-
-    export AI_CONTEXT="$ai_context"
-    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv"
-
-    _ctx_setup_copilot_home "$ai_context" "$home_override" "${resolved_dirs[@]}"
-    _ctx_auto_load_home_override="$home_override"
-
-    local shared_csv
-    if [ "$ai_context" = "$first_name" ]; then
-        shared_csv=""
-    else
-        shared_csv="${ai_context#*+}"
-        shared_csv="${shared_csv//+/, }"
-    fi
-
-    _ctx_print_status "$first_name" "$shared_csv" "$dirs_csv"
+    if [ "${#names[@]}" -eq 0 ]; then printf 'ctx: error: .ctx file is empty or invalid: %s\n' "$ctx_file" >&2; return 1; fi
+    _ctx_parsed_dir="$dir_of_file"; _ctx_parsed_context="$ai_context"; _ctx_parsed_first_name="$first_name"; _ctx_parsed_home="$home_override"
+    _ctx_parsed_names=("${names[@]}"); _ctx_parsed_dirs=("${dirs[@]}"); _ctx_parsed_pairs=("${pairs[@]}")
 }
 
+_ctx_load_ctx_file() {
+    local ctx_file="$1" dirs_csv shared_csv
+    _ctx_parse_ctx_file "$ctx_file" || return 1
+    dirs_csv="$(IFS=,; printf '%s' "${_ctx_parsed_dirs[*]}")"
+    _ctx_update_workspace_file "$_ctx_parsed_dir" "${_ctx_parsed_pairs[@]}"
+    export AI_CTX_PROFILES="$_ctx_parsed_context" COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv"
+    _ctx_setup_copilot_home "$_ctx_parsed_context" "$_ctx_parsed_home" "${_ctx_parsed_dirs[@]}" || return 1
+    _ctx_auto_load_home_override="$_ctx_parsed_home"
+    if [ "$_ctx_parsed_context" = "$_ctx_parsed_first_name" ]; then shared_csv=""; else shared_csv="${_ctx_parsed_context#*+}"; shared_csv="${shared_csv//+/, }"; fi
+    _ctx_print_status "$_ctx_parsed_first_name" "$shared_csv" "$dirs_csv"
+}
 _ctx_check() {
     local ctx_file dir_of_file line name entry_path resolved_path home_override=""
-    local expected_context="" expected_dirs="" first=1
+    local expected_context="" expected_dirs="" first=1 profile_lookup
     local -a names=() dirs=()
     local failures=0
+    local -A seen_labels=() seen_targets=()
 
     if ! ctx_file="$(_ctx_find_ctx_file)"; then
         printf 'ctx check: no .ctx file found; nothing to check\n'
         return 0
     fi
-    dir_of_file="$(dirname "$ctx_file")"
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"
-        [ -z "$line" ] && continue
-        case "$line" in '#'* ) continue ;; esac
-        case "$line" in *:*) ;; *) printf 'CHECK FAIL parser: invalid .ctx line\n'; failures=$((failures+1)); continue ;; esac
-        name="${line%%:*}"; entry_path="${line#*:}"
-        name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
-        entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"; entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
-        case "$entry_path" in /*) resolved_path="$entry_path" ;; *) resolved_path="$dir_of_file/$entry_path" ;; esac
-        if [ "$(_ctx_lowercase "$name")" = home ]; then
-            if [ -n "$home_override" ]; then printf 'CHECK FAIL parser: duplicate home directive\n'; failures=$((failures+1)); continue; fi
-            if ! home_override="$(_ctx_validate_home_path "$resolved_path" 2>/dev/null)"; then
-                printf 'CHECK FAIL COPILOT_HOME: invalid home directive\n'; failures=$((failures+1)); continue
-            fi
-            continue
-        fi
-        if [ -z "$name" ] || [ -z "$entry_path" ] || [ ! -d "$resolved_path" ]; then
-            printf 'CHECK FAIL parser: invalid or missing entry %s\n' "$name"; failures=$((failures+1)); continue
-        fi
-        names+=("$name"); dirs+=("$resolved_path")
-        if [ "$first" -eq 1 ]; then expected_context="$name"; expected_dirs="$resolved_path"; first=0
-        else expected_context="$expected_context+$name"; expected_dirs="$expected_dirs,$resolved_path"; fi
-    done < "$ctx_file"
-    if [ "${#names[@]}" -eq 0 ]; then printf 'CHECK FAIL parser: .ctx has no entries\n'; return 1; fi
-
-    if [ "${AI_CONTEXT:-}" = "$expected_context" ]; then printf 'CHECK PASS AI_CONTEXT\n'; else printf 'CHECK FAIL AI_CONTEXT: expected %s, got %s\n' "$expected_context" "${AI_CONTEXT:-<unset>}"; failures=$((failures+1)); fi
+    if ! _ctx_parse_ctx_file "$ctx_file"; then
+        printf 'CHECK FAIL parser: invalid .ctx file\n'
+        return 1
+    fi
+    dir_of_file="$_ctx_parsed_dir"; expected_context="$_ctx_parsed_context"; home_override="$_ctx_parsed_home"
+    names=("${_ctx_parsed_names[@]}"); dirs=("${_ctx_parsed_dirs[@]}")
+    expected_dirs="$(IFS=,; printf '%s' "${dirs[*]}")"
+    if [ "${AI_CTX_PROFILES:-}" = "$expected_context" ]; then printf 'CHECK PASS AI_CTX_PROFILES\n'; else printf 'CHECK FAIL AI_CTX_PROFILES: expected %s, got %s\n' "$expected_context" "${AI_CTX_PROFILES:-<unset>}"; failures=$((failures+1)); fi
     if [ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" = "$expected_dirs" ]; then printf 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n'; else printf 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected %s, got %s\n' "$expected_dirs" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-<unset>}"; failures=$((failures+1)); fi
 
     local expected_home
@@ -1072,7 +955,7 @@ if [ -n "${ZSH_VERSION:-}" ]; then
             compadd current clear -- "${profiles[@]}"
         else
             local -a shared
-            shared=("${(f)$(_ctx_list_subdirs "$root/shared")}")
+            shared=("${(f)$(_ctx_list_subdirs "$root/profiles")}")
             compadd -- "${shared[@]}"
         fi
     }
@@ -1097,7 +980,7 @@ elif [ -n "${BASH_VERSION:-}" ]; then
         elif [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "clear" ]; then
             mapfile -t COMPREPLY < <(compgen -W "--all" -- "$cur")
         else
-            mapfile -t COMPREPLY < <(compgen -W "$(_ctx_list_subdirs "$root/shared" | tr '\n' ' ')" -- "$cur")
+            mapfile -t COMPREPLY < <(compgen -W "$(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
         fi
     }
     complete -F _ctx_bash_complete ctx
