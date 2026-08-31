@@ -19,16 +19,16 @@ package manager, no test runner. All logic lives in those two files.
 ### Two activation modes
 
 1. **Manual** — `ctx <profile> [shared...]`  
-   Looks up directories under `$AI_CONFIG_ROOT/profiles/<profile>` and
-   `$AI_CONFIG_ROOT/shared/<name>`, validates they exist, then sets
-   `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` (comma-separated) and `AI_CONTEXT`
+   Looks up directories under `$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<profile>` and
+   `$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`, validates they exist, then sets
+   `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` (comma-separated) and `AI_CTX_PROFILES`
    (plus-separated names).
 
 2. **Auto-load** — `.ctx` file in any project directory  
    Format: one `<context-name>:<path-to-folder>` line per entry.  
    Relative paths resolve against the **directory containing the `.ctx`
    file**, not `$PWD`. Paths are used directly — they are **not** looked
-   up under `AI_CONFIG_ROOT`.  
+   up under `AI_CTX_PROFILES_CONFIG_ROOT`.
    Triggered on every prompt render (bash/zsh `chpwd`-style hook; PowerShell
    wraps `prompt`). Activates when entering the tree, clears when leaving.
 
@@ -79,12 +79,12 @@ README, not solved.
 
 | Variable | Set by | Purpose |
 |---|---|---|
-| `AI_CONTEXT` | `ctx` | Human-readable label, `profile+shared1+shared2` |
+| `AI_CTX_PROFILES` | `ctx` | Human-readable label, `profile+shared1+shared2` |
 | `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | `ctx` | Comma-separated paths passed to Copilot CLI |
 | `COPILOT_HOME` | `ctx` | Per-context Copilot CLI home dir for skill isolation (unset when no context is active) |
-| `AI_CONFIG_ROOT` | User | Root of the profiles/shared tree (default: `$HOME/work/ai-config`) |
+| `AI_CTX_PROFILES_CONFIG_ROOT` | User | Root of the profiles/shared tree (default: `$HOME/work/ai-config`) |
 | `CTX_AUTO_LOAD` | User | Set to `0` to disable `.ctx` auto-loading |
-| `CTX_HOMES_ROOT` | User (mainly tests) | Overrides `~/.config/ctx/homes` for `COPILOT_HOME` dirs |
+| `AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT` | User (mainly tests) | Overrides `~/.config/ctx/homes` for `COPILOT_HOME` dirs |
 | `CTX_COPILOT_DIR` | User (mainly tests) | Overrides `~/.copilot` as the shared-file symlink target |
 
 ## Conventions
@@ -128,7 +128,7 @@ Add to `.gitignore` in any project that uses `.ctx`:
 ```
 `COPILOT_HOME` per-context cache dirs live under `~/.config/ctx/homes/`
 (outside any project repo) by default, so no additional `.gitignore` entry
-is needed for them unless `CTX_HOMES_ROOT` is pointed inside a repo.
+is needed for them unless `AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT` is pointed inside a repo.
 
 ## `examples/` layout
 

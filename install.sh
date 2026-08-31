@@ -61,6 +61,6 @@ Then try:
     ctx current
     ctx clear
 
-Set AI_CONFIG_ROOT if your ai-config directory is not at $HOME/work/ai-config:
-    export AI_CONFIG_ROOT="/path/to/ai-config"
+Set AI_CTX_PROFILES_CONFIG_ROOT if your ai-config directory is not at $HOME/work/ai-config:
+    export AI_CTX_PROFILES_CONFIG_ROOT="/path/to/ai-config"
 EOF

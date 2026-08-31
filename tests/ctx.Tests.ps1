@@ -7,8 +7,8 @@
     3.4a self-healing reconciliation hazard fix.
 
 .NOTES
-    Every test runs against an isolated $HOME / $env:AI_CONFIG_ROOT /
-    COPILOT_HOME root (via CTX_COPILOT_DIR / CTX_HOMES_ROOT overrides)
+    Every test runs against an isolated $HOME / $env:AI_CTX_PROFILES_CONFIG_ROOT /
+    COPILOT_HOME root (via CTX_COPILOT_DIR / AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT overrides)
     inside a temp dir, so nothing touches the real user's ~/.copilot or
     ~/.config/ctx.
 
@@ -26,7 +26,7 @@ BeforeAll {
 
     function Script:New-CtxTestProfile {
         param([string]$Name, [string]$Skill)
-        $profileDir = Join-Path $env:AI_CONFIG_ROOT "profiles\$Name"
+        $profileDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT "profiles\$Name"
         New-Item -ItemType Directory -Path (Join-Path $profileDir '.github\instructions') -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $profileDir ".github\instructions\$Name.instructions.md") -Value "# $Name instructions"
         if ($Skill) {
@@ -45,16 +45,16 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         New-Item -ItemType Directory -Path $Script:TestTmp -Force | Out-Null
 
         $env:HOME = Join-Path $Script:TestTmp 'home'
-        $env:AI_CONFIG_ROOT = Join-Path $Script:TestTmp 'ai-config'
+        $env:AI_CTX_PROFILES_CONFIG_ROOT = Join-Path $Script:TestTmp 'ai-config'
         $env:CTX_COPILOT_DIR = Join-Path $Script:TestTmp 'copilot'
-        $env:CTX_HOMES_ROOT = Join-Path $env:HOME '.config\ctx\homes'
+        $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT = Join-Path $env:HOME '.config\ctx\homes'
 
         New-Item -ItemType Directory -Path $env:HOME -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $env:AI_CONFIG_ROOT 'shared') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') -Force | Out-Null
         New-Item -ItemType Directory -Path $env:CTX_COPILOT_DIR -Force | Out-Null
 
-        Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
+        Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
         Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
         Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
         Remove-Item Env:\CTX_AUTO_LOAD -ErrorAction SilentlyContinue
@@ -71,7 +71,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
     function New-CtxTestProfile {
         param([string]$Name, [string]$Skill)
-        $profileDir = Join-Path $env:AI_CONFIG_ROOT "profiles\$Name"
+        $profileDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT "profiles\$Name"
         New-Item -ItemType Directory -Path (Join-Path $profileDir '.github\instructions') -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $profileDir ".github\instructions\$Name.instructions.md") -Value "# $Name instructions"
         if ($Skill) {
@@ -312,7 +312,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
         $proj = Join-Path $env:HOME 'project-home'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: .copilot-ctx`nreview:$reviewDir"
 
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
@@ -321,7 +321,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_HOME | Should -Be $expectedHome
         Test-Path -LiteralPath $env:COPILOT_HOME -PathType Container | Should -BeTrue
         Test-Path -LiteralPath (Join-Path (Join-Path $env:COPILOT_HOME 'skills') 'review-skill') | Should -BeTrue
-        Test-Path -LiteralPath (Join-Path $env:CTX_HOMES_ROOT 'review') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review') | Should -BeFalse
     }
 
     It 'Test 16: .ctx without a home: directive still uses the centralized default' {
@@ -329,12 +329,12 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
         $proj = Join-Path $Script:TestTmp 'project-nohome'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
 
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
 
-        $env:COPILOT_HOME | Should -Be (Join-Path $env:CTX_HOMES_ROOT 'review')
+        $env:COPILOT_HOME | Should -Be (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review')
     }
 
     It 'Test 17: home: directive with absolute path is used as-is' {
@@ -343,7 +343,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $proj = Join-Path $env:HOME 'project-home-abs'
         $customHome = Join-Path $env:HOME 'custom-copilot-home'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: $customHome`nreview:$reviewDir"
 
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
@@ -357,7 +357,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
         $proj = Join-Path $env:HOME 'project-home-clear'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: .copilot-ctx`nreview:$reviewDir"
 
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
@@ -368,13 +368,13 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Clear-CtxContext -All
 
         Test-Path -LiteralPath $customHome | Should -BeFalse
-        Test-Path -LiteralPath (Join-Path $env:CTX_HOMES_ROOT 'review') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review') | Should -BeFalse
     }
 
     It 'Test 19: duplicate home: directive in .ctx is rejected' {
         $proj = Join-Path $env:HOME 'project-home-dup'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home: .copilot-ctx-a`nhome: .copilot-ctx-b`nreview:$reviewDir"
 
         $prevEap = $ErrorActionPreference
@@ -396,7 +396,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $proj = Join-Path $env:HOME 'project-home-valid'
         $custom = Join-Path $env:HOME '.config\ctx\homes\project-valid\nested'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home:$custom`nreview:$reviewDir"
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
         $env:COPILOT_HOME | Should -Be $custom
@@ -406,20 +406,20 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
     It 'Test 21: home: rejects traversal outside HOME and preserves active context' {
         $proj = Join-Path $Script:TestTmp 'project-home-traversal'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home:..\outside`nreview:$reviewDir"
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
         try { $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx') } finally { $ErrorActionPreference = $prevEap }
         $result | Should -Be $false
         ($Error | Select-Object -First 1).ToString() | Should -Match 'unsafe home'
         Test-Path -LiteralPath (Join-Path $Script:TestTmp 'outside') | Should -BeFalse
-        $env:AI_CONTEXT | Should -BeNullOrEmpty
+        $env:AI_CTX_PROFILES | Should -BeNullOrEmpty
     }
 
     It 'Test 22: home: rejects absolute paths outside allowed roots' {
         $proj = Join-Path $Script:TestTmp 'project-home-absolute'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         $unrelated = Join-Path $Script:TestTmp 'unrelated'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home:$unrelated`nreview:$reviewDir"
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
@@ -432,7 +432,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
     It 'Test 23: home: rejects root and empty paths' {
         $proj = Join-Path $Script:TestTmp 'project-home-boundaries'
         New-Item -ItemType Directory -Path $proj -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         foreach ($value in @([System.IO.Path]::GetPathRoot($HOME), '')) {
             Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home:$value`nreview:$reviewDir"
             $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
@@ -446,7 +446,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $outside = Join-Path $Script:TestTmp 'outside-link'
         New-Item -ItemType Directory -Path $proj,$outside -Force | Out-Null
         New-Item -ItemType SymbolicLink -Path (Join-Path $proj 'link') -Target $outside -Force | Out-Null
-        $reviewDir = Join-Path (Join-Path $env:AI_CONFIG_ROOT 'profiles') 'review'
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home:$(Join-Path $proj 'link\child')`nreview:$reviewDir"
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
         try { $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx') } finally { $ErrorActionPreference = $prevEap }
@@ -460,7 +460,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         New-Item -ItemType Directory -Path $outside -Force | Out-Null
         New-Item -ItemType SymbolicLink -Path $victim -Target $outside -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $outside 'data.txt') -Value 'important'
-        $env:AI_CONTEXT = 'review'; $env:COPILOT_HOME = $victim; $Script:CtxAutoLoadHomeOverride = $victim
+        $env:AI_CTX_PROFILES = 'review'; $env:COPILOT_HOME = $victim; $Script:CtxAutoLoadHomeOverride = $victim
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
         try { Clear-CtxContext -All } finally { $ErrorActionPreference = $prevEap }
         Test-Path -LiteralPath (Join-Path $victim 'data.txt') | Should -BeTrue
@@ -468,9 +468,9 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
     }
 
     It 'Test 26: Clear-CtxContext -All propagates a valid-home deletion failure' {
-        $victim = Join-Path $env:CTX_HOMES_ROOT 'review'
+        $victim = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review'
         New-Item -ItemType Directory -Path $victim -Force | Out-Null
-        $env:AI_CONTEXT = 'review'; $env:COPILOT_HOME = $victim
+        $env:AI_CTX_PROFILES = 'review'; $env:COPILOT_HOME = $victim
         Mock Remove-Item { }
         Mock Remove-Item { throw 'simulated deletion failure' } -ParameterFilter { $LiteralPath -eq $victim }
 
@@ -487,7 +487,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $settingsFile = Join-Path $settingsDir 'settings.local.json'
         Set-Content -Path $settingsFile -Value '{}'
         $Script:CtxAutoLoadDir = $dir
-        Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
+        Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
         Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
         Mock Remove-Item { }
         Mock Remove-Item { throw 'simulated artifact deletion failure' } -ParameterFilter { $LiteralPath -eq $settingsFile }
@@ -502,13 +502,13 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         { Get-CtxValidatedHomePath -Path $env:HOME } | Should -Throw '*unsafe home*'
     }
 
-    It 'Test 29: home validator rejects CTX_HOMES_ROOT itself' {
-        { Get-CtxValidatedHomePath -Path $env:CTX_HOMES_ROOT } | Should -Throw '*unsafe home*'
+    It 'Test 29: home validator rejects AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT itself' {
+        { Get-CtxValidatedHomePath -Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT } | Should -Throw '*unsafe home*'
     }
 
     It 'workspace created by ctx is marked and removed by clear --all' {
         $proj = Join-Path $Script:TestTmp 'project-workspace'
-        $profile = Join-Path $env:AI_CONFIG_ROOT 'profiles\review'
+        $profile = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles\review'
         New-Item -ItemType Directory -Path $proj, $profile -Force | Out-Null
         Update-CtxWorkspaceFile -BaseDir $proj -Names @('review') -Dirs @($profile)
 
@@ -584,10 +584,10 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $outside = Join-Path $Script:TestTmp 'outside'
         New-Item -ItemType Directory -Path $outside -Force | Out-Null
         Set-Location $outside
-        $env:AI_CONTEXT = 'manual'
+        $env:AI_CTX_PROFILES = 'manual'
         $result = @(Test-CtxActivation)
         $result[-1] | Should -BeTrue
-        $env:AI_CONTEXT | Should -Be 'manual'
+        $env:AI_CTX_PROFILES | Should -Be 'manual'
     }
 
     It 'ctx check detects environment and link drift without repairing it' {
@@ -597,14 +597,14 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
         Set-Location $proj
-        $env:AI_CONTEXT = 'wrong'
+        $env:AI_CTX_PROFILES = 'wrong'
         $settings = Join-Path $env:COPILOT_HOME 'settings.json'
         Remove-Item -LiteralPath $settings -Force
         Set-Content -LiteralPath $settings -Value 'drift'
         $result = @(Test-CtxActivation)
         $result[-1] | Should -BeFalse
         Test-CtxIsLink -Path $settings | Should -BeFalse
-        $env:AI_CONTEXT | Should -Be 'wrong'
+        $env:AI_CTX_PROFILES | Should -Be 'wrong'
     }
 
     It 'direct ctx check returns a scalar Boolean status while preserving diagnostics' {
@@ -617,7 +617,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $result = ctx check
         $result.GetType().Name | Should -Be 'Boolean'
         $result | Should -BeTrue
-        $env:AI_CONTEXT = 'wrong'
+        $env:AI_CTX_PROFILES = 'wrong'
         $result = ctx check
         $result.GetType().Name | Should -Be 'Boolean'
         $result | Should -BeFalse
@@ -686,7 +686,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         (Test-CtxActivation) | Should -BeTrue
     }
 
-    It 'activation treats mixed-case HOME as a directive and excludes it from AI_CONTEXT' {
+    It 'activation treats mixed-case HOME as a directive and excludes it from AI_CTX_PROFILES' {
         $proj = Join-Path $env:HOME 'project-activation-home-case'
         $override = Join-Path $env:HOME 'custom-copilot-home'
         $reviewDir = New-CtxTestProfile -Name 'review'
@@ -694,8 +694,8 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "HoMe:$override`nreview:$reviewDir"
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Should -BeTrue
         $env:COPILOT_HOME | Should -Be $override
-        $env:AI_CONTEXT | Should -Be 'review'
-        $env:AI_CONTEXT | Should -Not -Match 'HoMe'
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $env:AI_CTX_PROFILES | Should -Not -Match 'HoMe'
     }
 
     It 'reactivation removes a dangling stale skill link' {

@@ -1,16 +1,15 @@
 # ctx — Portable Context Switcher for GitHub Copilot CLI
 
-`ctx` composes AI agent configuration directories (profiles + shared contexts)
+`ctx` composes AI agent configuration directories (profiles + profiles)
 stored in a directory tree such as:
 
 ```
 ~/work/ai-config/
-├── profiles/
-│   ├── review/
-│   ├── architecture/
-│   ├── incident/
-│   └── coding/
-└── shared/
+└── profiles/
+    ├── review/
+    ├── architecture/
+    ├── incident/
+    ├── coding/
     ├── dotnet/
     ├── azure/
     ├── terraform/
@@ -18,7 +17,7 @@ stored in a directory tree such as:
 ```
 
 into the `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` environment variable for the
-current shell session, and exposes the active selection as `AI_CONTEXT`
+current shell session, and exposes the active selection as `AI_CTX_PROFILES`
 (e.g. `review+dotnet+security`).
 
 Available for **bash**, **zsh**, and **PowerShell** (Windows PowerShell 5.1+
@@ -47,7 +46,30 @@ in general (e.g. the VS Code extension) or other AI coding agents.
   against that version. If you hit different behavior on another version,
   please open an issue with your `copilot --version` output.
 
-## Files
+
+## Breaking migration guide
+
+Issue #4 intentionally removes the legacy context and shared-directory model.
+Runtime migration is not performed; update your shell configuration and files
+manually before sourcing the new implementation.
+
+1. Move every reusable directory from `shared/` into `profiles/`. If a name
+   exists in both old directories, stop and resolve the conflict manually;
+   `ctx` never chooses a winner.
+2. Replace environment variables in shell startup and prompt integrations:
+
+   ```sh
+   export AI_CTX_PROFILES_CONFIG_ROOT="$HOME/work/ai-config"
+   export AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT="$HOME/.config/ctx/homes"
+   ```
+
+3. Replace `AI_CONTEXT` references with `AI_CTX_PROFILES`.
+4. Change invocations such as `ctx review security` so every argument is a
+   directory under `profiles/`; `.ctx` files may use `label:@profile` or a
+   direct path. Existing `home:` directives remain supported.
+
+The legacy variables and `shared/` directories are deliberately not read,
+aliased, or synchronized by the runtime.
 
 | File           | Purpose                                             |
 |----------------|------------------------------------------------------|
@@ -96,21 +118,21 @@ By default `ctx` looks for `profiles/` and `shared/` under `$HOME/work/ai-config
 (`$HOME\work\ai-config` on Windows). Override with:
 
 ```sh
-export AI_CONFIG_ROOT="/path/to/ai-config"       # bash/zsh
+export AI_CTX_PROFILES_CONFIG_ROOT="/path/to/ai-config"       # bash/zsh
 ```
 ```powershell
-$env:AI_CONFIG_ROOT = "C:\path\to\ai-config"      # PowerShell
+$env:AI_CTX_PROFILES_CONFIG_ROOT = "C:\path\to\ai-config"      # PowerShell
 ```
 
 ## Usage
 
 ```sh
 ctx review                     # activate the "review" profile
-ctx coding azure                # "coding" profile + "azure" shared context
-ctx review dotnet security      # profile + multiple shared contexts
-ctx current                   # show the active profile/shared/env vars
+ctx coding azure                # "coding" profile + "azure" profile
+ctx review dotnet security      # profile + multiple profiles
+ctx current                   # show the active profile/profiles/env vars
 ctx check                     # read-only audit against the nearest .ctx file
-ctx clear                     # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
+ctx clear                     # unset AI_CTX_PROFILES / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
 ctx clear --all                 # remove the current context home and generated artifacts
 ctx --help                      # usage help
 ```
@@ -123,17 +145,17 @@ Example output after `ctx review dotnet security`:
 Profile : review
 Shared  : dotnet, security
 
-AI_CONTEXT=review+dotnet+security
+AI_CTX_PROFILES=review+dotnet+security
 
 COPILOT_HOME=/home/user/.config/ctx/homes/review+dotnet+security
 
 COPILOT_CUSTOM_INSTRUCTIONS_DIRS=
 /home/user/work/ai-config/profiles/review
-/home/user/work/ai-config/shared/dotnet
-/home/user/work/ai-config/shared/security
+/home/user/work/ai-config/profiles/dotnet
+/home/user/work/ai-config/profiles/security
 ```
 
-Unknown profiles/shared contexts produce a clear error listing what is
+Unknown profiles/profiles produce a clear error listing what is
 available:
 
 ```
@@ -182,14 +204,14 @@ Example:
 
 ```
 review:/home/user/work/ai-config/profiles/review
-dotnet:/home/user/work/ai-config/shared/dotnet
+dotnet:/home/user/work/ai-config/profiles/dotnet
 security:./local-instructions
 ```
 
 - Relative paths resolve against the directory containing the `.ctx` file
   (not your current working directory).
 - Unlike `ctx <profile> [shared...]`, these names are **not** looked up
-  under `AI_CONFIG_ROOT/profiles|shared` — the path on each line is used
+  under `AI_CTX_PROFILES_CONFIG_ROOT/profiles|shared` — the path on each line is used
   directly, so you can point at any folder (including project-local
   instructions that live outside your `ai-config` repo).
 - Every path is validated to exist; an invalid `.ctx` file leaves the
@@ -201,7 +223,7 @@ security:./local-instructions
   [Choosing a custom COPILOT_HOME location](#choosing-a-custom-copilot_home-location).
 
 When your shell prompt renders after a `cd` / `Set-Location` into that
-directory (or any descendant of it), `AI_CONTEXT` (the names joined by `+`)
+directory (or any descendant of it), `AI_CTX_PROFILES` (the names joined by `+`)
 and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` (the paths joined by `,`) are set,
 overwriting any previous value. Leaving the directory tree (into a location
 with no `.ctx` file anywhere in its ancestry) automatically clears the
@@ -257,7 +279,7 @@ and exports `COPILOT_HOME` to point at it:
 #### Choosing a custom `COPILOT_HOME` location
 
 By default every context's synthetic `COPILOT_HOME` lives centrally under
-`~/.config/ctx/homes/<context-name>/` (or `$CTX_HOMES_ROOT` if set). If
+`~/.config/ctx/homes/<context-name>/` (or `$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT` if set). If
 you'd rather keep it colocated with a specific project — easier to spot,
 inspect, or `.gitignore` — add a `home:<path>` line to that project's
 `.ctx` file:
@@ -276,7 +298,7 @@ review:/home/user/work/ai-config/profiles/review
   **not** need to already exist — `ctx` creates it on demand, exactly like
   the centralized default.
 - For deletion safety, the resolved `home:` path must be a non-root
-  descendant of the user's home directory or `$CTX_HOMES_ROOT`. Paths that
+  descendant of the user's home directory or `$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT`. Paths that
   are empty, escape with `..`, point outside those roots, or contain an
   existing symlink/junction component are rejected before activation. This
   intentionally means a project tree outside those roots cannot be selected
@@ -335,7 +357,7 @@ generated `my-service.code-workspace` would contain:
   "folders": [
     { "path": ".", "name": "root: my-service" },
     { "path": "/home/user/work/ai-config/profiles/review", "name": "ctx: review" },
-    { "path": "/home/user/work/ai-config/shared/dotnet", "name": "ctx: dotnet" },
+    { "path": "/home/user/work/ai-config/profiles/dotnet", "name": "ctx: dotnet" },
     { "path": "./local-instructions", "name": "ctx: security" }
   ],
   "settings": {}
@@ -370,7 +392,7 @@ $env:CTX_AUTO_LOAD = "0"        # PowerShell
 ## Showing the active context in your prompt (Oh My Posh)
 
 If you use [Oh My Posh](https://ohmyposh.dev/), add a conditional `text`
-segment to your theme so the active `AI_CONTEXT` shows up in the prompt
+segment to your theme so the active `AI_CTX_PROFILES` shows up in the prompt
 (hidden automatically when unset):
 
 ```json
@@ -380,15 +402,15 @@ segment to your theme so the active `AI_CONTEXT` shows up in the prompt
   "powerline_symbol": "\ue0b0",
   "foreground": "#ffffff",
   "background": "#5f005f",
-  "template": "{{ if .Env.AI_CONTEXT }}{{ $parts := splitList \"+\" .Env.AI_CONTEXT }} \uf544 {{ first $parts }}{{ if gt (len $parts) 1 }} (+{{ sub (len $parts) 1 }}){{ end }} {{ end }}"
+  "template": "{{ if .Env.AI_CTX_PROFILES }}{{ $parts := splitList \"+\" .Env.AI_CTX_PROFILES }} \uf544 {{ first $parts }}{{ if gt (len $parts) 1 }} (+{{ sub (len $parts) 1 }}){{ end }} {{ end }}"
 }
 ```
 
 Place it after your other segments in the relevant `blocks[].segments` array.
-When `AI_CONTEXT` is set (e.g. `review+dotnet+security`), the prompt shows
+When `AI_CTX_PROFILES` is set (e.g. `review+dotnet+security`), the prompt shows
 only the first context name plus a `(+2)` suffix for the rest (e.g.
 `review (+2)`) — the full detail is available via `ctx current`. When
-`AI_CONTEXT` is unset, the segment disappears entirely.
+`AI_CTX_PROFILES` is unset, the segment disappears entirely.
 
 ## Notes
 
@@ -405,7 +427,7 @@ only the first context name plus a `(+2)` suffix for the rest (e.g.
   previously active context untouched if validation fails.
 - `COPILOT_HOME` is managed automatically by `ctx` whenever a context is
   active (see [Skill discovery](#skill-discovery)); it is exported/unset
-  alongside `AI_CONTEXT` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and shown
+  alongside `AI_CTX_PROFILES` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and shown
   in `ctx current` output.
 
 ## Testing

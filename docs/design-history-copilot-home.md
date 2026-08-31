@@ -51,7 +51,7 @@ symlink privilege issues beyond a documented fallback.
     <skill-name>/         -> symlink to the real skill dir (from .ctx entries)
 ```
 
-`<context-name>` = the same string `ctx` already computes for `AI_CONTEXT`
+`<context-name>` = the same string `ctx` already computes for `AI_CTX_PROFILES`
 (e.g. `review+test`), sanitized for filesystem use (replace `/` and other
 unsafe characters — `+` is already safe).
 
@@ -86,7 +86,7 @@ This deliberately avoids ever writing to `~/.copilot/settings.json`
      no longer correspond to a current entry — see 3.5)
   5. `export COPILOT_HOME="$home_dir"`
 - `ctx clear` — unsets `COPILOT_HOME` (in addition to existing
-  `AI_CONTEXT`/`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` unset). Per the
+  `AI_CTX_PROFILES`/`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` unset). Per the
   "already ephemeral" comment, the on-disk home dir is left in place as a
   reusable cache — no deletion.
 - `ctx clear --all` — additionally removes the current context's
@@ -402,7 +402,7 @@ owner.
   read by Copilot CLI (confirmed), can be deleted manually or via one
   `ctx clear --all` run under the old code path before upgrading — call
   this out in README/CHANGELOG.
-- No breaking change to `AI_CONTEXT` / `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+- No breaking change to `AI_CTX_PROFILES` / `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
   behavior — those keep working exactly as today (custom instructions
   loading was never broken, only skills).
 

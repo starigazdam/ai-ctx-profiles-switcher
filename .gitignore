@@ -7,7 +7,7 @@
 .vscode/
 
 # COPILOT_HOME per-context cache dirs ctx creates under ~/.config/ctx/homes/
-# (or $CTX_HOMES_ROOT) live outside any project repo by default, so nothing
-# needs to be ignored here for them. If you ever point CTX_HOMES_ROOT at a
+# (or $AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT) live outside any project repo by default, so nothing
+# needs to be ignored here for them. If you ever point AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT at a
 # path inside a repo, ignore it explicitly, e.g.:
 # .config/ctx/homes/

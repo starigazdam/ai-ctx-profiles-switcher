@@ -3,8 +3,8 @@
 # and general ctx.sh behavior, per the historical design in
 # docs/design-history-copilot-home.md section 5.2.
 #
-# Every test runs against an isolated $HOME / $AI_CONFIG_ROOT / COPILOT_HOME
-# root (via CTX_COPILOT_DIR / CTX_HOMES_ROOT overrides) inside a temp dir, so
+# Every test runs against an isolated $HOME / $AI_CTX_PROFILES_CONFIG_ROOT / COPILOT_HOME
+# root (via CTX_COPILOT_DIR / AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT overrides) inside a temp dir, so
 # nothing ever touches the real user's ~/.copilot or ~/.config/ctx.
 
 setup() {
@@ -12,15 +12,15 @@ setup() {
     export TEST_TMP
     TEST_TMP="$(mktemp -d)"
     export HOME="$TEST_TMP/home"
-    export AI_CONFIG_ROOT="$TEST_TMP/ai-config"
+    export AI_CTX_PROFILES_CONFIG_ROOT="$TEST_TMP/ai-config"
     export CTX_COPILOT_DIR="$TEST_TMP/copilot"
-    export CTX_HOMES_ROOT="$TEST_TMP/home/.config/ctx/homes"
-    mkdir -p "$HOME" "$AI_CONFIG_ROOT/profiles" "$AI_CONFIG_ROOT/shared" "$CTX_COPILOT_DIR"
+    export AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT="$TEST_TMP/home/.config/ctx/homes"
+    mkdir -p "$HOME" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles" "$CTX_COPILOT_DIR"
 
     # Repo root, for fixtures under examples/.
     export REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
-    unset AI_CONTEXT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME CTX_AUTO_LOAD
+    unset AI_CTX_PROFILES AI_CONTEXT AI_CONFIG_ROOT CTX_HOMES_ROOT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME CTX_AUTO_LOAD
     unset _ctx_auto_load_dir
 
     # shellcheck source=/dev/null
@@ -31,14 +31,69 @@ teardown() {
     rm -rf "$TEST_TMP"
 }
 
+@test "breaking contract activates multiple unified profiles and ignores legacy root" {
+    _make_profile review review-skill
+    _make_profile security security-skill
+    export AI_CONFIG_ROOT="$TEST_TMP/legacy"
+
+    ctx review security
+
+    [ "$AI_CTX_PROFILES" = "review+security" ]
+    [ -z "${AI_CONTEXT:-}" ]
+    [[ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" == *"$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"* ]]
+    [[ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" == *"$AI_CTX_PROFILES_CONFIG_ROOT/profiles/security"* ]]
+}
+
+@test "manual duplicate profiles are rejected before changing state" {
+    _make_profile review
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+
+    run ctx review Review
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate profile"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+}
+
+@test ".ctx profile references, direct paths, and duplicate targets are validated" {
+    _make_profile review review-skill
+    _make_profile security security-skill
+    local direct="$TEST_TMP/direct"
+    mkdir -p "$direct"
+    local proj="$TEST_TMP/project"
+    mkdir -p "$proj"
+    printf 'review:@profile\nsecurity:@profile\nlocal:%s\n' "$direct" > "$proj/.ctx"
+
+    _ctx_load_ctx_file "$proj/.ctx"
+
+    [ "$AI_CTX_PROFILES" = "review+security+local" ]
+    [[ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" == *"$direct"* ]]
+}
+
+@test ".ctx duplicate labels and canonical targets fail atomically" {
+    _make_profile review
+    local proj="$TEST_TMP/project"
+    mkdir -p "$proj"
+    printf 'review:@profile\nReview:@profile\n' > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+
+    run _ctx_load_ctx_file "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate .ctx entry label"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+}
+
 _make_profile() {
     # _make_profile <name> [skill-name]
     local name="$1" skill="${2:-}"
-    mkdir -p "$AI_CONFIG_ROOT/profiles/$name/.github/instructions"
-    echo "# $name instructions" > "$AI_CONFIG_ROOT/profiles/$name/.github/instructions/$name.instructions.md"
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/$name/.github/instructions"
+    echo "# $name instructions" > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/$name/.github/instructions/$name.instructions.md"
     if [ -n "$skill" ]; then
-        mkdir -p "$AI_CONFIG_ROOT/profiles/$name/.github/skills/$skill"
-        cat > "$AI_CONFIG_ROOT/profiles/$name/.github/skills/$skill/SKILL.md" <<EOF
+        mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/$name/.github/skills/$skill"
+        cat > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/$name/.github/skills/$skill/SKILL.md" <<EOF
 ---
 name: $skill
 description: Test skill $skill
@@ -58,28 +113,28 @@ EOF
     [ -L "$COPILOT_HOME/skills/review-skill" ]
     local target
     target="$(readlink -f "$COPILOT_HOME/skills/review-skill")"
-    [ "$target" = "$(readlink -f "$AI_CONFIG_ROOT/profiles/review/.github/skills/review-skill")" ]
+    [ "$target" = "$(readlink -f "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills/review-skill")" ]
 }
 
-@test "zsh supports manual activation with shared contexts" {
+@test "zsh supports manual activation with profiles" {
     if ! command -v zsh >/dev/null 2>&1; then
         skip "zsh is not installed"
     fi
 
     _make_profile review "review-skill"
-    mkdir -p "$AI_CONFIG_ROOT/shared/azure/.github/skills/azure-skill"
-    printf '%s\n' '# azure skill' > "$AI_CONFIG_ROOT/shared/azure/.github/skills/azure-skill/SKILL.md"
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/azure/.github/skills/azure-skill"
+    printf '%s\n' '# azure skill' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/azure/.github/skills/azure-skill/SKILL.md"
 
     local zsh_path
     zsh_path="$(command -v zsh)"
     run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
         source "$1"
         ctx review azure >/dev/null || exit
-        [ "$AI_CONTEXT" = review+azure ] || exit
-        [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$2/profiles/review,$2/shared/azure" ] || exit
+        [ "$AI_CTX_PROFILES" = review+azure ] || exit
+        [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$2/profiles/review,$2/profiles/azure" ] || exit
         [ -L "$COPILOT_HOME/skills/review-skill" ] || exit
         [ -L "$COPILOT_HOME/skills/azure-skill" ] || exit
-    ' -- "$CTX_SRC" "$AI_CONFIG_ROOT"
+    ' -- "$CTX_SRC" "$AI_CTX_PROFILES_CONFIG_ROOT"
 
     [ "$status" -eq 0 ]
 }
@@ -122,7 +177,7 @@ EOF
     done
 }
 
-# --- Test 3: multi-profile + shared context, no bleed -----------------------
+# --- Test 3: multi-profile + profile, no bleed -----------------------
 
 @test "multi-profile context has both skills, single-profile context is isolated" {
     _make_profile "review" "review-skill"
@@ -147,8 +202,8 @@ EOF
     local proj="$TEST_TMP/project"
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
-review:$AI_CONFIG_ROOT/profiles/review
-test:$AI_CONFIG_ROOT/profiles/test
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+test:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/test
 EOF
 
     _ctx_load_ctx_file "$proj/.ctx"
@@ -191,7 +246,7 @@ EOF
     ctx review
     [ -L "$COPILOT_HOME/skills/review-skill" ]
 
-    rm -rf "$AI_CONFIG_ROOT/profiles/review/.github/skills/review-skill"
+    rm -rf "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills/review-skill"
     ctx review
 
     [ ! -e "$COPILOT_HOME/skills/review-skill" ]
@@ -255,7 +310,7 @@ EOF
     local proj="$TEST_TMP/project9"
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
-review:$AI_CONFIG_ROOT/profiles/review
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
 EOF
     _ctx_load_ctx_file "$proj/.ctx"
 
@@ -265,7 +320,7 @@ EOF
 @test "manual ctx activation does not create settings.local.json" {
     _make_profile "review" "review-skill"
     ctx review
-    [ ! -d "$AI_CONFIG_ROOT/profiles/review/.github/copilot" ]
+    [ ! -d "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/copilot" ]
 }
 
 # --- Test 10: fallback behavior on symlink failure --------------------------
@@ -383,7 +438,7 @@ EOF
     local proj="$HOME/project-home-valid"
     local custom="$HOME/.config/ctx/homes/project-valid/nested"
     mkdir -p "$proj"
-    printf 'home:%s\nreview:%s\n' "$custom" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'home:%s\nreview:%s\n' "$custom" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
     _ctx_load_ctx_file "$proj/.ctx"
     [ "$COPILOT_HOME" = "$custom" ]
@@ -394,12 +449,12 @@ EOF
     _make_profile "review"
     local proj="$TEST_TMP/project-home-traversal"
     mkdir -p "$proj"
-    printf 'home:../outside\nreview:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'home:../outside\nreview:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
     run _ctx_load_ctx_file "$proj/.ctx"
     [ "$status" -ne 0 ]
     [[ "$output" == *"unsafe home"* ]]
-    [ -z "${AI_CONTEXT:-}" ]
+    [ -z "${AI_CTX_PROFILES:-}" ]
     [ ! -d "$TEST_TMP/outside" ]
 }
 
@@ -407,7 +462,7 @@ EOF
     _make_profile "review"
     local proj="$TEST_TMP/project-home-absolute"
     mkdir -p "$proj"
-    printf 'home:%s\nreview:%s\n' "$TEST_TMP/unrelated" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'home:%s\nreview:%s\n' "$TEST_TMP/unrelated" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
     run _ctx_load_ctx_file "$proj/.ctx"
     [ "$status" -ne 0 ]
@@ -420,7 +475,7 @@ EOF
     local proj="$TEST_TMP/project-home-boundaries"
     mkdir -p "$proj"
     for value in / ''; do
-        printf 'home:%s\nreview:%s\n' "$value" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+        printf 'home:%s\nreview:%s\n' "$value" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
         run _ctx_load_ctx_file "$proj/.ctx"
         [ "$status" -ne 0 ]
         [[ "$output" == *"unsafe home"* || "$output" == *"invalid .ctx line"* ]]
@@ -433,7 +488,7 @@ EOF
     local outside="$TEST_TMP/outside-link"
     mkdir -p "$proj" "$outside"
     ln -s "$outside" "$proj/link"
-    printf 'home:%s\nreview:%s\n' "$proj/link/child" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'home:%s\nreview:%s\n' "$proj/link/child" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
     run _ctx_load_ctx_file "$proj/.ctx"
     [ "$status" -ne 0 ]
@@ -448,7 +503,7 @@ EOF
     mkdir -p "$outside"
     ln -s "$outside" "$victim"
     printf 'important\n' > "$outside/data.txt"
-    export AI_CONTEXT=review
+    export AI_CTX_PROFILES=review
     export COPILOT_HOME="$victim"
     _ctx_auto_load_home_override="$victim"
 
@@ -458,10 +513,10 @@ EOF
     [[ "$output" == *"unsafe home"* ]]
 }
 
-@test "home validator rejects HOME and CTX_HOMES_ROOT themselves" {
+@test "home validator rejects HOME and AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT themselves" {
     run _ctx_validate_home_path "$HOME"
     [ "$status" -ne 0 ]
-    run _ctx_validate_home_path "$CTX_HOMES_ROOT"
+    run _ctx_validate_home_path "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT"
     [ "$status" -ne 0 ]
 }
 
@@ -472,7 +527,7 @@ EOF
     mkdir -p "$outside"
     ln -s "$outside" "$victim"
     printf 'important\n' > "$outside/data.txt"
-    export AI_CONTEXT=review
+    export AI_CTX_PROFILES=review
     export COPILOT_HOME="$victim"
     _ctx_auto_load_home_override="$victim"
 
@@ -484,9 +539,9 @@ EOF
 
 @test "ctx clear --all propagates a valid-home deletion failure" {
     _make_profile "review"
-    local victim="$CTX_HOMES_ROOT/review"
+    local victim="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
     mkdir -p "$victim"
-    export AI_CONTEXT=review
+    export AI_CTX_PROFILES=review
     export COPILOT_HOME="$victim"
 
     rm() { return 42; }
@@ -506,7 +561,7 @@ EOF
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
 home: .copilot-ctx
-review:$AI_CONFIG_ROOT/profiles/review
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
 EOF
 
     _ctx_load_ctx_file "$proj/.ctx"
@@ -516,7 +571,7 @@ EOF
     [ -d "$COPILOT_HOME" ]
     [ -L "$COPILOT_HOME/skills/review-skill" ]
     # Centralized default root must NOT have been used.
-    [ ! -d "$CTX_HOMES_ROOT/review" ]
+    [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review" ]
 }
 
 @test ".ctx without a home: directive still uses the centralized default" {
@@ -525,12 +580,12 @@ EOF
     local proj="$TEST_TMP/project-nohome"
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
-review:$AI_CONFIG_ROOT/profiles/review
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
 EOF
 
     _ctx_load_ctx_file "$proj/.ctx"
 
-    [ "$COPILOT_HOME" = "$CTX_HOMES_ROOT/review" ]
+    [ "$COPILOT_HOME" = "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review" ]
 }
 
 @test "home: directive with absolute path is used as-is" {
@@ -541,7 +596,7 @@ EOF
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
 home: $custom_home
-review:$AI_CONFIG_ROOT/profiles/review
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
 EOF
 
     _ctx_load_ctx_file "$proj/.ctx"
@@ -557,7 +612,7 @@ EOF
     mkdir -p "$proj"
     cat > "$proj/.ctx" <<EOF
 home: .copilot-ctx
-review:$AI_CONFIG_ROOT/profiles/review
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
 EOF
 
     _ctx_load_ctx_file "$proj/.ctx"
@@ -567,7 +622,7 @@ EOF
     _ctx_clear --all
 
     [ ! -d "$custom_home" ]
-    [ ! -d "$CTX_HOMES_ROOT/review" ]
+    [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review" ]
 }
 
 @test "duplicate home: directive in .ctx is rejected" {
@@ -576,7 +631,7 @@ EOF
     cat > "$proj/.ctx" <<EOF
 home: .copilot-ctx-a
 home: .copilot-ctx-b
-review:$AI_CONFIG_ROOT/profiles/review
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
 EOF
 
     run _ctx_load_ctx_file "$proj/.ctx"
@@ -586,13 +641,13 @@ EOF
 
 @test "generated workspace is marked and removed by clear --all" {
     local proj="$HOME/project-workspace"
-    local profile="$AI_CONFIG_ROOT/profiles/review"
+    local profile="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
     mkdir -p "$proj" "$profile"
     _ctx_update_workspace_file "$proj" review "$profile"
 
     local workspace="$proj/project-workspace.code-workspace"
     grep -q '"generatedBy": "ctx"' "$workspace"
-    unset AI_CONTEXT COPILOT_HOME
+    unset AI_CTX_PROFILES COPILOT_HOME
     _ctx_auto_load_dir="$proj"
     _ctx_clear --all
     [ ! -e "$workspace" ]
@@ -603,7 +658,7 @@ EOF
     local workspace="$proj/project-workspace-existing.code-workspace"
     mkdir -p "$proj"
     printf '{"folders":[{"path":"."}],"settings":{}}\n' > "$workspace"
-    unset AI_CONTEXT COPILOT_HOME
+    unset AI_CTX_PROFILES COPILOT_HOME
     _ctx_auto_load_dir="$proj"
     _ctx_clear --all
     [ -f "$workspace" ]
@@ -617,7 +672,7 @@ EOF
     mkdir -p "$proj"
     printf '{"generatedBy":"ctx"}\n' > "$target"
     ln -s "$target" "$workspace"
-    unset AI_CONTEXT COPILOT_HOME
+    unset AI_CTX_PROFILES COPILOT_HOME
     _ctx_auto_load_dir="$proj"
     _ctx_clear --all
     [ -L "$workspace" ]
@@ -628,7 +683,7 @@ EOF
     local workspace="$proj/project-workspace-case.code-workspace"
     mkdir -p "$proj"
     printf '{"generatedBy":"CTX"}\n' > "$workspace"
-    unset AI_CONTEXT COPILOT_HOME
+    unset AI_CTX_PROFILES COPILOT_HOME
     _ctx_auto_load_dir="$proj"
     _ctx_clear --all
     [ -f "$workspace" ]
@@ -653,7 +708,7 @@ EOF
             123) printf '{"generatedBy":123}\n' > "$workspace" ;;
             null) printf '{"generatedBy":null}\n' > "$workspace" ;;
         esac
-        unset AI_CONTEXT COPILOT_HOME
+        unset AI_CTX_PROFILES COPILOT_HOME
         _ctx_auto_load_dir="$proj"
         run _ctx_clear --all
         [ "$status" -eq 0 ]
@@ -664,7 +719,7 @@ EOF
 
 @test "ctx check reports a matching .ctx activation without changing state" {
     local proj="$HOME/project-check"
-    local profile="$AI_CONFIG_ROOT/profiles/review"
+    local profile="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
     _make_profile review review-skill
     mkdir -p "$proj"
     printf 'review:%s\n' "$profile" > "$proj/.ctx"
@@ -674,7 +729,7 @@ EOF
     cd "$proj"
     run ctx check
     [ "$status" -eq 0 ]
-    [[ "$output" == *"CHECK PASS AI_CONTEXT"* ]]
+    [[ "$output" == *"CHECK PASS AI_CTX_PROFILES"* ]]
     [[ "$output" == *"ctx check: PASS"* ]]
     [ "$home" = "$COPILOT_HOME" ]
     [ "$(stat -c '%Y %s' "$proj/.ctx")" = "$before_ctx" ]
@@ -682,37 +737,37 @@ EOF
 
 @test "ctx check detects environment and link drift without repairing it" {
     local proj="$HOME/project-check-drift"
-    local profile="$AI_CONFIG_ROOT/profiles/review"
+    local profile="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
     _make_profile review review-skill
     mkdir -p "$proj"
     printf 'review:%s\n' "$profile" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     local home="$COPILOT_HOME"
     cd "$proj"
-    export AI_CONTEXT=wrong
+    export AI_CTX_PROFILES=wrong
     rm -f "$home/settings.json"
     printf 'drift' > "$home/settings.json"
     run ctx check
     [ "$status" -ne 0 ]
-    [[ "$output" == *"CHECK FAIL AI_CONTEXT"* ]]
+    [[ "$output" == *"CHECK FAIL AI_CTX_PROFILES"* ]]
     [[ "$output" == *"CHECK FAIL link:settings.json"* ]]
     [ -f "$home/settings.json" ]
     [ ! -L "$home/settings.json" ]
 }
 
 @test "ctx check succeeds with no nearest .ctx and does not clear the shell" {
-    export AI_CONTEXT=manual
+    export AI_CTX_PROFILES=manual
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=manual-dir
     run ctx check
     [ "$status" -eq 0 ]
     [[ "$output" == *"no .ctx file found"* ]]
-    [ "$AI_CONTEXT" = manual ]
+    [ "$AI_CTX_PROFILES" = manual ]
     [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = manual-dir ]
 }
 
 @test "ctx check detects workspace folder drift" {
     local proj="$HOME/project-check-workspace"
-    local profile="$AI_CONFIG_ROOT/profiles/review"
+    local profile="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
     _make_profile review
     mkdir -p "$proj"
     printf 'review:%s\n' "$profile" > "$proj/.ctx"
@@ -728,7 +783,7 @@ EOF
     local proj="$HOME/project-check-copilot"
     _make_profile review review-skill
     mkdir -p "$proj" "$TEST_TMP/bin"
-    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     cd "$proj"
     cat > "$TEST_TMP/bin/copilot" <<'EOF'
@@ -749,12 +804,12 @@ EOF
     local proj="$HOME/project-check-direct"
     _make_profile review review-skill
     mkdir -p "$proj"
-    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     cd "$proj"
     ctx check >/dev/null
     [ "$?" -eq 0 ]
-    export AI_CONTEXT=wrong
+    export AI_CTX_PROFILES=wrong
     if ctx check >/dev/null; then false; else [ "$?" -eq 1 ]; fi
 }
 
@@ -762,7 +817,7 @@ EOF
     local proj="$HOME/project-check-hardlink"
     _make_profile review
     mkdir -p "$proj"
-    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     rm -f "$COPILOT_HOME/settings.json"
     : > "$CTX_COPILOT_DIR/settings.json"
@@ -777,7 +832,7 @@ EOF
     local proj="$HOME/project-check-copilot-malformed"
     _make_profile review review-skill
     mkdir -p "$proj" "$TEST_TMP/bin"
-    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     rm -f "$proj/project-check-copilot-malformed.code-workspace"
     cd "$proj"
@@ -795,7 +850,7 @@ EOF
     local proj="$HOME/project-check-copilot-python"
     _make_profile review review-skill
     mkdir -p "$proj" "$TEST_TMP/bin"
-    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     rm -f "$proj/project-check-copilot-python.code-workspace"
     cd "$proj"
@@ -817,9 +872,9 @@ EOF
 @test "ctx check reports optional copilot skills in deterministic order" {
     local proj="$HOME/project-check-copilot-order"
     _make_profile review zeta-skill
-    mkdir -p "$AI_CONFIG_ROOT/profiles/review/.github/skills/alpha-skill" "$proj" "$TEST_TMP/bin"
-    printf '%s\n' '---' 'name: alpha-skill' 'description: alpha' '---' > "$AI_CONFIG_ROOT/profiles/review/.github/skills/alpha-skill/SKILL.md"
-    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills/alpha-skill" "$proj" "$TEST_TMP/bin"
+    printf '%s\n' '---' 'name: alpha-skill' 'description: alpha' '---' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills/alpha-skill/SKILL.md"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     rm -f "$proj/project-check-copilot-order.code-workspace"
     cat > "$TEST_TMP/bin/copilot" <<'EOF'
@@ -841,7 +896,7 @@ EOF
     local proj="$HOME/project-check-workspace-no-python"
     _make_profile review
     mkdir -p "$proj"
-    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     printf '{"generatedBy":"ctx","folders":[]}' > "$proj/project-check-workspace-no-python.code-workspace"
     cd "$proj"
@@ -860,7 +915,7 @@ EOF
     local override="$HOME/custom-copilot-home"
     _make_profile review
     mkdir -p "$proj" "$override"
-    printf 'HOME:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'HOME:%s\nreview:%s\n' "$override" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     cd "$proj"
     run ctx check
@@ -868,18 +923,18 @@ EOF
     [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
 }
 
-@test "activation treats mixed-case HOME as a directive and excludes it from AI_CONTEXT" {
+@test "activation treats mixed-case HOME as a directive and excludes it from AI_CTX_PROFILES" {
     local proj="$HOME/project-activation-home-case"
     local override="$HOME/custom-copilot-home"
     _make_profile review
     mkdir -p "$proj"
-    printf 'HoMe:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'HoMe:%s\nreview:%s\n' "$override" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
     _ctx_load_ctx_file "$proj/.ctx"
 
     [ "$COPILOT_HOME" = "$override" ]
-    [ "$AI_CONTEXT" = "review" ]
-    [[ "$AI_CONTEXT" != *"HoMe"* ]]
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [[ "$AI_CTX_PROFILES" != *"HoMe"* ]]
 }
 
 @test "zsh supports mixed-case HOME in .ctx activation and ctx check" {
@@ -891,7 +946,7 @@ EOF
     local override="$HOME/custom-zsh-copilot-home"
     _make_profile review
     mkdir -p "$proj" "$override"
-    printf 'HoMe:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'HoMe:%s\nreview:%s\n' "$override" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
     local zsh_path
     zsh_path="$(command -v zsh)"
@@ -900,7 +955,7 @@ EOF
         _ctx_load_ctx_file "$2" >/dev/null || exit
         rm -f "$4/project-zsh-home-case.code-workspace"
         [ "$COPILOT_HOME" = "$3" ] || exit
-        [ "$AI_CONTEXT" = review ] || exit
+        [ "$AI_CTX_PROFILES" = review ] || exit
         cd "$4" || exit
         ctx check
     ' -- "$CTX_SRC" "$proj/.ctx" "$override" "$proj"
@@ -914,7 +969,7 @@ EOF
     local proj="$HOME/project-dangling-skill"
     _make_profile review
     mkdir -p "$proj"
-    printf 'review:%s\n' "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
     _ctx_load_ctx_file "$proj/.ctx" >/dev/null
     ln -s "$TEST_TMP/missing-skill" "$COPILOT_HOME/skills/stale-skill"
     [ -L "$COPILOT_HOME/skills/stale-skill" ]

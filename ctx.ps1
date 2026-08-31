@@ -27,7 +27,7 @@
 
     DIRECTORY LAYOUT EXPECTED
     -------------------------
-        $env:AI_CONFIG_ROOT (default: $HOME\work\ai-config)
+        $env:AI_CTX_PROFILES_CONFIG_ROOT (default: $HOME\work\ai-config)
         |-- profiles\
         |   |-- review\
         |   |-- architecture\
@@ -45,7 +45,7 @@
         ctx coding azure               # "coding" profile + "azure" shared context
         ctx review dotnet security     # profile + multiple shared contexts
         ctx current                    # show active profile/shared/env vars
-        ctx clear                      # unset AI_CONTEXT / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
+        ctx clear                      # unset AI_CTX_PROFILES / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
         ctx clear --all                # remove the current context home and owned workspace artifacts
         ctx --help                     # usage help
 
@@ -64,12 +64,12 @@
 
     Relative paths are resolved against the directory containing the .ctx
     file (not the current working directory). Unlike `ctx <profile>
-    [shared]`, these names are NOT looked up under AI_CONFIG_ROOT\profiles|
+    [shared]`, these names are NOT looked up under AI_CTX_PROFILES_CONFIG_ROOT\profiles|
     shared - the path on each line is used directly. Every path is validated
     to exist.
 
     When your prompt renders after a `cd`/`Set-Location` into that directory
-    (or a descendant of it), AI_CONTEXT and COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    (or a descendant of it), AI_CTX_PROFILES and COPILOT_CUSTOM_INSTRUCTIONS_DIRS
     are set (overwriting any previous value) from the file's contents.
     Leaving the directory tree (into a location with no .ctx file)
     automatically clears the context.
@@ -107,8 +107,8 @@
 # --- Core implementation -------------------------------------------------
 
 function Get-CtxRoot {
-    if ($env:AI_CONFIG_ROOT) {
-        return $env:AI_CONFIG_ROOT
+    if ($env:AI_CTX_PROFILES_CONFIG_ROOT) {
+        return $env:AI_CTX_PROFILES_CONFIG_ROOT
     }
     return (Join-Path $HOME 'work\ai-config')
 }
@@ -133,7 +133,7 @@ Examples:
   ctx review dotnet security
 
 Environment:
-  AI_CONFIG_ROOT      Root directory containing profiles\ and shared\
+  AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles\ and shared\
                        (default: $HOME\work\ai-config)
   CTX_AUTO_LOAD        Set to 0 to disable automatic .ctx loading on cd
 '@ | Write-Host
@@ -152,7 +152,7 @@ function Write-CtxStatus {
     Write-Host "Profile : $(if ($ProfileName) { $ProfileName } else { '<none>' })"
     Write-Host "Shared  : $(if ($SharedCsv) { $SharedCsv } else { '<none>' })"
     Write-Host ""
-    Write-Host "AI_CONTEXT=$(if ($env:AI_CONTEXT) { $env:AI_CONTEXT } else { '<unset>' })"
+    Write-Host "AI_CTX_PROFILES=$(if ($env:AI_CTX_PROFILES) { $env:AI_CTX_PROFILES } else { '<unset>' })"
     Write-Host "COPILOT_HOME=$(if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { '<unset>' })"
     Write-Host ""
     Write-Host "COPILOT_CUSTOM_INSTRUCTIONS_DIRS="
@@ -164,13 +164,13 @@ function Write-CtxStatus {
 }
 
 function Show-CtxCurrent {
-    if (-not $env:AI_CONTEXT) {
+    if (-not $env:AI_CTX_PROFILES) {
         Write-Host "No active AI context."
         Write-Host 'Run "ctx <profile> [shared...]" to activate one.'
         return
     }
 
-    $parts = $env:AI_CONTEXT -split '\+'
+    $parts = $env:AI_CTX_PROFILES -split '\+'
     $profileName = $parts[0]
     $sharedCsv = ($parts | Select-Object -Skip 1) -join ', '
 
@@ -180,10 +180,10 @@ function Show-CtxCurrent {
 function Clear-CtxContext {
     param([switch]$All)
 
-    $prevContext = $env:AI_CONTEXT
+    $prevContext = $env:AI_CTX_PROFILES
     $prevHome = $env:COPILOT_HOME
     $cleanupFailed = $false
-    Remove-Item Env:\AI_CONTEXT -ErrorAction SilentlyContinue
+    Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
 
@@ -317,51 +317,32 @@ function ctx {
     }
 
     $profileName = $Contexts[0]
-    $sharedNames = @()
-    if ($Contexts.Count -gt 1) {
-        $sharedNames = $Contexts[1..($Contexts.Count - 1)]
+    $profileNames = @()
+    $seenNames = @{}
+    $dirsList = @()
+    foreach ($name in $Contexts) {
+        $key = $name.ToLowerInvariant()
+        if ($seenNames.ContainsKey($key)) { Write-Error "ctx: error: duplicate profile `"$name`""; return }
+        $seenNames[$key] = $name
+        $profileDir = Join-Path (Join-Path $root 'profiles') $name
+        if (-not (Test-Path -LiteralPath $profileDir -PathType Container)) {
+            Write-Error "ctx: error: unknown profile `"$name`" (looked in $root\profiles)"
+            $availableRoot = Join-Path $root 'profiles'
+            if (Test-Path -LiteralPath $availableRoot -PathType Container) { Get-ChildItem -LiteralPath $availableRoot -Directory | ForEach-Object { Write-Host "  - $($_.Name)" } }
+            return
+        }
+        $profileNames += $name
+        $dirsList += $profileDir
     }
 
     $profileDir = Join-Path (Join-Path $root 'profiles') $profileName
-    if (-not (Test-Path -LiteralPath $profileDir -PathType Container)) {
-        Write-Error "ctx: error: unknown profile `"$profileName`" (looked in $root\profiles)"
-        $availableRoot = Join-Path $root 'profiles'
-        if (Test-Path -LiteralPath $availableRoot -PathType Container) {
-            Write-Host "ctx: available profiles:"
-            Get-ChildItem -LiteralPath $availableRoot -Directory | ForEach-Object { Write-Host "  - $($_.Name)" }
-        }
-        return
-    }
-
-    $dirsList = @($profileDir)
-    $sharedList = @()
-
-    foreach ($sharedName in $sharedNames) {
-        $sharedDir = Join-Path (Join-Path $root 'shared') $sharedName
-        if (-not (Test-Path -LiteralPath $sharedDir -PathType Container)) {
-            Write-Error "ctx: error: unknown shared context `"$sharedName`" (looked in $root\shared)"
-            $availableShared = Join-Path $root 'shared'
-            if (Test-Path -LiteralPath $availableShared -PathType Container) {
-                Write-Host "ctx: available shared contexts:"
-                Get-ChildItem -LiteralPath $availableShared -Directory | ForEach-Object { Write-Host "  - $($_.Name)" }
-            }
-            return
-        }
-        $dirsList += $sharedDir
-        $sharedList += $sharedName
-    }
-
     $dirsCsv = $dirsList -join ','
-    $sharedCsv = $sharedList -join ', '
+    $sharedCsv = ""
 
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
-    if ($sharedList.Count -gt 0) {
-        $env:AI_CONTEXT = "$profileName+$($sharedList -join '+')"
-    } else {
-        $env:AI_CONTEXT = $profileName
-    }
+    $env:AI_CTX_PROFILES = $profileNames -join '+'
 
-    Set-CtxCopilotHome -ContextName $env:AI_CONTEXT -ResolvedDirs $dirsList
+    Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirsList
 
     Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv -DirsCsv $dirsCsv
 }
@@ -376,8 +357,8 @@ $Script:CtxLastPwd = $null
 $Script:CtxAutoLoadHomeOverride = $null
 
 function Get-CtxCopilotHomeRoot {
-    if ($env:CTX_HOMES_ROOT) {
-        return $env:CTX_HOMES_ROOT
+    if ($env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT) {
+        return $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT
     }
     return (Join-Path $HOME '.config\ctx\homes')
 }
@@ -886,7 +867,7 @@ function Find-CtxFile {
 function Import-CtxFile {
     # Parses a .ctx file where each non-empty, non-comment line is
     # "<context-name>:<path-to-folder>". Relative paths are resolved
-    # against the directory containing the .ctx file. Sets AI_CONTEXT and
+    # against the directory containing the .ctx file. Sets AI_CTX_PROFILES and
     # COPILOT_CUSTOM_INSTRUCTIONS_DIRS directly from the parsed entries.
     #
     # An optional line "home:<path>" (issue #7) is a reserved directive,
@@ -900,6 +881,8 @@ function Import-CtxFile {
     $dirOfFile = Split-Path -Parent $CtxFile
     $names = @()
     $dirs = @()
+    $seenLabels = @{}
+    $seenTargets = @{}
     $homeOverride = $null
 
     foreach ($rawLine in Get-Content -LiteralPath $CtxFile) {
@@ -921,7 +904,17 @@ function Import-CtxFile {
             return $false
         }
 
-        $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
+        $labelKey = $name.ToLowerInvariant()
+        if ($name -ine 'home') {
+            if ($seenLabels.ContainsKey($labelKey)) { Write-Error "ctx: error: duplicate .ctx entry label `"$name`"; first declared as `"$($seenLabels[$labelKey])`""; return $false }
+            $seenLabels[$labelKey] = $name
+        }
+        if ($path -ceq '@profile') {
+            $resolvedPath = Join-Path (Join-Path (Get-CtxRoot) 'profiles') $name
+            if (-not (Test-Path -LiteralPath $resolvedPath -PathType Container)) { Write-Error "ctx: error: unknown profile `"$name`" (looked in $(Join-Path (Get-CtxRoot) 'profiles'))"; return $false }
+        } else {
+            $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
+        }
 
         if ($name -ieq 'home') {
             if ($homeOverride) {
@@ -937,6 +930,9 @@ function Import-CtxFile {
             return $false
         }
 
+        $canonical = [System.IO.Path]::GetFullPath($resolvedPath)
+        if ($seenTargets.ContainsKey($canonical)) { Write-Error "ctx: error: .ctx entries `"$($seenTargets[$canonical])`" and `"$name`" resolve to the same directory"; return $false }
+        $seenTargets[$canonical] = $name
         $names += $name
         $dirs += $resolvedPath
     }
@@ -956,9 +952,9 @@ function Import-CtxFile {
 
     $dirsCsv = $dirs -join ','
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
-    $env:AI_CONTEXT = $names -join '+'
+    $env:AI_CTX_PROFILES = $names -join '+'
 
-    Set-CtxCopilotHome -ContextName $env:AI_CONTEXT -ResolvedDirs $dirs -HomeOverride $homeOverride
+    Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirs -HomeOverride $homeOverride
     $Script:CtxAutoLoadHomeOverride = $homeOverride
 
     $sharedCsv = ($names | Select-Object -Skip 1) -join ', '
@@ -990,7 +986,7 @@ function Test-CtxActivation {
     }
     if ($names.Count -eq 0) { Write-Host 'CHECK FAIL parser: .ctx has no entries'; return $false }
     $expectedContext = $names -join '+'; $expectedDirs = $dirs -join ','
-    if ($env:AI_CONTEXT -ceq $expectedContext) { Write-Host 'CHECK PASS AI_CONTEXT' } else { Write-Host "CHECK FAIL AI_CONTEXT: expected $expectedContext, got $(if($env:AI_CONTEXT){$env:AI_CONTEXT}else{'<unset>'})"; $failures++ }
+    if ($env:AI_CTX_PROFILES -ceq $expectedContext) { Write-Host 'CHECK PASS AI_CTX_PROFILES' } else { Write-Host "CHECK FAIL AI_CTX_PROFILES: expected $expectedContext, got $(if($env:AI_CTX_PROFILES){$env:AI_CTX_PROFILES}else{'<unset>'})"; $failures++ }
     if ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq $expectedDirs) { Write-Host 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS' } else { Write-Host "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected $expectedDirs, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"; $failures++ }
     $expectedHome = if ($homeOverride) { $homeOverride } else { Join-Path (Get-CtxCopilotHomeRoot) (Get-CtxSanitizedContextName -Name $expectedContext) }
     if ($env:COPILOT_HOME -ceq $expectedHome -and (Test-Path -LiteralPath $expectedHome -PathType Container)) { Write-Host 'CHECK PASS COPILOT_HOME' } else { Write-Host "CHECK FAIL COPILOT_HOME: expected $expectedHome, got $(if($env:COPILOT_HOME){$env:COPILOT_HOME}else{'<unset>'})"; $failures++ }
@@ -1104,7 +1100,7 @@ Register-ArgumentCompleter -CommandName ctx -ScriptBlock {
     } elseif ($argIndex -eq 2 -and $elements[1].Extent.Text -eq 'clear') {
         $candidates = @('--all')
     } else {
-        $candidates = Get-CtxSubdirName (Join-Path $root 'shared')
+        $candidates = Get-CtxSubdirName (Join-Path $root 'profiles')
     }
 
     $candidates |
