@@ -506,6 +506,92 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         { Get-CtxValidatedHomePath -Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT } | Should -Throw '*unsafe home*'
     }
 
+    It 'Test 30 (issue #17): Set-CtxCopilotHome revalidates and rejects an ancestor swapped after initial validation' {
+        # Simulates a different-user attacker replacing an intermediate
+        # ancestor of a validated home: path with a symlink/junction in
+        # the narrow window between .ctx-parse-time validation and the
+        # actual directory creation. $Script:CtxToctouHook is the test
+        # seam (issue #17) that lets us deterministically arrange the
+        # swap between the two checks.
+        $proj = Join-Path $env:HOME 'project-toctou-create'
+        $outside = Join-Path $Script:TestTmp 'toctou-create-outside'
+        New-Item -ItemType Directory -Path $proj, $outside -Force | Out-Null
+        $custom = Join-Path $proj '.copilot-ctx'
+        $nested = Join-Path $custom 'nested'
+
+        $Script:CtxToctouHook = {
+            Remove-Item -LiteralPath $custom -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType SymbolicLink -Path $custom -Target $outside -Force | Out-Null
+        }
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try {
+            Set-CtxCopilotHome -ContextName 'review' -ResolvedDirs @() -HomeOverride $nested
+        } finally {
+            $ErrorActionPreference = $prevEap
+            $Script:CtxToctouHook = $null
+        }
+
+        $env:COPILOT_HOME | Should -BeNullOrEmpty
+        Test-Path -LiteralPath (Join-Path $outside 'nested') | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'unsafe home'
+    }
+
+    It 'Test 31 (issue #17): Clear-CtxContext -All revalidates and refuses an ancestor swapped after initial validation' {
+        # Same attacker model as Test 30, but exercised against the
+        # recursive delete path (Clear-CtxContext -All): a valid home is
+        # created normally, then an ancestor is swapped for a symlink
+        # pointing at attacker-controlled content between the initial
+        # validation and the actual Remove-Item -Recurse.
+        $proj = Join-Path $env:HOME 'project-toctou-clear'
+        $outside = Join-Path $Script:TestTmp 'toctou-clear-outside'
+        $custom = Join-Path $proj '.copilot-ctx'
+        $nested = Join-Path $custom 'nested'
+        New-Item -ItemType Directory -Path (Join-Path $outside 'nested') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $outside 'nested/data.txt') -Value 'important'
+        New-Item -ItemType Directory -Path $nested -Force | Out-Null
+        $env:AI_CTX_PROFILES = 'review'
+        $env:COPILOT_HOME = $nested
+        $Script:CtxAutoLoadHomeOverride = $nested
+
+        $Script:CtxToctouHook = {
+            Remove-Item -LiteralPath $custom -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType SymbolicLink -Path $custom -Target $outside -Force | Out-Null
+        }
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try {
+            $result = Clear-CtxContext -All
+        } finally {
+            $ErrorActionPreference = $prevEap
+            $Script:CtxToctouHook = $null
+        }
+
+        $result | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $outside 'nested/data.txt') | Should -BeTrue
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'unsafe home'
+    }
+
+    It 'Test 32 (issue #17): ancestor ACL trust check accepts SYSTEM/Administrators and the current user, rejects others' -Skip:(-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
+        # Windows-only: Test-CtxAncestorAclTrusted must treat inherited
+        # ACLs granting write to SYSTEM / built-in Administrators (both
+        # resolved via non-localized WellKnownSidType) and the current
+        # user as trusted, but reject an ordinary/unknown principal with
+        # write access - such a principal could otherwise perform the
+        # ancestor swap the TOCTOU revalidation above is meant to catch.
+        # Skipped entirely on non-Windows CI (Linux Pester), where this
+        # ACL model does not apply and Get-CtxValidatedHomePath falls
+        # back to reparse-point detection only.
+        $dir = Join-Path $Script:TestTmp 'acl-trusted'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Test-CtxAncestorAclTrusted -Path $dir | Should -BeTrue
+
+        $acl = Get-Acl -LiteralPath $dir
+        $everyoneSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::WorldSid, $null)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($everyoneSid, 'Write', 'Allow')
+        $acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $dir -AclObject $acl
+        Test-CtxAncestorAclTrusted -Path $dir | Should -BeFalse
+    }
+
     It 'workspace created by ctx is marked and removed by clear --all' {
         $proj = Join-Path $Script:TestTmp 'project-workspace'
         $profile = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review'

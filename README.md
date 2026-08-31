@@ -316,6 +316,17 @@ review:/home/user/work/ai-config/profiles/review
 - `ctx clear --all` looks up whichever location was actually used (custom
   or centralized) for the context it's clearing, so cleanup works
   correctly either way.
+- **Safety note (TOCTOU):** the custom-home path is validated more than
+  once - once when a `.ctx` file's `home:` directive is parsed, and again
+  immediately before the directory is created or recursively deleted.
+  This protects against a *different-user* attacker on a shared machine
+  who can write to an ancestor directory and swaps it for a symlink (or,
+  on Windows, a junction/reparse point) in the brief window between the
+  first validation and the actual filesystem operation. It does not, and
+  cannot, protect against a *same-user* attacker: any process running as
+  you already has the same permissions `ctx` uses, so there is no
+  meaningful boundary to enforce there. See the `_ctx_toctou_hook`
+  comment in `ctx.sh` (and the equivalent in `ctx.ps1`) for details.
 
 #### Operational notes
 

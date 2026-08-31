@@ -513,11 +513,96 @@ EOF
     [[ "$output" == *"unsafe home"* ]]
 }
 
+@test "toctou: home creation revalidates and rejects an ancestor swapped after initial check" {
+    # Simulates a different-user attacker replacing an intermediate
+    # ancestor of a validated home: path with a symlink/junction in the
+    # narrow window between the .ctx-parse-time validation and the
+    # actual mkdir. _ctx_toctou_hook is the test seam (issue #17) that
+    # lets us deterministically arrange the swap between the two checks.
+    _make_profile "review"
+    local proj="$HOME/project-toctou-create"
+    local outside="$TEST_TMP/toctou-create-outside"
+    mkdir -p "$proj" "$outside"
+    printf 'home: .copilot-ctx/nested\nreview:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    _ctx_toctou_hook() {
+        rm -rf "$proj/.copilot-ctx"
+        ln -s "$outside" "$proj/.copilot-ctx"
+    }
+
+    run _ctx_load_ctx_file "$proj/.ctx"
+    unset -f _ctx_toctou_hook
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsafe home"* ]]
+    [ ! -e "$outside/nested" ]
+}
+
+@test "toctou: ctx clear --all revalidates and refuses an ancestor swapped after initial check" {
+    # Same attacker model as above, but exercised against the recursive
+    # delete path (ctx clear --all): a valid home is created normally,
+    # then an ancestor is swapped to a symlink pointing at attacker-
+    # controlled content between clear's initial validation and its
+    # actual rm -rf.
+    _make_profile "review"
+    local proj="$HOME/project-toctou-clear"
+    local outside="$TEST_TMP/toctou-clear-outside"
+    local custom="$proj/.copilot-ctx/nested"
+    mkdir -p "$outside/nested"
+    printf 'important\n' > "$outside/nested/data.txt"
+    mkdir -p "$custom"
+    export AI_CTX_PROFILES=review
+    export COPILOT_HOME="$custom"
+    _ctx_auto_load_home_override="$custom"
+
+    _ctx_toctou_hook() {
+        rm -rf "$proj/.copilot-ctx"
+        ln -s "$outside" "$proj/.copilot-ctx"
+    }
+
+    run _ctx_clear --all
+    unset -f _ctx_toctou_hook
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsafe home"* ]]
+    [ -f "$outside/nested/data.txt" ]
+}
+
 @test "home validator rejects HOME and AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT themselves" {
     run _ctx_validate_home_path "$HOME"
     [ "$status" -ne 0 ]
     run _ctx_validate_home_path "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT"
     [ "$status" -ne 0 ]
+}
+
+@test "home validator walks the existing ancestor chain when the synthetic homes root itself does not yet exist" {
+    # Contract: when AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT (or any part of
+    # the candidate path) has not been created yet, validation must not
+    # be skipped for the portion of the path that DOES already exist -
+    # it must walk up to the first existing ancestor and validate that,
+    # failing closed rather than assuming an as-yet-nonexistent root is
+    # automatically safe.
+    local fresh_root="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT"
+    local outside="$TEST_TMP/ancestor-swap-outside"
+    mkdir -p "$outside"
+    # $fresh_root itself does not exist yet (setup() only sets the env
+    # var, it does not mkdir it), but its parent ($HOME/.config/ctx) also
+    # does not exist - walk up further to $HOME, which does exist and is
+    # a real directory, so this must validate successfully.
+    run _ctx_validate_home_path "$fresh_root/context-name"
+    [ "$status" -eq 0 ]
+
+    # Now make the first existing ancestor of the (still nonexistent)
+    # root - $HOME/.config - a symlink to somewhere outside the allowed
+    # roots; that existing ancestor must be rejected even though the
+    # leaf path is still nonexistent, instead of validation being
+    # skipped because the literal root itself isn't there.
+    mkdir -p "$(dirname "$HOME/.config")"
+    rm -rf "$HOME/.config"
+    ln -s "$outside" "$HOME/.config"
+    run _ctx_validate_home_path "$fresh_root/context-name"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unsafe home"* || "$output" == *"symlink"* ]]
 }
 
 @test "public ctx clear --all propagates unsafe home failure" {

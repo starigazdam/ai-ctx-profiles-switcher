@@ -302,6 +302,20 @@ _ctx_clear() {
                 printf 'ctx: error: refusing to remove unsafe or unselected home: %s\n' "$home_dir" >&2
                 return 1
             fi
+            # TOCTOU hardening (issue #17): revalidate immediately before
+            # the recursive delete below, unconditionally. Time can pass
+            # between the validation above and this rm -rf; a different-
+            # user attacker able to write to an ancestor directory could
+            # swap it for a symlink/junction in that window so "delete
+            # $home_dir" instead recursively deletes through an attacker-
+            # controlled path. _ctx_toctou_hook is the same test-only seam
+            # used in _ctx_setup_copilot_home, absent in normal operation.
+            # Same-user races remain out of scope.
+            if declare -f _ctx_toctou_hook >/dev/null 2>&1; then _ctx_toctou_hook; fi
+            if ! _ctx_validate_home_path "$home_dir" >/dev/null; then
+                printf 'ctx: error: refusing to remove unsafe or unselected home: %s\n' "$home_dir" >&2
+                return 1
+            fi
             if [ -d "$home_dir" ] && [ ! -L "$home_dir" ]; then
                 local remove_status=0
                 rm -rf -- "$home_dir" || remove_status=$?
@@ -566,6 +580,25 @@ _ctx_setup_copilot_home() {
         home_dir="$homes_root/$sanitized"
     fi
     copilot_dir="${CTX_COPILOT_DIR:-$HOME/.copilot}"
+
+    # TOCTOU hardening (issue #17): a custom home: path is validated once
+    # when the .ctx file is parsed, but time can pass (and, on multi-user
+    # systems, another process can run) between that validation and the
+    # mkdir below. A different-user attacker who can write to an ancestor
+    # directory could swap it for a symlink pointing elsewhere in that
+    # window, turning "create $home_dir/skills" into "create <attacker
+    # path>/skills". Revalidate immediately before the filesystem
+    # operation, unconditionally (not only when $home_dir already
+    # exists), so a same-run swap is caught here rather than trusted from
+    # the earlier check. _ctx_toctou_hook is a test-only seam (a no-op
+    # function unless a test defines it) used to deterministically arrange
+    # such a swap between validation and use; it does not exist in normal
+    # operation. Same-user races are out of scope - a same-user attacker
+    # already has the same filesystem permissions ctx itself uses.
+    if declare -f _ctx_toctou_hook >/dev/null 2>&1; then _ctx_toctou_hook; fi
+    if ! _ctx_validate_home_path "$home_dir" >/dev/null; then
+        return 1
+    fi
 
     mkdir -p "$home_dir/skills" || {
         printf 'ctx: warning: could not create %s; leaving COPILOT_HOME unset\n' "$home_dir" >&2
