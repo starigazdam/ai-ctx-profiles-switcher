@@ -645,9 +645,11 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $stale = Join-Path $env:COPILOT_HOME 'skills\stale-skill'
         New-Item -ItemType Directory -Path $stale -Force | Out-Null
         Set-Location $proj
-        $result = @(Test-CtxActivation)
-        $result[-1] | Should -BeFalse
-        ($result -join "`n") | Should -Match 'CHECK FAIL skill:stale-skill: unexpected skill'
+        $result = Test-CtxActivation
+        $result.GetType().Name | Should -Be 'Boolean'
+        $result | Should -BeFalse
+        $diagnostics = @(& { Test-CtxActivation } 6>&1)
+        ($diagnostics -join "`n") | Should -Match 'CHECK FAIL skill:stale-skill: unexpected skill'
     }
 
     It 'ctx check normalizes wrapped Copilot skill JSON and preserves sorted diagnostics' {
@@ -665,16 +667,15 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             return '{"skills":[{"name":"zeta-skill"},{"name":"alpha-skill"}]}'
         }
         Set-Location $proj
-        $first = @(Test-CtxActivation)
-        $second = @(Test-CtxActivation)
+        $first = @(& { Test-CtxActivation } 6>&1)
+        $second = @(& { Test-CtxActivation } 6>&1)
         ($first -join "`n") | Should -Be ($second -join "`n")
-        ($first -join "`n") | Should -Match 'CHECK SKIP skills: copilot probe disabled in read-only check'
         ($first -join "`n") | Should -Match 'CHECK SKIP skills: copilot probe disabled in read-only check'
         $script:copilotProbeCalls | Should -Be 0
     }
 
     It 'ctx check treats mixed-case HOME like Import-CtxFile' {
-        $proj = Join-Path $Script:TestTmp 'project-check-home-case'
+        $proj = Join-Path $env:HOME 'project-check-home-case'
         $override = Join-Path $env:HOME 'custom-copilot-home'
         $reviewDir = New-CtxTestProfile -Name 'review'
         New-Item -ItemType Directory -Path $proj, $override -Force | Out-Null
@@ -703,7 +704,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
         $stale = Join-Path $env:COPILOT_HOME 'skills\stale-skill'
-        New-Item -ItemType SymbolicLink -Path $stale -Target (Join-Path $Script:TestTmp 'missing-skill') | Out-Null
+        New-Item -ItemType SymbolicLink -Path $stale -Target (Join-Path $env:HOME 'missing-skill') | Out-Null
         (Get-Item -LiteralPath $stale -Force).LinkType | Should -Not -BeNullOrEmpty
         Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
         Test-Path -LiteralPath $stale | Should -BeFalse
