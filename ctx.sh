@@ -111,6 +111,12 @@ _ctx_root() {
     printf '%s\n' "${AI_CONFIG_ROOT:-$HOME/work/ai-config}"
 }
 
+# Lowercase a context name without shell-specific case conversion syntax.
+# `${name,,}` is not supported by zsh, despite ctx.sh supporting both shells.
+_ctx_lowercase() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 _ctx_usage() {
     cat <<'EOF'
 Usage:
@@ -475,8 +481,9 @@ _ctx_validate_home_path() {
     [ "$root_is_candidate" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is an allowed root, not a descendant\n' "$candidate" >&2; return 1; }
     [ "$allowed" -eq 0 ] || { printf 'ctx: error: unsafe home: %s is outside HOME/CTX_HOMES_ROOT\n' "$candidate" >&2; return 1; }
     rest="${candidate#/}"; prefix="/"
-    IFS='/' read -r -a parts <<< "$rest"
-    for part in "${parts[@]}"; do
+    while [ -n "$rest" ]; do
+        part="${rest%%/*}"
+        if [ "$rest" = "$part" ]; then rest=""; else rest="${rest#*/}"; fi
         [ -n "$part" ] || continue
         prefix="${prefix%/}/$part"
         [ ! -L "$prefix" ] || { printf 'ctx: error: unsafe home: symlink component in %s\n' "$candidate" >&2; return 1; }
@@ -620,23 +627,23 @@ EOF
     # Reconcile skills/: desired (name -> target) pairs come from each
     # resolved dir's .github/skills subfolder, if present.
     local -A desired_skills=()
+    local -a desired_skill_names=()
     local rd skill_dir sname
     for rd in "${resolved_dirs[@]}"; do
         skill_dir="$rd/.github/skills"
         [ -d "$skill_dir" ] || continue
         local s
-        for s in "$skill_dir"/*/; do
-            [ -d "$s" ] || continue
+        while IFS= read -r s; do
             sname="$(basename "$s")"
+            [ -n "${desired_skills[$sname]+set}" ] || desired_skill_names+=("$sname")
             desired_skills["$sname"]="${s%/}"
-        done
+        done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
     done
 
     # Remove stale skill symlinks no longer in desired set.
     if [ -d "$home_dir/skills" ]; then
         local existing
-        for existing in "$home_dir/skills"/*; do
-            [ -e "$existing" ] || [ -L "$existing" ] || continue
+        while IFS= read -r existing; do
             local ename
             ename="$(basename "$existing")"
             if [ -z "${desired_skills[$ename]:-}" ]; then
@@ -645,12 +652,12 @@ EOF
                 # (Remove-Item -Recurse -Force).
                 rm -rf "$existing"
             fi
-        done
+        done < <(find "$home_dir/skills" -mindepth 1 -maxdepth 1 -print)
     fi
 
     # Create/repair desired skill symlinks (idempotent).
     local name target link
-    for name in "${!desired_skills[@]}"; do
+    for name in "${desired_skill_names[@]}"; do
         target="${desired_skills[$name]}"
         link="$home_dir/skills/$name"
         if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
@@ -815,7 +822,7 @@ _ctx_load_ctx_file() {
     dir_of_file="$(dirname "$ctx_file")"
 
     local ai_context="" dirs_csv="" first_name="" home_override=""
-    local line name path resolved_path
+    local line name entry_path resolved_path
     local -a resolved_dirs=()
     local -a resolved_names=()
 
@@ -834,25 +841,25 @@ _ctx_load_ctx_file() {
         esac
 
         name="${line%%:*}"
-        path="${line#*:}"
+        entry_path="${line#*:}"
         # Trim leading/trailing whitespace so "home: .copilot-ctx" (with a
         # space after the colon, as shown in docs/examples) parses the same
         # as "home:.copilot-ctx" - matches ctx.ps1's .Trim() on both sides.
         name="${name#"${name%%[![:space:]]*}"}"
         name="${name%"${name##*[![:space:]]}"}"
-        path="${path#"${path%%[![:space:]]*}"}"
-        path="${path%"${path##*[![:space:]]}"}"
-        if [ -z "$name" ] || [ -z "$path" ]; then
+        entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"
+        entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
+        if [ -z "$name" ] || [ -z "$entry_path" ]; then
             printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2
             return 1
         fi
 
-        case "$path" in
-            /*) resolved_path="$path" ;;
-            *) resolved_path="$dir_of_file/$path" ;;
+        case "$entry_path" in
+            /*) resolved_path="$entry_path" ;;
+            *) resolved_path="$dir_of_file/$entry_path" ;;
         esac
 
-        if [ "${name,,}" = "home" ]; then
+        if [ "$(_ctx_lowercase "$name")" = "home" ]; then
             if [ -n "$home_override" ]; then
                 printf 'ctx: error: duplicate "home:" directive in %s\n' "$ctx_file" >&2
                 return 1
@@ -919,7 +926,7 @@ _ctx_load_ctx_file() {
 }
 
 _ctx_check() {
-    local ctx_file dir_of_file line name path resolved_path home_override=""
+    local ctx_file dir_of_file line name entry_path resolved_path home_override=""
     local expected_context="" expected_dirs="" first=1
     local -a names=() dirs=()
     local failures=0
@@ -934,18 +941,18 @@ _ctx_check() {
         [ -z "$line" ] && continue
         case "$line" in '#'* ) continue ;; esac
         case "$line" in *:*) ;; *) printf 'CHECK FAIL parser: invalid .ctx line\n'; failures=$((failures+1)); continue ;; esac
-        name="${line%%:*}"; path="${line#*:}"
+        name="${line%%:*}"; entry_path="${line#*:}"
         name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
-        path="${path#"${path%%[![:space:]]*}"}"; path="${path%"${path##*[![:space:]]}"}"
-        case "$path" in /*) resolved_path="$path" ;; *) resolved_path="$dir_of_file/$path" ;; esac
-        if [ "${name,,}" = home ]; then
+        entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"; entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
+        case "$entry_path" in /*) resolved_path="$entry_path" ;; *) resolved_path="$dir_of_file/$entry_path" ;; esac
+        if [ "$(_ctx_lowercase "$name")" = home ]; then
             if [ -n "$home_override" ]; then printf 'CHECK FAIL parser: duplicate home directive\n'; failures=$((failures+1)); continue; fi
             if ! home_override="$(_ctx_validate_home_path "$resolved_path" 2>/dev/null)"; then
                 printf 'CHECK FAIL COPILOT_HOME: invalid home directive\n'; failures=$((failures+1)); continue
             fi
             continue
         fi
-        if [ -z "$name" ] || [ -z "$path" ] || [ ! -d "$resolved_path" ]; then
+        if [ -z "$name" ] || [ -z "$entry_path" ] || [ ! -d "$resolved_path" ]; then
             printf 'CHECK FAIL parser: invalid or missing entry %s\n' "$name"; failures=$((failures+1)); continue
         fi
         names+=("$name"); dirs+=("$resolved_path")
@@ -978,20 +985,29 @@ $(_ctx_copilot_home_shared_dirs)
 EOF
 
     local -A desired=() actual=()
+    local -a desired_names=() actual_names=()
     local rd skill_dir s skill_name
     for rd in "${dirs[@]}"; do
         skill_dir="$rd/.github/skills"
         [ -d "$skill_dir" ] || continue
-        for s in "$skill_dir"/*/; do [ -d "$s" ] || continue; skill_name="$(basename "$s")"; desired["$skill_name"]="${s%/}"; done
+        while IFS= read -r s; do
+            skill_name="$(basename "$s")"
+            [ -n "${desired[$skill_name]+set}" ] || desired_names+=("$skill_name")
+            desired["$skill_name"]="${s%/}"
+        done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
     done
-    for s in "$expected_home/skills"/*; do [ -e "$s" ] || [ -L "$s" ] || continue; actual["$(basename "$s")"]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"; done
+    while IFS= read -r s; do
+        skill_name="$(basename "$s")"
+        actual_names+=("$skill_name")
+        actual["$skill_name"]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"
+    done < <(find "$expected_home/skills" -mindepth 1 -maxdepth 1 -print)
     local sorted_skills
-    sorted_skills="$(printf '%s\n' "${!desired[@]}" | sort)"
+    sorted_skills="$(printf '%s\n' "${desired_names[@]}" | sort)"
     while IFS= read -r skill_name; do
         [ -n "$skill_name" ] || continue
         if [ "${actual[$skill_name]:-}" = "${desired[$skill_name]}" ]; then printf 'CHECK PASS skill:%s\n' "$skill_name"; else printf 'CHECK FAIL skill:%s: missing or wrong target\n' "$skill_name"; failures=$((failures+1)); fi
     done <<< "$sorted_skills"
-    sorted_skills="$(printf '%s\n' "${!actual[@]}" | sort)"
+    sorted_skills="$(printf '%s\n' "${actual_names[@]}" | sort)"
     while IFS= read -r skill_name; do
         [ -n "$skill_name" ] || continue
         [ -n "${desired[$skill_name]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }

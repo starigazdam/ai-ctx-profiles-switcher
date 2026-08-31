@@ -841,6 +841,34 @@ EOF
     [[ "$AI_CONTEXT" != *"HoMe"* ]]
 }
 
+@test "zsh supports mixed-case HOME in .ctx activation and ctx check" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+
+    local proj="$HOME/project-zsh-home-case"
+    local override="$HOME/custom-zsh-copilot-home"
+    _make_profile review
+    mkdir -p "$proj" "$override"
+    printf 'HoMe:%s\nreview:%s\n' "$override" "$AI_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        _ctx_load_ctx_file "$2" >/dev/null || exit
+        rm -f "$4/project-zsh-home-case.code-workspace"
+        [ "$COPILOT_HOME" = "$3" ] || exit
+        [ "$AI_CONTEXT" = review ] || exit
+        cd "$4" || exit
+        ctx check
+    ' -- "$CTX_SRC" "$proj/.ctx" "$override" "$proj"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
+    [[ "$output" == *"ctx check: PASS"* ]]
+}
+
 @test "reactivation removes a dangling stale skill symlink" {
     local proj="$HOME/project-dangling-skill"
     _make_profile review

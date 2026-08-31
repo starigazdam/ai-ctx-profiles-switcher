@@ -23,6 +23,9 @@ jobs:
       - name: Install bats-core
         run: npm install --no-save bats
 
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
       - name: Run bats suite (ctx.sh)
         run: ./node_modules/.bin/bats tests/ctx.bats
 
