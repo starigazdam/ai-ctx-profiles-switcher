@@ -123,12 +123,14 @@ Usage:
   ctx clear                   Clear the currently active context
   ctx clear --all             Also remove generated artifacts (settings.local.json,
                                *.code-workspace) next to the nearest .ctx file
+  ctx load <file>             Explicitly load a .ctx file (bypasses noautoload)
   ctx --help | -h             Show this help message
 
 Examples:
   ctx review
   ctx coding azure
   ctx review dotnet security
+  ctx load C:\path\to\project\.ctx
 
 Environment:
   AI_CONFIG_ROOT      Root directory containing profiles\ and shared\
@@ -270,7 +272,34 @@ function ctx {
             Clear-CtxContext -All:$all
             return
         }
+        'load' {
+            if ($Contexts.Count -lt 2 -or -not $Contexts[1]) {
+                Write-Error 'ctx: error: "ctx load" requires a path argument'
+                Write-Host 'Usage: ctx load <path-to-.ctx-file>'
+                return
+            }
+            $loadFile = $Contexts[1]
+            if (-not [System.IO.Path]::IsPathRooted($loadFile)) {
+                $loadFile = Join-Path (Get-Location).Path $loadFile
+            }
+            if (-not (Test-Path -LiteralPath $loadFile -PathType Leaf)) {
+                Write-Error "ctx: error: file not found: $loadFile"
+                return
+            }
+            $loadDir = Split-Path -Parent $loadFile
+            if (Import-CtxFile -CtxFile $loadFile) {
+                $Script:CtxAutoLoadDir = $loadDir
+            }
+            return
+        }
     }
+
+    # Manual profile switch: this path never goes through Import-CtxFile
+    # (which is what updates $Script:CtxAutoLoadHomeOverride to reflect the
+    # .ctx file just loaded), so a stale override from an earlier auto-load
+    # would otherwise survive and cause "ctx clear -All" to target the
+    # wrong (now-abandoned) synthetic COPILOT_HOME directory.
+    $Script:CtxAutoLoadHomeOverride = $null
 
     $root = Get-CtxRoot
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {
@@ -336,6 +365,19 @@ $Script:CtxLastPwd = $null
 # .ctx file auto-loaded, so Clear-CtxContext -All knows to look for the
 # synthetic COPILOT_HOME at that location instead of the centralized one.
 $Script:CtxAutoLoadHomeOverride = $null
+
+function Test-CtxFileHasNoAutoLoad {
+    # Returns $true when the given .ctx file contains a bare "noautoload"
+    # directive (case-insensitive). Used by Invoke-CtxAutoLoad to skip
+    # automatic activation; "ctx load <file>" bypasses this check entirely.
+    param([string]$CtxFile)
+    foreach ($rawLine in Get-Content -LiteralPath $CtxFile) {
+        if ($rawLine.Trim() -ieq 'noautoload') {
+            return $true
+        }
+    }
+    return $false
+}
 
 function Get-CtxCopilotHomeRoot {
     if ($env:CTX_HOMES_ROOT) {
@@ -784,6 +826,11 @@ function Import-CtxFile {
             continue
         }
 
+        # noautoload directive — valid bare keyword, skip without error.
+        if ($line -ieq 'noautoload') {
+            continue
+        }
+
         $sepIndex = $line.IndexOf(':')
         if ($sepIndex -lt 1) {
             Write-Error "ctx: error: invalid .ctx line in $CtxFile (expected <name>:<path>): $line"
@@ -850,6 +897,16 @@ function Invoke-CtxAutoLoad {
     $ctxFile = Find-CtxFile
     if ($ctxFile) {
         $dirOfFile = Split-Path -Parent $ctxFile
+        if (Test-CtxFileHasNoAutoLoad -CtxFile $ctxFile) {
+            # File explicitly opts out of auto-loading. If we previously had
+            # this file loaded (e.g. flag was added after loading), clear it
+            # now and forget the directory so we don't linger.
+            if ($Script:CtxAutoLoadDir -eq $dirOfFile) {
+                Clear-CtxContext
+                $Script:CtxAutoLoadDir = $null
+            }
+            return
+        }
         if ($Script:CtxAutoLoadDir -ne $dirOfFile) {
             if (Import-CtxFile -CtxFile $ctxFile) {
                 $Script:CtxAutoLoadDir = $dirOfFile
@@ -909,9 +966,23 @@ Register-ArgumentCompleter -CommandName ctx -ScriptBlock {
     $argIndex = $elements.Count - 1
 
     if ($argIndex -le 1) {
-        $candidates = @('current', 'clear') + (Get-CtxSubdirName (Join-Path $root 'profiles'))
+        $candidates = @('current', 'clear', 'load') + (Get-CtxSubdirName (Join-Path $root 'profiles'))
     } elseif ($argIndex -eq 2 -and $elements[1].Extent.Text -eq 'clear') {
         $candidates = @('--all')
+    } elseif ($argIndex -ge 2 -and $elements[1].Extent.Text -eq 'load') {
+        # File-system completion for ctx load — return matching paths.
+        $candidates = @()
+        $searchDir = if ($wordToComplete) { Split-Path -Parent $wordToComplete } else { (Get-Location).Path }
+        if (-not $searchDir) { $searchDir = (Get-Location).Path }
+        if (Test-Path -LiteralPath $searchDir -PathType Container) {
+            Get-ChildItem -LiteralPath $searchDir -Force |
+                Where-Object { $_.Name -like "$(Split-Path -Leaf $wordToComplete)*" } |
+                ForEach-Object {
+                    $full = $_.FullName
+                    [System.Management.Automation.CompletionResult]::new($full, $full, 'ParameterValue', $full)
+                }
+        }
+        return
     } else {
         $candidates = Get-CtxSubdirName (Join-Path $root 'shared')
     }

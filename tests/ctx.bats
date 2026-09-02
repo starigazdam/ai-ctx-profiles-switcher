@@ -420,3 +420,90 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"duplicate"* ]]
 }
+
+# --- Tests 22-26: noautoload flag and ctx load command (issue #27) ----------
+
+@test "noautoload flag: _ctx_load_ctx_file still loads a noautoload .ctx file" {
+    _make_profile review skill-review
+    local proj="$TEST_TMP/project-noautoload"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+noautoload
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    _ctx_load_ctx_file "$proj/.ctx"
+    [ "$AI_CONTEXT" = "review" ]
+    [[ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" == *"profiles/review"* ]]
+}
+
+@test "noautoload flag: auto-load hook skips a .ctx file with noautoload" {
+    _make_profile review skill-review
+    local proj="$TEST_TMP/project-noautoload-hook"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+noautoload
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    # Simulate the hook being called from inside the project directory.
+    (
+        cd "$proj"
+        source "$CTX_SRC"
+        # Hook fires at source time; context should NOT be set.
+        [ -z "${AI_CONTEXT:-}" ]
+    )
+}
+
+@test "noautoload flag: case-insensitive (NOAUTOLOAD is accepted)" {
+    _make_profile review skill-review
+    local proj="$TEST_TMP/project-noautoload-upper"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+NOAUTOLOAD
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    # load directly works fine
+    _ctx_load_ctx_file "$proj/.ctx"
+    [ "$AI_CONTEXT" = "review" ]
+}
+
+@test "ctx load: loads a .ctx file via explicit path" {
+    _make_profile review skill-review
+    local proj="$TEST_TMP/project-ctx-load"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    ctx load "$proj/.ctx"
+    [ "$AI_CONTEXT" = "review" ]
+    [[ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" == *"profiles/review"* ]]
+    [ "$_ctx_auto_load_dir" = "$proj" ]
+}
+
+@test "ctx load: loads a noautoload .ctx file that the hook would skip" {
+    _make_profile review skill-review
+    local proj="$TEST_TMP/project-ctx-load-noautoload"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+noautoload
+review:$AI_CONFIG_ROOT/profiles/review
+EOF
+
+    ctx load "$proj/.ctx"
+    [ "$AI_CONTEXT" = "review" ]
+    [ "$_ctx_auto_load_dir" = "$proj" ]
+}
+
+@test "ctx load: errors when file not found" {
+    run ctx load /nonexistent/.ctx
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "ctx load: errors when no path given" {
+    run ctx load
+    [ "$status" -ne 0 ]
+}

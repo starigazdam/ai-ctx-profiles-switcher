@@ -75,6 +75,17 @@
 #   the directory tree (into a location with no .ctx file) automatically
 #   clears the context.
 #
+#   NOAUTOLOAD FLAG
+#   ----------------
+#   Add a bare "noautoload" line (no colon, case-insensitive) to the .ctx
+#   file to prevent the directory-change hook from loading it automatically:
+#
+#       noautoload
+#       review:/home/user/work/ai-config/profiles/review
+#
+#   The file remains valid and can be loaded explicitly at any time with
+#   "ctx load <path-to-.ctx-file>" (see below).
+#
 #   SKILL DISCOVERY
 #   ----------------
 #   COPILOT_CUSTOM_INSTRUCTIONS_DIRS does not make Copilot CLI discover agent
@@ -122,12 +133,14 @@ Usage:
   ctx clear                   Clear the currently active context
   ctx clear --all             Also remove generated artifacts (settings.local.json,
                                *.code-workspace) next to the nearest .ctx file
+  ctx load <file>             Explicitly load a .ctx file (bypasses noautoload)
   ctx --help | -h             Show this help message
 
 Examples:
   ctx review
   ctx coding azure
   ctx review dotnet security
+  ctx load /path/to/project/.ctx
 
 Environment:
   AI_CONFIG_ROOT      Root directory containing profiles/ and shared/
@@ -267,7 +280,36 @@ ctx() {
             _ctx_clear "$2"
             return 0
             ;;
+        load)
+            if [ -z "${2:-}" ]; then
+                printf 'ctx: error: "ctx load" requires a path argument\n' >&2
+                printf 'Usage: ctx load <path-to-.ctx-file>\n' >&2
+                return 1
+            fi
+            local load_file
+            case "$2" in
+                /*) load_file="$2" ;;
+                *) load_file="$PWD/$2" ;;
+            esac
+            if [ ! -f "$load_file" ]; then
+                printf 'ctx: error: file not found: %s\n' "$load_file" >&2
+                return 1
+            fi
+            local load_dir
+            load_dir="$(dirname "$load_file")"
+            if _ctx_load_ctx_file "$load_file"; then
+                _ctx_auto_load_dir="$load_dir"
+            fi
+            return $?
+            ;;
     esac
+
+    # Manual profile switch: this path never goes through _ctx_load_ctx_file
+    # (which is what updates _ctx_auto_load_home_override to reflect the
+    # .ctx file just loaded), so a stale override from an earlier auto-load
+    # would otherwise survive and cause "ctx clear --all" to target the
+    # wrong (now-abandoned) synthetic COPILOT_HOME directory.
+    _ctx_auto_load_home_override=""
 
     local root profile_name profile_dir
     root="$(_ctx_root)"
@@ -339,6 +381,21 @@ _ctx_auto_load_dir=""
 # synthetic COPILOT_HOME at that location instead of the centralized one.
 _ctx_auto_load_home_override=""
 
+_ctx_ctx_file_has_noautoload() {
+    # Returns 0 (true) when the given .ctx file contains a bare "noautoload"
+    # directive (case-insensitive). Used by _ctx_auto_load_hook to skip
+    # automatic activation; "ctx load <file>" bypasses this check entirely.
+    local ctx_file="$1"
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        case "$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')" in
+            noautoload) return 0 ;;
+        esac
+    done < "$ctx_file"
+    return 1
+}
+
 _ctx_find_ctx_file() {
     # Search from $PWD upward to the filesystem root for a ".ctx" file.
     local dir="$PWD"
@@ -360,6 +417,16 @@ _ctx_auto_load_hook() {
     if ctx_file="$(_ctx_find_ctx_file)"; then
         local dir_of_file
         dir_of_file="$(dirname "$ctx_file")"
+        if _ctx_ctx_file_has_noautoload "$ctx_file"; then
+            # File explicitly opts out of auto-loading. If we previously
+            # had this file loaded (e.g. flag was added after loading),
+            # clear it now and forget the directory so we don't linger.
+            if [ "$_ctx_auto_load_dir" = "$dir_of_file" ]; then
+                _ctx_clear
+                _ctx_auto_load_dir=""
+            fi
+            return 0
+        fi
         if [ "$_ctx_auto_load_dir" != "$dir_of_file" ]; then
             if _ctx_load_ctx_file "$ctx_file"; then
                 _ctx_auto_load_dir="$dir_of_file"
@@ -708,6 +775,11 @@ _ctx_load_ctx_file() {
     # (relative to the .ctx file's directory unless absolute), and the
     # directory does not need to pre-exist (it's created on demand, same
     # as the centralized default).
+    #
+    # A bare "noautoload" line (case-insensitive, issue #27) marks the
+    # file as opt-out of auto-loading. _ctx_load_ctx_file itself always
+    # loads the file; callers that want to honour the flag (i.e. the
+    # auto-load hook) should call _ctx_ctx_file_has_noautoload first.
     local ctx_file="$1"
     local dir_of_file
     dir_of_file="$(dirname "$ctx_file")"
@@ -723,6 +795,12 @@ _ctx_load_ctx_file() {
         case "$line" in
             '#'*) continue ;;
         esac
+
+        # noautoload directive — valid bare keyword, skip without error.
+        case "$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')" in
+            noautoload) continue ;;
+        esac
+
         case "$line" in
             *:*) : ;;
             *)
@@ -830,10 +908,12 @@ if [ -n "${ZSH_VERSION:-}" ]; then
         words_arr=("${words[@]}")
         if [ "${#words_arr[@]}" -eq 3 ] && [ "${words_arr[2]}" = "clear" ]; then
             compadd --all
+        elif [ "${#words_arr[@]}" -ge 3 ] && [ "${words_arr[2]}" = "load" ]; then
+            _files
         elif [ "${#words_arr[@]}" -le 2 ]; then
             local -a profiles
             profiles=("${(f)$(_ctx_list_subdirs "$root/profiles")}")
-            compadd current clear -- "${profiles[@]}"
+            compadd current clear load -- "${profiles[@]}"
         else
             local -a shared
             shared=("${(f)$(_ctx_list_subdirs "$root/shared")}")
@@ -857,9 +937,11 @@ elif [ -n "${BASH_VERSION:-}" ]; then
         cur="${COMP_WORDS[COMP_CWORD]}"
 
         if [ "$COMP_CWORD" -eq 1 ]; then
-            mapfile -t COMPREPLY < <(compgen -W "current clear $(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
+            mapfile -t COMPREPLY < <(compgen -W "current clear load $(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
         elif [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "clear" ]; then
             mapfile -t COMPREPLY < <(compgen -W "--all" -- "$cur")
+        elif [ "$COMP_CWORD" -ge 2 ] && [ "${COMP_WORDS[1]}" = "load" ]; then
+            mapfile -t COMPREPLY < <(compgen -f -- "$cur")
         else
             mapfile -t COMPREPLY < <(compgen -W "$(_ctx_list_subdirs "$root/shared" | tr '\n' ' ')" -- "$cur")
         fi
