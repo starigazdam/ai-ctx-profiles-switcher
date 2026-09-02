@@ -74,6 +74,17 @@
 #   the directory tree (into a location with no .ctx file) automatically
 #   clears the context.
 #
+#   NOAUTOLOAD FLAG
+#   ----------------
+#   Add a bare "noautoload" line (no colon, case-insensitive) to the .ctx
+#   file to prevent the directory-change hook from loading it automatically:
+#
+#       noautoload
+#       review:/home/user/work/ai-config/profiles/review
+#
+#   The file remains valid and can be loaded explicitly at any time with
+#   "ctx load <path-to-.ctx-file>" (see below).
+#
 #   SKILL DISCOVERY
 #   ----------------
 #   COPILOT_CUSTOM_INSTRUCTIONS_DIRS does not make Copilot CLI discover agent
@@ -128,12 +139,14 @@ Usage:
                                Workspace files are removed only with the exact
                                generatedBy: "ctx" marker; unmarked, invalid,
                                and linked workspaces are preserved with a warning.
+  ctx load <file>             Explicitly load a .ctx file (bypasses noautoload)
   ctx --help | -h             Show this help message
 
 Examples:
   ctx review
   ctx coding azure
   ctx review dotnet security
+  ctx load /path/to/project/.ctx
 
 Environment:
   AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles/
@@ -355,6 +368,29 @@ ctx() {
         current) _ctx_current; return 0 ;;
         check) _ctx_check; return $? ;;
         clear) _ctx_clear "$2"; return $? ;;
+        load)
+            if [ -z "${2:-}" ]; then
+                printf 'ctx: error: "ctx load" requires a path argument\n' >&2
+                printf 'Usage: ctx load <path-to-.ctx-file>\n' >&2
+                return 1
+            fi
+            local load_file load_dir
+            case "$2" in
+                /*) load_file="$2" ;;
+                *) load_file="$PWD/$2" ;;
+            esac
+            if [ ! -f "$load_file" ]; then
+                printf 'ctx: error: file not found: %s\n' "$load_file" >&2
+                return 1
+            fi
+            load_dir="$(dirname "$load_file")"
+            if _ctx_load_ctx_file "$load_file"; then
+                _ctx_auto_load_dir="$load_dir"
+            else
+                return $?
+            fi
+            return 0
+            ;;
     esac
 
     local root profile_name profile_dir context_name context_lc profile_name_lc
@@ -387,6 +423,23 @@ _ctx_auto_load_dir=""
 # synthetic COPILOT_HOME at that location instead of the centralized one.
 _ctx_auto_load_home_override=""
 
+_ctx_ctx_file_has_noautoload() {
+    # Returns 0 (true) when the given .ctx file contains a bare "noautoload"
+    # directive (case-insensitive). Deliberately independent of
+    # _ctx_parse_ctx_file (which fully validates the file and can fail) so
+    # the auto-load hook can always honor the flag even on an otherwise
+    # invalid .ctx file.
+    local ctx_file="$1"
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        case "$(_ctx_lowercase "$line")" in
+            noautoload) return 0 ;;
+        esac
+    done < "$ctx_file"
+    return 1
+}
+
 _ctx_find_ctx_file() {
     # Search from $PWD upward to the filesystem root for a ".ctx" file.
     local dir="$PWD"
@@ -408,6 +461,16 @@ _ctx_auto_load_hook() {
     if ctx_file="$(_ctx_find_ctx_file)"; then
         local dir_of_file
         dir_of_file="$(dirname "$ctx_file")"
+        if _ctx_ctx_file_has_noautoload "$ctx_file"; then
+            # File explicitly opts out of auto-loading. If we previously
+            # had this file loaded (e.g. flag was added after loading),
+            # clear it now and forget the directory so we don't linger.
+            if [ "$_ctx_auto_load_dir" = "$dir_of_file" ]; then
+                _ctx_clear
+                _ctx_auto_load_dir=""
+            fi
+            return 0
+        fi
         if [ "$_ctx_auto_load_dir" != "$dir_of_file" ]; then
             if _ctx_load_ctx_file "$ctx_file"; then
                 _ctx_auto_load_dir="$dir_of_file"
@@ -779,13 +842,15 @@ _ctx_parse_ctx_file() {
     # Side-effect-free parser shared by activation and read-only check. Results
     # are exposed in _ctx_parsed_* globals only after complete validation.
     local ctx_file="$1" dir_of_file line name entry_path resolved_path canonical_path profile_path label_lc
-    local ai_context="" first_name="" home_override=""
+    local ai_context="" first_name="" home_override="" noautoload=0
     local -a dirs=() names=() pairs=()
     local -A seen_labels=() seen_targets=()
     dir_of_file="$(dirname "$ctx_file")"
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"; [ -z "$line" ] && continue
-        case "$line" in '#'*) continue ;; *:*) : ;; *) printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2; return 1 ;; esac
+        case "$line" in '#'*) continue ;; esac
+        case "$(_ctx_lowercase "$line")" in noautoload) noautoload=1; continue ;; esac
+        case "$line" in *:*) : ;; *) printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2; return 1 ;; esac
         name="${line%%:*}"; entry_path="${line#*:}"
         name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
         entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"; entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
@@ -813,7 +878,7 @@ _ctx_parse_ctx_file() {
         [ -z "$ai_context" ] && { ai_context="$name"; first_name="$name"; } || ai_context="$ai_context+$name"
     done < "$ctx_file"
     if [ "${#names[@]}" -eq 0 ]; then printf 'ctx: error: .ctx file is empty or invalid: %s\n' "$ctx_file" >&2; return 1; fi
-    _ctx_parsed_dir="$dir_of_file"; _ctx_parsed_context="$ai_context"; _ctx_parsed_first_name="$first_name"; _ctx_parsed_home="$home_override"
+    _ctx_parsed_dir="$dir_of_file"; _ctx_parsed_context="$ai_context"; _ctx_parsed_first_name="$first_name"; _ctx_parsed_home="$home_override"; _ctx_parsed_noautoload="$noautoload"
     _ctx_parsed_names=("${names[@]}"); _ctx_parsed_dirs=("${dirs[@]}"); _ctx_parsed_pairs=("${pairs[@]}")
 }
 
@@ -949,10 +1014,12 @@ if [ -n "${ZSH_VERSION:-}" ]; then
         words_arr=("${words[@]}")
         if [ "${#words_arr[@]}" -eq 3 ] && [ "${words_arr[2]}" = "clear" ]; then
             compadd --all
+        elif [ "${#words_arr[@]}" -ge 3 ] && [ "${words_arr[2]}" = "load" ]; then
+            _files
         elif [ "${#words_arr[@]}" -le 2 ]; then
             local -a profiles
             profiles=("${(f)$(_ctx_list_subdirs "$root/profiles")}")
-            compadd current clear -- "${profiles[@]}"
+            compadd current clear load -- "${profiles[@]}"
         else
             local -a shared
             shared=("${(f)$(_ctx_list_subdirs "$root/profiles")}")
@@ -976,9 +1043,11 @@ elif [ -n "${BASH_VERSION:-}" ]; then
         cur="${COMP_WORDS[COMP_CWORD]}"
 
         if [ "$COMP_CWORD" -eq 1 ]; then
-            mapfile -t COMPREPLY < <(compgen -W "current clear $(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
+            mapfile -t COMPREPLY < <(compgen -W "current clear load $(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
         elif [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "clear" ]; then
             mapfile -t COMPREPLY < <(compgen -W "--all" -- "$cur")
+        elif [ "$COMP_CWORD" -ge 2 ] && [ "${COMP_WORDS[1]}" = "load" ]; then
+            mapfile -t COMPREPLY < <(compgen -f -- "$cur")
         else
             mapfile -t COMPREPLY < <(compgen -W "$(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
         fi
