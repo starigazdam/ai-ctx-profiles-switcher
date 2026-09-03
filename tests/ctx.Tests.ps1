@@ -826,9 +826,9 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:AI_CTX_PROFILES | Should -Be 'review'
 
         Set-Location $proj
-        Remove-Item Env:\\AI_CTX_PROFILES -ErrorAction SilentlyContinue
-        Remove-Item Env:\\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
-        Remove-Item Env:\\COPILOT_HOME -ErrorAction SilentlyContinue
+        Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
         $Script:CtxAutoLoadDir = $null
         Invoke-CtxAutoLoad
 
