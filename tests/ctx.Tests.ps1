@@ -788,4 +788,152 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
     }
 
+    It "noautoload flag: Import-CtxFile still loads a noautoload .ctx file" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-noautoload'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "noautoload`nreview:$reviewDir"
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Match 'profiles.review'
+    }
+
+    It "noautoload flag: Invoke-CtxAutoLoad skips a .ctx file with noautoload" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-noautoload-hook'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "noautoload`nreview:$reviewDir"
+
+        Set-Location $proj
+        Invoke-CtxAutoLoad
+
+        $env:AI_CTX_PROFILES | Should -BeNullOrEmpty
+        $Script:CtxAutoLoadDir | Should -BeNullOrEmpty
+    }
+
+    It "noautoload flag: case-insensitive (NOAUTOLOAD is accepted)" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-noautoload-upper'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "NOAUTOLOAD`nreview:$reviewDir"
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+
+        Set-Location $proj
+        Remove-Item Env:\\AI_CTX_PROFILES -ErrorAction SilentlyContinue
+        Remove-Item Env:\\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
+        Remove-Item Env:\\COPILOT_HOME -ErrorAction SilentlyContinue
+        $Script:CtxAutoLoadDir = $null
+        Invoke-CtxAutoLoad
+
+        $env:AI_CTX_PROFILES | Should -BeNullOrEmpty
+    }
+
+    It "noautoload flag: hook clears context when flag added after auto-load" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-noautoload-added-later'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        Set-Location $proj
+        Invoke-CtxAutoLoad
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $Script:CtxAutoLoadDir | Should -Be $proj
+
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "noautoload`nreview:$reviewDir"
+        Invoke-CtxAutoLoad
+
+        $env:AI_CTX_PROFILES | Should -BeNullOrEmpty
+        $Script:CtxAutoLoadDir | Should -BeNullOrEmpty
+    }
+
+    It "ctx load: loads a .ctx file via explicit path" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-ctx-load'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        ctx load (Join-Path $proj '.ctx')
+
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Match 'profiles.review'
+        $Script:CtxAutoLoadDir | Should -Be $proj
+    }
+
+    It "ctx load: loads a noautoload .ctx file that the hook would skip" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-ctx-load-noautoload'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "noautoload`nreview:$reviewDir"
+
+        ctx load (Join-Path $proj '.ctx')
+
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $Script:CtxAutoLoadDir | Should -Be $proj
+    }
+
+    It "ctx load: relative path resolves against current location" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-ctx-load-relative'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        Set-Location $proj
+        ctx load .ctx
+
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $Script:CtxAutoLoadDir | Should -Be $proj
+    }
+
+    It "ctx load: sets state so Clear-CtxContext -All cleans up artifacts" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-ctx-load-clear-all'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        ctx load (Join-Path $proj '.ctx')
+        $homeDir = $env:COPILOT_HOME
+        Test-Path -LiteralPath $homeDir -PathType Container | Should -BeTrue
+
+        Clear-CtxContext -All
+
+        Test-Path -LiteralPath $homeDir | Should -BeFalse
+    }
+
+    It "ctx load: errors when file not found" {
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        ctx load (Join-Path $Script:TestTmp 'nonexistent/.ctx')
+        $ErrorActionPreference = $previous
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'not found'
+    }
+
+    It "ctx load: errors when no path given" {
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        ctx load
+        $ErrorActionPreference = $previous
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'requires a path argument'
+    }
+
+    It "ctx load: bypasses noautoload but still validates the .ctx file" {
+        $proj = Join-Path $env:HOME 'project-ctx-load-invalid'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "noautoload`nbadline-no-colon"
+
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        ctx load (Join-Path $proj '.ctx')
+        $ErrorActionPreference = $previous
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'invalid .ctx line'
+    }
+
 }
