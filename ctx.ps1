@@ -73,6 +73,17 @@
     Leaving the directory tree (into a location with no .ctx file)
     automatically clears the context.
 
+    NOAUTOLOAD FLAG
+    ----------------
+    Add a bare "noautoload" line (no colon, case-insensitive) to the .ctx
+    file to prevent the directory-change hook from loading it automatically:
+
+        noautoload
+        review:C:\work\ai-config\profiles\review
+
+    The file remains valid and can be loaded explicitly at any time with
+    "ctx load <path-to-.ctx-file>" (see below).
+
     SKILL DISCOVERY
     ---------------
     COPILOT_CUSTOM_INSTRUCTIONS_DIRS does not make Copilot CLI discover
@@ -124,12 +135,14 @@ Usage:
                                Workspace files are removed only with the exact
                                generatedBy: "ctx" marker; unmarked, invalid,
                                and linked workspaces are preserved with a warning.
+  ctx load <file>             Explicitly load a .ctx file (bypasses noautoload)
   ctx --help | -h             Show this help message
 
 Examples:
   ctx review
   ctx coding azure
   ctx review dotnet security
+  ctx load C:\path\to\project\.ctx
 
 Environment:
   AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles\
@@ -326,6 +339,26 @@ function ctx {
         'clear' {
             $all = $Contexts.Count -gt 1 -and $Contexts[1] -eq '--all'
             return (Clear-CtxContext -All:$all)
+        }
+        'load' {
+            if ($Contexts.Count -lt 2 -or -not $Contexts[1]) {
+                Write-Error 'ctx: error: "ctx load" requires a path argument'
+                Write-Host 'Usage: ctx load <path-to-.ctx-file>'
+                return
+            }
+            $loadFile = $Contexts[1]
+            if (-not [System.IO.Path]::IsPathRooted($loadFile)) {
+                $loadFile = Join-Path (Get-Location).Path $loadFile
+            }
+            if (-not (Test-Path -LiteralPath $loadFile -PathType Leaf)) {
+                Write-Error "ctx: error: file not found: $loadFile"
+                return
+            }
+            $loadDir = Split-Path -Parent $loadFile
+            if (Import-CtxFile -CtxFile $loadFile) {
+                $Script:CtxAutoLoadDir = $loadDir
+            }
+            return
         }
     }
 
@@ -881,10 +914,11 @@ function Parse-CtxFile {
     # It validates all labels/targets before either caller changes state.
     param([string]$CtxFile)
     $dirOfFile = Split-Path -Parent $CtxFile
-    $names = @(); $dirs = @(); $seenLabels = @{}; $seenTargets = @{}; $homeOverride = $null
+    $names = @(); $dirs = @(); $seenLabels = @{}; $seenTargets = @{}; $homeOverride = $null; $noAutoLoad = $false
     foreach ($rawLine in Get-Content -LiteralPath $CtxFile) {
         $line = $rawLine.Trim()
         if (-not $line -or $line.StartsWith('#')) { continue }
+        if ($line -ieq 'noautoload') { $noAutoLoad = $true; continue }
         $sepIndex = $line.IndexOf(':')
         if ($sepIndex -lt 1) { throw "invalid .ctx line in $CtxFile (expected <name>:<path>): $line" }
         $name = $line.Substring(0, $sepIndex).Trim(); $path = $line.Substring($sepIndex + 1).Trim()
@@ -907,7 +941,7 @@ function Parse-CtxFile {
         $seenTargets[$canonical] = $name; $names += $name; $dirs += $resolvedPath
     }
     if ($names.Count -eq 0) { throw ".ctx file is empty or invalid: $CtxFile" }
-    return [PSCustomObject]@{ Dir = $dirOfFile; Names = @($names); Dirs = @($dirs); HomeOverride = $homeOverride; Context = ($names -join '+') }
+    return [PSCustomObject]@{ Dir = $dirOfFile; Names = @($names); Dirs = @($dirs); HomeOverride = $homeOverride; Context = ($names -join '+'); NoAutoLoad = $noAutoLoad }
 }
 
 function Import-CtxFile {
@@ -974,6 +1008,21 @@ function Test-CtxActivation {
     Write-Host "ctx check: FAIL ($failures)"; return $false
 }
 
+function Test-CtxFileHasNoAutoLoad {
+    # Returns $true when the given .ctx file contains a bare "noautoload"
+    # directive (case-insensitive). Deliberately independent of
+    # Parse-CtxFile (which fully validates the file and can throw) so the
+    # auto-load hook can always honor the flag even on an otherwise
+    # invalid .ctx file.
+    param([string]$CtxFile)
+    foreach ($rawLine in Get-Content -LiteralPath $CtxFile) {
+        if ($rawLine.Trim() -ieq 'noautoload') {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Invoke-CtxAutoLoad {
     if ($env:CTX_AUTO_LOAD -eq '0') {
         return
@@ -982,6 +1031,16 @@ function Invoke-CtxAutoLoad {
     $ctxFile = Find-CtxFile
     if ($ctxFile) {
         $dirOfFile = Split-Path -Parent $ctxFile
+        if (Test-CtxFileHasNoAutoLoad -CtxFile $ctxFile) {
+            # File explicitly opts out of auto-loading. If we previously had
+            # this file loaded (e.g. flag was added after loading), clear it
+            # now and forget the directory so we don't linger.
+            if ($Script:CtxAutoLoadDir -eq $dirOfFile) {
+                Clear-CtxContext
+                $Script:CtxAutoLoadDir = $null
+            }
+            return
+        }
         if ($Script:CtxAutoLoadDir -ne $dirOfFile) {
             if (Import-CtxFile -CtxFile $ctxFile) {
                 $Script:CtxAutoLoadDir = $dirOfFile
@@ -1041,9 +1100,22 @@ Register-ArgumentCompleter -CommandName ctx -ScriptBlock {
     $argIndex = $elements.Count - 1
 
     if ($argIndex -le 1) {
-        $candidates = @('current', 'clear') + (Get-CtxSubdirName (Join-Path $root 'profiles'))
+        $candidates = @('current', 'clear', 'load') + (Get-CtxSubdirName (Join-Path $root 'profiles'))
     } elseif ($argIndex -eq 2 -and $elements[1].Extent.Text -eq 'clear') {
         $candidates = @('--all')
+    } elseif ($argIndex -ge 2 -and $elements[1].Extent.Text -eq 'load') {
+        # File-system completion for ctx load — return matching paths.
+        $searchDir = if ($wordToComplete) { Split-Path -Parent $wordToComplete } else { (Get-Location).Path }
+        if (-not $searchDir) { $searchDir = (Get-Location).Path }
+        if (Test-Path -LiteralPath $searchDir -PathType Container) {
+            Get-ChildItem -LiteralPath $searchDir -Force |
+                Where-Object { $_.Name -like "$(Split-Path -Leaf $wordToComplete)*" } |
+                ForEach-Object {
+                    $full = $_.FullName
+                    [System.Management.Automation.CompletionResult]::new($full, $full, 'ParameterValue', $full)
+                }
+        }
+        return
     } else {
         $candidates = Get-CtxSubdirName (Join-Path $root 'profiles')
     }

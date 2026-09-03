@@ -134,6 +134,7 @@ ctx current                   # show the active profile/profiles/env vars
 ctx check                     # read-only audit against the nearest .ctx file
 ctx clear                     # unset AI_CTX_PROFILES / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
 ctx clear --all                 # remove the current context home and generated artifacts
+ctx load /path/to/.ctx          # explicitly load any .ctx file (bypasses noautoload)
 ctx --help                      # usage help
 ```
 
@@ -388,6 +389,34 @@ export CTX_AUTO_LOAD=0          # bash/zsh
 ```powershell
 $env:CTX_AUTO_LOAD = "0"        # PowerShell
 ```
+
+### Opting a single `.ctx` file out of auto-loading
+
+Add a bare `noautoload` line (case-insensitive) anywhere in the file:
+
+```
+noautoload
+review:/home/user/work/ai-config/profiles/review
+dotnet:/home/user/work/ai-config/profiles/dotnet
+```
+
+The directory-change hook silently skips this file — useful for shared
+repos where each engineer uses a different context, or when you want to
+gate activation on an explicit command. The file is otherwise fully valid
+and can be loaded on demand with:
+
+```sh
+ctx load /path/to/project/.ctx   # bash/zsh — absolute or relative path
+```
+```powershell
+ctx load C:\path\to\project\.ctx  # PowerShell
+```
+
+`ctx load` bypasses `noautoload` entirely: the flag only suppresses the
+automatic hook. After a manual load, `ctx clear --all` works as normal. If
+`noautoload` is added to a `.ctx` file *after* it was already auto-loaded,
+the hook clears the context and forgets the directory the next time your
+prompt renders in that tree.
 
 ## Showing the active context in your prompt (Oh My Posh)
 

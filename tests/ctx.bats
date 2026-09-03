@@ -1062,3 +1062,158 @@ EOF
     [ "$AI_CTX_PROFILES" = previous ]
     [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
 }
+
+
+# --- noautoload flag and ctx load command (issue #27) ----------------------
+
+@test "noautoload flag: _ctx_load_ctx_file still loads a noautoload .ctx file" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-noautoload"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+noautoload
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+
+    _ctx_load_ctx_file "$proj/.ctx"
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [[ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" == *"profiles/review"* ]]
+}
+
+@test "noautoload flag: auto-load hook skips a .ctx file with noautoload" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-noautoload-hook"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+noautoload
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+
+    cd "$proj"
+    _ctx_auto_load_hook
+    [ -z "${AI_CTX_PROFILES:-}" ]
+    [ -z "$_ctx_auto_load_dir" ]
+}
+
+@test "noautoload flag: case-insensitive (NOAUTOLOAD is accepted)" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-noautoload-upper"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+NOAUTOLOAD
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+
+    _ctx_load_ctx_file "$proj/.ctx"
+    [ "$AI_CTX_PROFILES" = "review" ]
+
+    cd "$proj"
+    unset AI_CTX_PROFILES COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME
+    _ctx_auto_load_dir=""
+    _ctx_auto_load_hook
+    [ -z "${AI_CTX_PROFILES:-}" ]
+}
+
+@test "noautoload flag: hook clears context when flag added after auto-load" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-noautoload-added-later"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+
+    cd "$proj"
+    _ctx_auto_load_hook
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [ "$_ctx_auto_load_dir" = "$proj" ]
+
+    cat > "$proj/.ctx" <<EOF
+noautoload
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+    _ctx_auto_load_hook
+    [ -z "${AI_CTX_PROFILES:-}" ]
+    [ -z "$_ctx_auto_load_dir" ]
+}
+
+@test "ctx load: loads a .ctx file via explicit path" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-ctx-load"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+
+    ctx load "$proj/.ctx"
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [[ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" == *"profiles/review"* ]]
+    [ "$_ctx_auto_load_dir" = "$proj" ]
+}
+
+@test "ctx load: loads a noautoload .ctx file that the hook would skip" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-ctx-load-noautoload"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+noautoload
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+
+    ctx load "$proj/.ctx"
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [ "$_ctx_auto_load_dir" = "$proj" ]
+}
+
+@test "ctx load: relative path resolves against PWD" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-ctx-load-relative"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+
+    cd "$proj"
+    ctx load .ctx
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [ "$_ctx_auto_load_dir" = "$proj" ]
+}
+
+@test "ctx load: sets state so ctx clear --all cleans up artifacts" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-ctx-load-clear-all"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+
+    ctx load "$proj/.ctx"
+    local home_dir="$COPILOT_HOME"
+    [ -d "$home_dir" ]
+
+    ctx clear --all
+    [ ! -d "$home_dir" ]
+}
+
+@test "ctx load: errors when file not found" {
+    run ctx load /nonexistent/.ctx
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found"* ]]
+}
+
+@test "ctx load: errors when no path given" {
+    run ctx load
+    [ "$status" -ne 0 ]
+}
+
+@test "ctx load: bypasses noautoload but still validates the .ctx file" {
+    local proj="$TEST_TMP/project-ctx-load-invalid"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+noautoload
+badline-no-colon
+EOF
+
+    run ctx load "$proj/.ctx"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"invalid .ctx line"* ]]
+}
