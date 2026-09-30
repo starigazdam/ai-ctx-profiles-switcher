@@ -1,0 +1,30 @@
+schema: spec-driven
+githubCopilot:
+  cloudAgent: false
+
+context: |
+  ctx is a portable context/profile switcher with parity-required Bash/zsh (ctx.sh) and PowerShell (ctx.ps1) implementations.
+  Two isolated test suites: tests/ctx.bats (bats-core) and tests/ctx.Tests.ps1 (Pester 5+). Both must stay in sync for any behavior change.
+  Never touch a developer's real GitHub Copilot state, COPILOT_HOME, or credentials in tests or specs — tests use synthetic/temp homes only.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

@@ -489,3 +489,15 @@ preinstalled on that image, so it exercises real `ctx.ps1` logic — just
 without the Windows-only symlink → junction → hardlink fallback ladder,
 which stays manual-verification-only since `ubuntu-latest` doesn't hit
 Windows-style symlink permission errors).
+
+## Change workflow (OpenSpec)
+
+This repo uses [OpenSpec](https://openspec.dev) as an optional, repo-local workflow for specifying and validating non-trivial changes before implementation. It is developer tooling only — not a runtime dependency of `ctx`.
+
+Specs and change proposals live under `openspec/`. GitHub Copilot CLI users get the workflow via skills installed under `.github/skills/openspec-*/` (invoke with `/openspec-propose`, `/openspec-apply-change`, etc.); IDE extensions (VS Code, JetBrains) use the command prompts under `.github/prompts/opsx-*.prompt.md` instead.
+
+To propose a change: run the `openspec-propose` skill (or `/openspec-propose` in Copilot CLI) with your idea. To apply an in-progress change: `openspec-apply-change`. To validate the repo's specs and changes: `openspec validate --all`.
+
+- [Setup guide](https://openspec.dev/docs/setup)
+- [Supported tools](https://openspec.dev/docs/supported-tools)
+- [CLI reference](https://openspec.dev/docs/cli)
