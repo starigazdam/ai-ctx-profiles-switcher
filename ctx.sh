@@ -323,7 +323,11 @@ _ctx_clear() {
             fi
         fi
 
-        if [ "$clear_mode" != "global-user" ]; then
+        if [ "$clear_mode" = "ephemeral-clean" ]; then
+            if [ -n "$prev_home" ]; then
+                printf 'ctx: retained ephemeral COPILOT_HOME (not deleted): %s — may contain Copilot auth/session/cache data; remove manually when no longer needed\n' "$prev_home"
+            fi
+        elif [ "$clear_mode" != "global-user" ]; then
             if [ -n "$prev_context" ]; then
                 local sanitized homes_root home_dir
                 if [ -n "$_ctx_auto_load_home_override" ]; then
@@ -444,8 +448,11 @@ ctx() {
             # Mode B: never set up or touch COPILOT_HOME at all.
             _ctx_skills_dirs_owned=1
             ;;
-        synthetic-home|ephemeral-clean)
+        synthetic-home)
             if ! _ctx_setup_copilot_home "$AI_CTX_PROFILES" "" "${resolved_dirs_manual[@]}"; then return 1; fi
+            ;;
+        ephemeral-clean)
+            if ! _ctx_setup_ephemeral_copilot_home; then return 1; fi
             ;;
     esac
     case "$mode" in
@@ -701,6 +708,25 @@ _ctx_reconcile_symlink() {
             return 1
         fi
     fi
+    return 0
+}
+
+_ctx_setup_ephemeral_copilot_home() {
+    # Mode C (ephemeral-clean): creates a brand-new, unique, empty
+    # COPILOT_HOME on every call via mktemp -d. Never reused, never
+    # looked up by name. No symlinks/copies to or from the real
+    # ~/.copilot, no reconciliation, no skills/ subfolder. Exports
+    # COPILOT_HOME only after successful creation.
+    local home_dir
+    home_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-ephemeral.XXXXXXXXXX" 2>/dev/null)" || {
+        printf 'ctx: error: could not create ephemeral COPILOT_HOME (mktemp failed)\n' >&2
+        return 1
+    }
+    if [ -L "$home_dir" ]; then
+        printf 'ctx: error: ephemeral COPILOT_HOME path is a symlink, refusing: %s\n' "$home_dir" >&2
+        return 1
+    fi
+    export COPILOT_HOME="$home_dir"
     return 0
 }
 
@@ -996,8 +1022,11 @@ _ctx_load_ctx_file() {
             # Mode B: never set up or touch COPILOT_HOME at all.
             _ctx_skills_dirs_owned=1
             ;;
-        synthetic-home|ephemeral-clean)
+        synthetic-home)
             _ctx_setup_copilot_home "$_ctx_parsed_context" "$_ctx_parsed_home" "${_ctx_parsed_dirs[@]}" || return 1
+            ;;
+        ephemeral-clean)
+            _ctx_setup_ephemeral_copilot_home || return 1
             ;;
     esac
     case "$mode" in

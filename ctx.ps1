@@ -280,7 +280,11 @@ function Clear-CtxContext {
             }
         }
 
-        if ($clearMode -cne 'global-user') {
+        if ($clearMode -ceq 'ephemeral-clean') {
+            if ($prevHome) {
+                Write-Host "ctx: retained ephemeral COPILOT_HOME (not deleted): $prevHome — may contain Copilot auth/session/cache data; remove manually when no longer needed"
+            }
+        } elseif ($clearMode -cne 'global-user') {
             if ($prevContext) {
                 if ($Script:CtxAutoLoadHomeOverride) {
                     $homeDir = $Script:CtxAutoLoadHomeOverride
@@ -418,6 +422,8 @@ function ctx {
     if ($mode -ceq 'global-user') {
         # Mode B: never set up or touch COPILOT_HOME at all.
         $Script:CtxSkillsDirsOwned = $true
+    } elseif ($mode -ceq 'ephemeral-clean') {
+        try { New-CtxEphemeralCopilotHome } catch { Write-Error "ctx: error: $_"; return }
     } else {
         Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirsList
     }
@@ -761,6 +767,23 @@ function Resolve-CtxLink {
     return $true
 }
 
+function New-CtxEphemeralCopilotHome {
+    # Mode C (ephemeral-clean): creates a brand-new, unique, empty
+    # COPILOT_HOME on every call via GetTempPath() + a GUID suffix (no
+    # new dependency). Never reused, never looked up by name. No
+    # symlinks/copies to or from the real Copilot home, no
+    # reconciliation, no skills subfolder. Sets $env:COPILOT_HOME only
+    # after successful creation.
+    $base = [System.IO.Path]::GetTempPath()
+    $name = 'ctx-ephemeral-' + [System.Guid]::NewGuid().ToString('N')
+    $homeDir = Join-Path $base $name
+    if (Test-Path -LiteralPath $homeDir) {
+        throw "ctx: error: ephemeral COPILOT_HOME candidate already exists, refusing: $homeDir"
+    }
+    New-Item -ItemType Directory -Path $homeDir -Force -ErrorAction Stop | Out-Null
+    $env:COPILOT_HOME = $homeDir
+}
+
 function Set-CtxCopilotHome {
     # Computes/reconciles the per-context COPILOT_HOME directory and
     # exports $env:COPILOT_HOME, mirroring _ctx_setup_copilot_home in
@@ -1048,6 +1071,8 @@ function Import-CtxFile {
     if ($mode -ceq 'global-user') {
         # Mode B: never set up or touch COPILOT_HOME at all.
         $Script:CtxSkillsDirsOwned = $true
+    } elseif ($mode -ceq 'ephemeral-clean') {
+        try { New-CtxEphemeralCopilotHome } catch { Write-Error "ctx: error: $_"; return $false }
     } else {
         Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride
     }

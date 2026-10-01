@@ -1126,4 +1126,50 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_SKILLS_DIRS | Should -Be 'my-own-value'
     }
 
+    It 'Mode C: every activation gets a fresh unique ephemeral home; clear never deletes' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+
+        # (a) reactivating the same profile (no clear between) yields a
+        # different path, and BOTH ephemeral dirs stay on disk - Mode C never
+        # deletes
+        ctx review
+        $home1 = $env:COPILOT_HOME
+        ctx review
+        $home2 = $env:COPILOT_HOME
+        $home1 | Should -Not -BeNullOrEmpty
+        $home2 | Should -Not -BeNullOrEmpty
+        $home1 | Should -Not -Be $home2
+        Test-Path -LiteralPath $home1 -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath $home2 -PathType Container | Should -BeTrue
+
+        # (b) plain ctx clear unsets COPILOT_HOME but leaves home2 + marker on disk
+        New-Item -Path (Join-Path $home2 'marker') -ItemType File -Force | Out-Null
+        ctx clear | Out-Null
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $home2 'marker') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath $home2 -PathType Container | Should -BeTrue
+
+        # (c) ctx clear --all reports the retained path, still never deletes,
+        # and the common workspace/settings cleanup still runs
+        $proj = Join-Path $Script:TestTmp 'project-c-clear-all'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Should -BeTrue
+        $home3 = $env:COPILOT_HOME
+        New-Item -Path (Join-Path $home3 'marker') -ItemType File -Force | Out-Null
+        $workspace = Join-Path $proj 'project-c-clear-all.code-workspace'
+        Test-Path -LiteralPath $workspace -PathType Leaf | Should -BeTrue
+        $clearAllOutput = (Clear-CtxContext -All 6>&1 | Out-String)
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $home3 'marker') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath $home3 -PathType Container | Should -BeTrue
+        $clearAllOutput | Should -Match 'retained'
+        $clearAllOutput | Should -Match 'not deleted'
+        $clearAllOutput | Should -Match ([regex]::Escape($home3))
+        Test-Path -LiteralPath $workspace -PathType Leaf | Should -BeFalse
+    }
+
 }

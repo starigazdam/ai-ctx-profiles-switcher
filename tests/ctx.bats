@@ -1420,3 +1420,55 @@ EOF
     ctx review
     [ "$COPILOT_SKILLS_DIRS" = my-own-value ]
 }
+
+# --- Group 4: Mode C (ephemeral-clean) lifecycle ----------------------------
+
+@test "Mode C: every activation gets a fresh unique ephemeral home; clear never deletes" {
+    _make_profile review review-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+
+    # (a) reactivating the same profile (no clear between) yields a different
+    # path, and BOTH ephemeral dirs stay on disk - Mode C never deletes
+    ctx review
+    local home1="$COPILOT_HOME"
+    ctx review
+    local home2="$COPILOT_HOME"
+    [ -n "$home1" ]
+    [ -n "$home2" ]
+    [ "$home1" != "$home2" ]
+    [ -d "$home1" ]
+    [ -d "$home2" ]
+
+    # (b) plain ctx clear unsets COPILOT_HOME but leaves home2 + marker on disk
+    touch "$home2/marker"
+    ctx clear >"$TEST_TMP/c-clear.out" 2>&1
+    [ -z "${COPILOT_HOME:-}" ]
+    [ -f "$home2/marker" ]
+    [ -d "$home2" ]
+
+    # (c) ctx clear --all reports the retained path, still never deletes, and
+    # the common workspace/settings cleanup still runs
+    local proj="$TEST_TMP/project-c-clear-all"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx"
+    local home3="$COPILOT_HOME"
+    touch "$home3/marker"
+    local workspace="$proj/project-c-clear-all.code-workspace"
+    [ -f "$workspace" ]
+    ctx clear --all >"$TEST_TMP/c-clear-all.out" 2>&1
+    local clear_all_status=$?
+    local clear_all_out
+    clear_all_out="$(<"$TEST_TMP/c-clear-all.out")"
+    [ "$clear_all_status" -eq 0 ]
+    [ -z "${COPILOT_HOME:-}" ]
+    [ -f "$home3/marker" ]
+    [ -d "$home3" ]
+    [[ "$clear_all_out" == *"retained"* ]]
+    [[ "$clear_all_out" == *"not deleted"* ]]
+    [[ "$clear_all_out" == *"$home3"* ]]
+    [ ! -e "$workspace" ]
+}

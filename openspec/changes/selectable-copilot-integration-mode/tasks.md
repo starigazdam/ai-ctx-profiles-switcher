@@ -32,11 +32,11 @@
 
 ## 4. Mode C Lifecycle
 
-- [ ] 4.1 Implement Mode C ephemeral-home creation in `ctx.sh` via `mktemp -d`: a fresh unique temp home on every activation (never reused or looked up by name), reject colliding paths and existing symlinks/junctions, export `COPILOT_HOME` only after successful creation, create no symlinks/copies into or out of real `~/.copilot`, no reconciliation, and leave the previous context and all files untouched on failure. Verify: `bats tests/ctx.bats` passes and a manual re-activation yields a different path.
-- [ ] 4.2 Implement Mode C cleanup semantics in `ctx.sh`: `ctx clear`/`ctx clear --all` unset `COPILOT_HOME` but never delete the ephemeral directory or its contents; report the retained path and the user's cleanup responsibility when leaving/replacing; no sweeper, trap, or background cleanup. Verify: `bats tests/ctx.bats` passes and a manual `ctx clear` leaves the directory on disk.
-- [ ] 4.3 Mirror 4.1 and 4.2 in `ctx.ps1` using `[System.IO.Path]::GetTempPath()` plus a GUID/random suffix, with no new dependency. Verify: `Invoke-Pester tests/ctx.Tests.ps1` passes with the new Mode C cases.
-- [ ] 4.4 Add bats case: Mode C uniqueness across repeated activations and retained-content-on-clear — each activation gets a different path and the directory survives `ctx clear`/`clear --all`. Verify: `bats tests/ctx.bats`.
-- [ ] 4.5 Mirror 4.4 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 4.1 Implement Mode C ephemeral-home creation in `ctx.sh` via `mktemp -d`: a fresh unique temp home on every activation (never reused or looked up by name), reject colliding paths and existing symlinks/junctions, export `COPILOT_HOME` only after successful creation, create no symlinks/copies into or out of real `~/.copilot`, no reconciliation, and leave the previous context and all files untouched on failure. Verify: `bats tests/ctx.bats` passes and a manual re-activation yields a different path.
+- [x] 4.2 Implement Mode C cleanup semantics in `ctx.sh`: `ctx clear`/`ctx clear --all` unset `COPILOT_HOME` but never delete the ephemeral directory or its contents; report the retained path and the user's cleanup responsibility when leaving/replacing; no sweeper, trap, or background cleanup. Verify: `bats tests/ctx.bats` passes and a manual `ctx clear` leaves the directory on disk.
+- [x] 4.3 Mirror 4.1 and 4.2 in `ctx.ps1` using `[System.IO.Path]::GetTempPath()` plus a GUID/random suffix, with no new dependency. Verify: `Invoke-Pester tests/ctx.Tests.ps1` passes with the new Mode C cases.
+- [x] 4.4 Add bats case: Mode C uniqueness across repeated activations and retained-content-on-clear — each activation gets a different path and the directory survives `ctx clear`/`clear --all`. Verify: `bats tests/ctx.bats`.
+- [x] 4.5 Mirror 4.4 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
 
 ## 5. Mode-Aware clear/current/check
 
