@@ -484,6 +484,15 @@ function ctx {
         $oldEphemeralHome = $Script:CtxActiveHomeValue
     }
 
+    if ($mode -ceq 'synthetic-home') {
+        # Mode A: preflight home creation and link reconciliation before any
+        # state change so a failure leaves the previous context, COPILOT_HOME,
+        # and all files untouched.
+        if (-not (Set-CtxCopilotHome -ContextName $newContext -ResolvedDirs $dirsList)) {
+            return $false
+        }
+    }
+
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
     $env:AI_CTX_PROFILES = $newContext
 
@@ -492,7 +501,8 @@ function ctx {
     } elseif ($mode -ceq 'ephemeral-clean') {
         $env:COPILOT_HOME = $newHome
     } else {
-        Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirsList
+        # Mode A: COPILOT_HOME was preflighted above before any state change;
+        # no further setup needed here.
     }
 
     if ($mode -ceq 'global-user' -or $mode -ceq 'ephemeral-clean') {
@@ -513,6 +523,7 @@ function ctx {
     }
 
     Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv -DirsCsv $dirsCsv
+    return $true
 }
 
 # --- Auto-loading via .ctx files ------------------------------------------
@@ -1016,7 +1027,7 @@ function Set-CtxCopilotHome {
             New-Item -ItemType Directory -Path (Join-Path $homeDir 'skills') -Force -ErrorAction Stop | Out-Null
         } catch {
             Write-Warning "ctx: warning: could not create $homeDir; leaving COPILOT_HOME unset"
-            return
+            return $false
         }
     }
     if (-not (Test-Path -LiteralPath $copilotDir)) {
@@ -1037,7 +1048,7 @@ function Set-CtxCopilotHome {
 
     if (-not $ok) {
         Write-Warning "ctx: warning: one or more COPILOT_HOME links could not be created; leaving COPILOT_HOME unset for this session"
-        return
+        return $false
     }
 
     # Reconcile skills/: desired (name -> target) pairs come from each
@@ -1112,6 +1123,7 @@ function Set-CtxCopilotHome {
     }
 
     $env:COPILOT_HOME = $homeDir
+    return $true
 }
 
 function Update-CtxSkillDirectories {
@@ -1317,6 +1329,14 @@ function Import-CtxFile {
         # printed only after the replacement below actually succeeds.
         $oldEphemeralHome = $Script:CtxActiveHomeValue
     }
+    if ($mode -ceq 'synthetic-home') {
+        # Mode A: preflight home creation and link reconciliation before any
+        # state change (including the workspace-file write) so a failure
+        # leaves the previous context, COPILOT_HOME, and all files untouched.
+        if (-not (Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride)) {
+            return $false
+        }
+    }
     Update-CtxWorkspaceFile -BaseDir $parsed.Dir -Names $parsed.Names -Dirs $parsed.Dirs
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
     $env:AI_CTX_PROFILES = $parsed.Context
@@ -1325,7 +1345,8 @@ function Import-CtxFile {
     } elseif ($mode -ceq 'ephemeral-clean') {
         $env:COPILOT_HOME = $newHome
     } else {
-        Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride
+        # Mode A: COPILOT_HOME was preflighted above before any state change;
+        # no further setup needed here.
     }
     if ($mode -ceq 'global-user' -or $mode -ceq 'ephemeral-clean') {
         # B/C: export the freshly computed value; fully replaced each

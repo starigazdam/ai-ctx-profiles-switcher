@@ -575,7 +575,14 @@ only the first context name plus a `(+2)` suffix for the rest (e.g.
   composition.
 - Both implementations validate that the AI config root and every profile
   directory exist before exporting anything, and leave any
-  previously active context untouched if validation fails.
+  previously active context untouched if validation fails. A `COPILOT_HOME`
+  setup failure during Mode A (synthetic-home) activation — home creation or
+  shared-link reconciliation — is equally atomic: the previous context,
+  `COPILOT_HOME`, and (for `.ctx` auto-load) the `.code-workspace` file are
+  left untouched, and the command/function reports the failure: a non-zero
+  exit status from `ctx.sh`, and a Boolean from `ctx.ps1` (`$false` on
+  failure, `$true` on success) for both manual `ctx <profile>...` and `.ctx`
+  auto-load activation.
 - `COPILOT_HOME` is managed automatically by `ctx` whenever a context is
   active (see [Skill discovery](#skill-discovery)); it is exported/unset
   alongside `AI_CTX_PROFILES` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and shown

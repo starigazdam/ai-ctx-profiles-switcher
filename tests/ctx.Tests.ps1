@@ -244,6 +244,156 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_HOME | Should -BeNullOrEmpty
     }
 
+    It 'manual ctx activation leaves state untouched when link reconciliation fails' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+        ctx review | Out-Null
+
+        $prevProfiles = $env:AI_CTX_PROFILES
+        $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $prevHome = $env:COPILOT_HOME
+        $prevMode = $Script:CtxActiveMode
+        $prevContext = $Script:CtxActiveContext
+        $prevCustomDirs = $Script:CtxActiveCustomDirs
+        $prevHomeWasSet = $Script:CtxActiveHomeWasSet
+        $prevHomeValue = $Script:CtxActiveHomeValue
+
+        Mock Resolve-CtxLink { return $false }
+
+        $result = ctx test -WarningVariable warnings -WarningAction SilentlyContinue
+
+        # The manual ctx function reports the failure as exactly $false and
+        # returns before completing the activation, so the existing
+        # activation's env vars and session record are left exactly as they
+        # were.
+        $result | Should -BeExactly $false
+        $warnings -join "`n" | Should -Match 'warning'
+        $env:AI_CTX_PROFILES | Should -Be $prevProfiles
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        $env:COPILOT_HOME | Should -Be $prevHome
+        $Script:CtxActiveMode | Should -Be $prevMode
+        $Script:CtxActiveContext | Should -Be $prevContext
+        $Script:CtxActiveCustomDirs | Should -Be $prevCustomDirs
+        $Script:CtxActiveHomeWasSet | Should -Be $prevHomeWasSet
+        $Script:CtxActiveHomeValue | Should -Be $prevHomeValue
+    }
+
+    It '.ctx auto-load leaves state and workspace untouched when link reconciliation fails' {
+        $proj = Join-Path $env:HOME 'project-link-fail'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $testDir = New-CtxTestProfile -Name 'test' -Skill 'test-skill'
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+
+        $workspace = Join-Path $proj 'project-link-fail.code-workspace'
+        $wsBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspace))
+
+        $prevProfiles = $env:AI_CTX_PROFILES
+        $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $prevHome = $env:COPILOT_HOME
+        $prevMode = $Script:CtxActiveMode
+        $prevContext = $Script:CtxActiveContext
+        $prevCustomDirs = $Script:CtxActiveCustomDirs
+        $prevHomeWasSet = $Script:CtxActiveHomeWasSet
+        $prevHomeValue = $Script:CtxActiveHomeValue
+
+        Set-Content -LiteralPath $ctxFile -Value "test:$testDir"
+        $script:linkWarnings = @()
+        Mock Resolve-CtxLink { return $false }
+        Mock Write-Warning { $script:linkWarnings += $Message }
+
+        $result = Import-CtxFile -CtxFile $ctxFile
+
+        $result | Should -BeFalse
+        $script:linkWarnings -join "`n" | Should -Match 'warning'
+        $env:AI_CTX_PROFILES | Should -Be $prevProfiles
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        $env:COPILOT_HOME | Should -Be $prevHome
+        $Script:CtxActiveMode | Should -Be $prevMode
+        $Script:CtxActiveContext | Should -Be $prevContext
+        $Script:CtxActiveCustomDirs | Should -Be $prevCustomDirs
+        $Script:CtxActiveHomeWasSet | Should -Be $prevHomeWasSet
+        $Script:CtxActiveHomeValue | Should -Be $prevHomeValue
+        $wsAfter = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspace))
+        $wsAfter | Should -Be $wsBefore
+    }
+
+    It 'manual ctx activation leaves state untouched when COPILOT_HOME creation fails' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+        ctx review | Out-Null
+
+        $prevProfiles = $env:AI_CTX_PROFILES
+        $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $prevHome = $env:COPILOT_HOME
+        $prevMode = $Script:CtxActiveMode
+        $prevContext = $Script:CtxActiveContext
+        $prevCustomDirs = $Script:CtxActiveCustomDirs
+        $prevHomeWasSet = $Script:CtxActiveHomeWasSet
+        $prevHomeValue = $Script:CtxActiveHomeValue
+
+        $skillsPath = Join-Path (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'test') 'skills'
+        Mock New-Item { throw 'boom' } -ParameterFilter { $ItemType -eq 'Directory' -and $Path -eq $skillsPath }
+
+        $result = ctx test -WarningVariable warnings -WarningAction SilentlyContinue
+
+        $result | Should -BeExactly $false
+        $warnings -join "`n" | Should -Match 'warning'
+        $env:AI_CTX_PROFILES | Should -Be $prevProfiles
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        $env:COPILOT_HOME | Should -Be $prevHome
+        $Script:CtxActiveMode | Should -Be $prevMode
+        $Script:CtxActiveContext | Should -Be $prevContext
+        $Script:CtxActiveCustomDirs | Should -Be $prevCustomDirs
+        $Script:CtxActiveHomeWasSet | Should -Be $prevHomeWasSet
+        $Script:CtxActiveHomeValue | Should -Be $prevHomeValue
+    }
+
+    It '.ctx auto-load leaves state and workspace untouched when COPILOT_HOME creation fails' {
+        $proj = Join-Path $env:HOME 'project-mkdir-fail'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $testDir = New-CtxTestProfile -Name 'test' -Skill 'test-skill'
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+
+        $workspace = Join-Path $proj 'project-mkdir-fail.code-workspace'
+        $wsBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspace))
+
+        $prevProfiles = $env:AI_CTX_PROFILES
+        $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $prevHome = $env:COPILOT_HOME
+        $prevMode = $Script:CtxActiveMode
+        $prevContext = $Script:CtxActiveContext
+        $prevCustomDirs = $Script:CtxActiveCustomDirs
+        $prevHomeWasSet = $Script:CtxActiveHomeWasSet
+        $prevHomeValue = $Script:CtxActiveHomeValue
+
+        Set-Content -LiteralPath $ctxFile -Value "test:$testDir"
+        $skillsPath = Join-Path (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'test') 'skills'
+        $script:mkdirWarnings = @()
+        Mock New-Item { throw 'boom' } -ParameterFilter { $ItemType -eq 'Directory' -and $Path -eq $skillsPath }
+        Mock Write-Warning { $script:mkdirWarnings += $Message }
+
+        $result = Import-CtxFile -CtxFile $ctxFile
+
+        $result | Should -BeFalse
+        $script:mkdirWarnings -join "`n" | Should -Match 'warning'
+        $env:AI_CTX_PROFILES | Should -Be $prevProfiles
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        $env:COPILOT_HOME | Should -Be $prevHome
+        $Script:CtxActiveMode | Should -Be $prevMode
+        $Script:CtxActiveContext | Should -Be $prevContext
+        $Script:CtxActiveCustomDirs | Should -Be $prevCustomDirs
+        $Script:CtxActiveHomeWasSet | Should -Be $prevHomeWasSet
+        $Script:CtxActiveHomeValue | Should -Be $prevHomeValue
+        $wsAfter = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspace))
+        $wsAfter | Should -Be $wsBefore
+    }
+
     It 'Test 11: test-profile-skill SKILL.md has well-formed frontmatter' {
         $repoRoot = Split-Path -Parent $Script:CtxSrc
         $skillMd = Join-Path $repoRoot 'examples/ai-profiles/test/.github/skills/test-profile-skill/SKILL.md'

@@ -550,6 +550,12 @@ ctx() {
         # failure leaves the previous context and all files untouched.
         if ! new_home="$(_ctx_create_ephemeral_copilot_home)"; then return 1; fi
     fi
+    if [ "$mode" = "synthetic-home" ]; then
+        # Mode A: preflight home creation and link reconciliation before any
+        # state change so a failure leaves the previous context, COPILOT_HOME,
+        # and all files untouched.
+        if ! _ctx_setup_copilot_home "$new_context" "" "${resolved_dirs_manual[@]}"; then return 1; fi
+    fi
     if [ "$(_ctx_active_record_mode)" = "ephemeral-clean" ]; then
         # Remember the replaced Mode C home so its retained-path notice can be
         # printed only after the replacement below actually succeeds.
@@ -561,7 +567,8 @@ ctx() {
             # Mode B: never set up or touch COPILOT_HOME at all.
             ;;
         synthetic-home)
-            if ! _ctx_setup_copilot_home "$new_context" "" "${resolved_dirs_manual[@]}"; then return 1; fi
+            # Mode A: COPILOT_HOME was preflighted above before any state
+            # change; no further setup needed here.
             ;;
         ephemeral-clean)
             export COPILOT_HOME="$new_home"
@@ -1309,6 +1316,12 @@ _ctx_load_ctx_file() {
         # and all files untouched.
         if ! new_home="$(_ctx_create_ephemeral_copilot_home)"; then return 1; fi
     fi
+    if [ "$mode" = "synthetic-home" ]; then
+        # Mode A: preflight home creation and link reconciliation before any
+        # state change (including the workspace-file write) so a failure
+        # leaves the previous context, COPILOT_HOME, and all files untouched.
+        if ! _ctx_setup_copilot_home "$_ctx_parsed_context" "$_ctx_parsed_home" "${_ctx_parsed_dirs[@]}"; then return 1; fi
+    fi
     if [ "$(_ctx_active_record_mode)" = "ephemeral-clean" ]; then
         # Remember the replaced Mode C home so its retained-path notice can be
         # printed only after the replacement below actually succeeds.
@@ -1321,7 +1334,8 @@ _ctx_load_ctx_file() {
             # Mode B: never set up or touch COPILOT_HOME at all.
             ;;
         synthetic-home)
-            _ctx_setup_copilot_home "$_ctx_parsed_context" "$_ctx_parsed_home" "${_ctx_parsed_dirs[@]}" || return 1
+            # Mode A: COPILOT_HOME was preflighted above before any state
+            # change; no further setup needed here.
             ;;
         ephemeral-clean)
             export COPILOT_HOME="$new_home"
