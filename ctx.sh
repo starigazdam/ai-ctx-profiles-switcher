@@ -977,6 +977,7 @@ EOF
     # on Windows), so two source dirs contributing "foo" and "Foo" collide
     # and the whole colliding group is skipped (issue #40).
     local -A desired_skills=() desired_skill_names=() collided_skills=() collided_contribs=()
+    local -a desired_skill_order=() collided_skill_order=()
     local rd skill_dir sname lcname
     for rd in "${resolved_dirs[@]}"; do
         skill_dir="$rd/.github/skills"
@@ -989,22 +990,22 @@ EOF
                 collided_contribs[$lcname]="${collided_contribs[$lcname]}, $rd"
             elif [ -n "${desired_skills[$lcname]+set}" ]; then
                 collided_skills[$lcname]=1
+                collided_skill_order+=("$lcname")
                 collided_contribs[$lcname]="${collided_contribs[$lcname]}, $rd"
                 unset "desired_skills[$lcname]"
             else
                 desired_skills[$lcname]="${s%/}"
                 desired_skill_names[$lcname]="$sname"
+                desired_skill_order+=("$lcname")
                 collided_contribs[$lcname]="$rd"
             fi
         done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
     done
 
-    local sorted_skill_keys
-    sorted_skill_keys="$(printf '%s\n' "${!collided_skills[@]}" | sort)"
-    while IFS= read -r cname; do
-        [ -n "$cname" ] || continue
+    local cname
+    for cname in "${collided_skill_order[@]}"; do
         printf 'ctx: warning: skill name collision "%s" from: %s; skipping all of them\n' "$cname" "${collided_contribs[$cname]}" >&2
-    done <<< "$sorted_skill_keys"
+    done
 
     # Remove stale skill symlinks no longer in desired set (a colliding
     # group is skipped, so any stale link of theirs is removed too).
@@ -1022,11 +1023,11 @@ EOF
     fi
 
     # Create/repair desired skill symlinks (idempotent), removing any
-    # pre-existing entry that matches case-insensitively first.
+    # pre-existing entry that matches case-insensitively first. Names that
+    # became a collision are no longer desired and are skipped.
     local name on_disk target link existing2
-    sorted_skill_keys="$(printf '%s\n' "${!desired_skills[@]}" | sort)"
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
+    for name in "${desired_skill_order[@]}"; do
+        [ -n "${desired_skills[$name]+set}" ] || continue
         on_disk="${desired_skill_names[$name]}"
         target="${desired_skills[$name]}"
         link="$home_dir/skills/$on_disk"
@@ -1041,7 +1042,7 @@ EOF
         if ! ln -s "$target" "$link" 2>/dev/null; then
             printf 'ctx: warning: could not create skill symlink %s -> %s\n' "$link" "$target" >&2
         fi
-    done <<< "$sorted_skill_keys"
+    done
 
     export COPILOT_HOME="$home_dir"
     return 0
@@ -1454,7 +1455,7 @@ EOF
             done <<EOF
 $(_ctx_copilot_home_shared_dirs)
 EOF
-            local -A counts=() first_target=() contributors=() actual=()
+            local -A seen=() collided=() first_target=() contributors=() actual=()
             local -a all_names=() actual_names=()
             local rd skill_dir s skill_name lcname
             for rd in "${dirs[@]}"; do
@@ -1463,11 +1464,13 @@ EOF
                 while IFS= read -r s; do
                     skill_name="$(basename "$s")"
                     lcname="$(_ctx_lowercase "$skill_name")"
-                    if [ -n "${counts[$lcname]+set}" ]; then
-                        counts[$lcname]=$((counts[$lcname]+1))
+                    if [ -n "${collided[$lcname]+set}" ]; then
+                        contributors[$lcname]="${contributors[$lcname]}, $rd"
+                    elif [ -n "${seen[$lcname]+set}" ]; then
+                        collided[$lcname]=1
                         contributors[$lcname]="${contributors[$lcname]}, $rd"
                     else
-                        counts[$lcname]=1
+                        seen[$lcname]=1
                         first_target[$lcname]="${s%/}"
                         contributors[$lcname]="$rd"
                         all_names+=("$lcname")
@@ -1483,7 +1486,7 @@ EOF
             sorted_skills="$(printf '%s\n' "${all_names[@]}" | sort)"
             while IFS= read -r lcname; do
                 [ -n "$lcname" ] || continue
-                if [ "${counts[$lcname]}" -ge 2 ]; then
+                if [ -n "${collided[$lcname]+set}" ]; then
                     printf 'CHECK FAIL skill:%s: name collision between %s\n' "$lcname" "${contributors[$lcname]}"
                     failures=$((failures+1))
                 elif [ "${actual[$lcname]:-}" = "${first_target[$lcname]}" ]; then
@@ -1497,7 +1500,7 @@ EOF
             while IFS= read -r skill_name; do
                 [ -n "$skill_name" ] || continue
                 lcname="$(_ctx_lowercase "$skill_name")"
-                [ -n "${counts[$lcname]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }
+                [ -n "${seen[$lcname]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }
             done <<< "$sorted_skills"
             ;;
         *)
