@@ -270,30 +270,40 @@ _ctx_clear() {
     # (which may be stale). With no matching record, home ownership is
     # unknown: ctx must never guess a mode from the selector or from the home
     # path, so COPILOT_HOME is left untouched and no home is deleted. Mode B
-    # never touches COPILOT_HOME; Mode C never deletes the ephemeral home.
+    # never touches COPILOT_HOME; Mode C never deletes the ephemeral home and
+    # handles a drifted/replaced COPILOT_HOME separately below.
     local clear_mode=""
-    if _ctx_active_record_matches; then
-        clear_mode="$_ctx_active_mode"
+    if clear_mode="$(_ctx_active_record_mode)"; then
+        : # recorded mode found
     fi
     # Capture COPILOT_HOME only where it is needed: the Mode A deletion safety
     # check (before the variable is unset below). Mode B clear and Mode C
-    # clear never read it - Mode C uses the recorded ephemeral path and Mode B
-    # leaves the variable untouched.
+    # clear never read it for ownership - Mode C uses the recorded ephemeral
+    # path and Mode B leaves the variable untouched.
     local prev_home=""
     if [ "$clear_mode" = "synthetic-home" ]; then
         prev_home="${COPILOT_HOME:-}"
     fi
     unset AI_CTX_PROFILES
     unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-    if [ "$clear_mode" = "synthetic-home" ] || [ "$clear_mode" = "ephemeral-clean" ]; then
-        unset COPILOT_HOME
-    fi
-    # Only unset COPILOT_SKILLS_DIRS when ctx itself set it this session;
-    # a user's own value is left alone.
-    if [ "$_ctx_skills_dirs_owned" -eq 1 ]; then
-        unset COPILOT_SKILLS_DIRS
-        _ctx_skills_dirs_owned=0
-    fi
+    case "$clear_mode" in
+        synthetic-home)
+            unset COPILOT_HOME
+            ;;
+        ephemeral-clean)
+            # Mode C: unset COPILOT_HOME only when it still exactly equals the
+            # recorded ephemeral path; a user's replacement value is preserved.
+            if [ -n "${COPILOT_HOME+x}" ] && [ "$COPILOT_HOME" = "$_ctx_active_home_value" ]; then
+                unset COPILOT_HOME
+            fi
+            ;;
+        *)
+            # Mode B and unknown: never touch COPILOT_HOME.
+            ;;
+    esac
+    # Unset COPILOT_SKILLS_DIRS only when the current value still matches what
+    # ctx established this session; a user's own or later value is left alone.
+    _ctx_unset_owned_skills_dirs
     # No matching activation record: report a present COPILOT_HOME as unknown
     # rather than attributing it to a mode or guessing a deletion target. On
     # the unknown path COPILOT_HOME is still set, so read it directly.
@@ -301,9 +311,16 @@ _ctx_clear() {
         printf 'ctx: warning: no matching activation record; COPILOT_HOME is unowned (unknown), left as-is: %s\n' "${COPILOT_HOME:-}" >&2
     fi
     # The Mode C retained-path notice prints for BOTH plain clear and
-    # clear --all, before the active record is cleared.
-    if [ "$clear_mode" = "ephemeral-clean" ] && [ -n "$_ctx_active_home_value" ]; then
-        _ctx_report_retained_ephemeral_home "$_ctx_active_home_value"
+    # clear --all, before the active record is cleared. A COPILOT_HOME that
+    # no longer equals the recorded ephemeral path is preserved and reported
+    # as changed/unowned.
+    if [ "$clear_mode" = "ephemeral-clean" ]; then
+        if [ -n "$_ctx_active_home_value" ]; then
+            _ctx_report_retained_ephemeral_home "$_ctx_active_home_value"
+        fi
+        if [ -n "${COPILOT_HOME+x}" ] && [ "$COPILOT_HOME" != "$_ctx_active_home_value" ]; then
+            printf 'ctx: warning: COPILOT_HOME has changed from the recorded ephemeral path (unowned, unknown), left as-is: %s\n' "${COPILOT_HOME:-}" >&2
+        fi
     fi
 
     if [ "${1:-}" = "--all" ]; then
@@ -476,9 +493,13 @@ ctx() {
     done
     [ "${#context_names[@]}" -gt 0 ] || return 1
     profile_name="${context_names[0]}"
-    # COPILOT_SKILLS_DIRS is validated before any state change; a comma in
-    # an included skills path rejects the whole activation.
-    if ! skills_dirs_csv="$(_ctx_compute_skills_dirs_csv "${resolved_dirs_manual[@]}")"; then return 1; fi
+    # COPILOT_SKILLS_DIRS is computed/validated only in Modes B/C before any
+    # state change; a comma in an included skills path rejects the activation.
+    # Mode A must not run this new validation or otherwise change its parsing.
+    local skills_dirs_csv=""
+    if [ "$mode" = "global-user" ] || [ "$mode" = "ephemeral-clean" ]; then
+        if ! skills_dirs_csv="$(_ctx_compute_skills_dirs_csv "${resolved_dirs_manual[@]}")"; then return 1; fi
+    fi
     local new_context="${context_names[*]}"; new_context="${new_context// /+}"
     local new_home="" old_ephemeral_home=""
     if [ "$mode" = "ephemeral-clean" ]; then
@@ -486,7 +507,7 @@ ctx() {
         # failure leaves the previous context and all files untouched.
         if ! new_home="$(_ctx_create_ephemeral_copilot_home)"; then return 1; fi
     fi
-    if _ctx_active_record_matches && [ "$_ctx_active_mode" = "ephemeral-clean" ]; then
+    if [ "$(_ctx_active_record_mode)" = "ephemeral-clean" ]; then
         # Remember the replaced Mode C home so its retained-path notice can be
         # printed only after the replacement below actually succeeds.
         old_ephemeral_home="$_ctx_active_home_value"
@@ -495,33 +516,30 @@ ctx() {
     case "$mode" in
         global-user)
             # Mode B: never set up or touch COPILOT_HOME at all.
-            _ctx_skills_dirs_owned=1
             ;;
         synthetic-home)
             if ! _ctx_setup_copilot_home "$new_context" "" "${resolved_dirs_manual[@]}"; then return 1; fi
             ;;
         ephemeral-clean)
             export COPILOT_HOME="$new_home"
-            # B/C: the freshly computed skills var (set or unset) is
-            # ctx-owned this session; set only after the activation succeeds.
-            _ctx_skills_dirs_owned=1
             ;;
     esac
     case "$mode" in
         global-user|ephemeral-clean)
-            # B/C: export the freshly computed value; fully replaced each activation.
+            # B/C: export the freshly computed value; fully replaced each
+            # activation, then record its exact state as ctx-owned this session.
             if [ -n "$skills_dirs_csv" ]; then
                 export COPILOT_SKILLS_DIRS="$skills_dirs_csv"
             else
                 unset COPILOT_SKILLS_DIRS
             fi
+            _ctx_record_owned_skills_dirs
             ;;
         synthetic-home)
-            # A: only unset a value a prior B/C activation in this session set.
-            if [ "$_ctx_skills_dirs_owned" -eq 1 ]; then
-                unset COPILOT_SKILLS_DIRS
-                _ctx_skills_dirs_owned=0
-            fi
+            # A: unset only a value that still matches what a prior B/C
+            # activation in this session established; a user's own value is
+            # never touched.
+            _ctx_unset_owned_skills_dirs
             ;;
     esac
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv" AI_CTX_PROFILES
@@ -539,11 +557,16 @@ _ctx_auto_load_dir=""
 # .ctx file auto-loaded, so _ctx_clear --all knows to look for the
 # synthetic COPILOT_HOME at that location instead of the centralized one.
 _ctx_auto_load_home_override=""
-# Tracks whether ctx itself set COPILOT_SKILLS_DIRS in this session (Modes
-# B/C). Set to 1 on any B/C activation, read by _ctx_clear and by a switch
-# into Mode A so ctx only ever unsets a value it set this session, never a
-# user's own value; reset to 0 when the variable is unset.
+# Tracks the exact COPILOT_SKILLS_DIRS state ctx established this session
+# (Modes B/C). _ctx_skills_dirs_owned is 1 while such a record exists;
+# _ctx_skills_dirs_was_set records whether the activation left the variable
+# set, and _ctx_skills_dirs_value records its exact value when set. Clear and
+# a switch into Mode A unset the variable only when the current presence/value
+# still matches this record, so a user's later value is never erased. Failed
+# activations never touch the record.
 _ctx_skills_dirs_owned=0
+_ctx_skills_dirs_was_set=0
+_ctx_skills_dirs_value=""
 
 # Session-local activation record (no on-disk registry). Written only after
 # an activation has actually succeeded; reset on clear and never on a failed
@@ -557,15 +580,62 @@ _ctx_active_custom_dirs=""
 _ctx_active_home_was_set=0
 _ctx_active_home_value=""
 
+_ctx_active_record_mode() {
+    # Prints the recorded mode when the activation record's context and
+    # custom-instructions directories still match the current environment;
+    # prints nothing and returns 1 otherwise. COPILOT_HOME is deliberately not
+    # compared here: clear and replacement notices handle Mode C home drift
+    # separately, and only `current`/`check` require full record fidelity.
+    [ -n "$_ctx_active_mode" ] || return 1
+    [ "$_ctx_active_context" = "${AI_CTX_PROFILES:-}" ] || return 1
+    [ "$_ctx_active_custom_dirs" = "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" ] || return 1
+    printf '%s\n' "$_ctx_active_mode"
+}
+
 _ctx_active_record_matches() {
     # Returns 0 when the session-local activation record matches the current
     # activated context (AI_CTX_PROFILES and COPILOT_CUSTOM_INSTRUCTIONS_DIRS
     # unchanged since the activation), 1 otherwise. A record whose context no
-    # longer matches is foreign/stale and must not be attributed.
-    [ -n "$_ctx_active_mode" ] || return 1
-    [ "$_ctx_active_context" = "${AI_CTX_PROFILES:-}" ] || return 1
-    [ "$_ctx_active_custom_dirs" = "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" ] || return 1
+    # longer matches is foreign/stale and must not be attributed. For Mode C
+    # the record additionally matches only while the current COPILOT_HOME is
+    # still the exact recorded ephemeral path, so a changed/foreign home is
+    # never attributed to the recorded activation.
+    local mode
+    mode="$(_ctx_active_record_mode)" || return 1
+    if [ "$mode" = "ephemeral-clean" ]; then
+        [ -n "${COPILOT_HOME+x}" ] || return 1
+        [ "$COPILOT_HOME" = "$_ctx_active_home_value" ] || return 1
+    fi
     return 0
+}
+
+_ctx_record_owned_skills_dirs() {
+    # Records the exact COPILOT_SKILLS_DIRS state a successful B/C activation
+    # established this session, so clear and a Mode A switch unset the variable
+    # only when the current value still matches; a user's later value is
+    # preserved.
+    _ctx_skills_dirs_owned=1
+    if [ -n "${COPILOT_SKILLS_DIRS+x}" ]; then
+        _ctx_skills_dirs_was_set=1
+        _ctx_skills_dirs_value="$COPILOT_SKILLS_DIRS"
+    else
+        _ctx_skills_dirs_was_set=0
+        _ctx_skills_dirs_value=""
+    fi
+}
+
+_ctx_unset_owned_skills_dirs() {
+    # Unsets COPILOT_SKILLS_DIRS only when the current presence/value still
+    # matches what a prior B/C activation in this session established; never
+    # touches a user's own value. Resets the ownership record regardless.
+    if [ "$_ctx_skills_dirs_owned" -eq 1 ]; then
+        if [ "$_ctx_skills_dirs_was_set" -eq 1 ] && [ -n "${COPILOT_SKILLS_DIRS+x}" ] && [ "$COPILOT_SKILLS_DIRS" = "$_ctx_skills_dirs_value" ]; then
+            unset COPILOT_SKILLS_DIRS
+        fi
+        _ctx_skills_dirs_owned=0
+        _ctx_skills_dirs_was_set=0
+        _ctx_skills_dirs_value=""
+    fi
 }
 
 _ctx_set_active_record() {
@@ -1134,9 +1204,13 @@ _ctx_load_ctx_file() {
         return 1
     fi
     dirs_csv="$(IFS=,; printf '%s' "${_ctx_parsed_dirs[*]}")"
-    # COPILOT_SKILLS_DIRS is validated before any state change; a comma in
-    # an included skills path rejects the whole activation.
-    if ! skills_dirs_csv="$(_ctx_compute_skills_dirs_csv "${_ctx_parsed_dirs[@]}")"; then return 1; fi
+    # COPILOT_SKILLS_DIRS is computed/validated only in Modes B/C before any
+    # state change; a comma in an included skills path rejects the activation.
+    # Mode A must not run this new validation or otherwise change its parsing.
+    local skills_dirs_csv=""
+    if [ "$mode" = "global-user" ] || [ "$mode" = "ephemeral-clean" ]; then
+        if ! skills_dirs_csv="$(_ctx_compute_skills_dirs_csv "${_ctx_parsed_dirs[@]}")"; then return 1; fi
+    fi
     local new_home="" old_ephemeral_home=""
     if [ "$mode" = "ephemeral-clean" ]; then
         # Mode C: preflight home creation before any state change (including
@@ -1144,7 +1218,7 @@ _ctx_load_ctx_file() {
         # and all files untouched.
         if ! new_home="$(_ctx_create_ephemeral_copilot_home)"; then return 1; fi
     fi
-    if _ctx_active_record_matches && [ "$_ctx_active_mode" = "ephemeral-clean" ]; then
+    if [ "$(_ctx_active_record_mode)" = "ephemeral-clean" ]; then
         # Remember the replaced Mode C home so its retained-path notice can be
         # printed only after the replacement below actually succeeds.
         old_ephemeral_home="$_ctx_active_home_value"
@@ -1154,33 +1228,30 @@ _ctx_load_ctx_file() {
     case "$mode" in
         global-user)
             # Mode B: never set up or touch COPILOT_HOME at all.
-            _ctx_skills_dirs_owned=1
             ;;
         synthetic-home)
             _ctx_setup_copilot_home "$_ctx_parsed_context" "$_ctx_parsed_home" "${_ctx_parsed_dirs[@]}" || return 1
             ;;
         ephemeral-clean)
             export COPILOT_HOME="$new_home"
-            # B/C: the freshly computed skills var (set or unset) is
-            # ctx-owned this session; set only after the activation succeeds.
-            _ctx_skills_dirs_owned=1
             ;;
     esac
     case "$mode" in
         global-user|ephemeral-clean)
-            # B/C: export the freshly computed value; fully replaced each activation.
+            # B/C: export the freshly computed value; fully replaced each
+            # activation, then record its exact state as ctx-owned this session.
             if [ -n "$skills_dirs_csv" ]; then
                 export COPILOT_SKILLS_DIRS="$skills_dirs_csv"
             else
                 unset COPILOT_SKILLS_DIRS
             fi
+            _ctx_record_owned_skills_dirs
             ;;
         synthetic-home)
-            # A: only unset a value a prior B/C activation in this session set.
-            if [ "$_ctx_skills_dirs_owned" -eq 1 ]; then
-                unset COPILOT_SKILLS_DIRS
-                _ctx_skills_dirs_owned=0
-            fi
+            # A: unset only a value that still matches what a prior B/C
+            # activation in this session established; a user's own value is
+            # never touched.
+            _ctx_unset_owned_skills_dirs
             ;;
     esac
     _ctx_auto_load_home_override="$_ctx_parsed_home"
@@ -1225,6 +1296,35 @@ EOF
         [ -n "$sname" ] || continue
         printf 'CHECK SKIP skill:%s\n' "$sname"
     done <<< "$sorted"
+}
+
+_ctx_check_skills_dirs() {
+    # Modes B/C: audits COPILOT_SKILLS_DIRS against the expected stable CSV
+    # derived from the existing .github/skills directories of the parsed .ctx
+    # entries (same computation as activation). Emits CHECK PASS/FAIL; when
+    # the expected CSV cannot be computed (e.g. a literal comma path) it emits
+    # CHECK SKIP rather than guessing. Read-only.
+    shift
+    local expected_csv="" status=0
+    expected_csv="$(_ctx_compute_skills_dirs_csv "$@" 2>/dev/null)" || status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'CHECK SKIP COPILOT_SKILLS_DIRS\n'
+        return 0
+    fi
+    if [ -n "$expected_csv" ]; then
+        if [ -n "${COPILOT_SKILLS_DIRS+x}" ] && [ "$COPILOT_SKILLS_DIRS" = "$expected_csv" ]; then
+            printf 'CHECK PASS COPILOT_SKILLS_DIRS\n'
+        else
+            printf 'CHECK FAIL COPILOT_SKILLS_DIRS: expected %s, got %s\n' "$expected_csv" "${COPILOT_SKILLS_DIRS:-<unset>}"
+            return 1
+        fi
+    elif [ -z "${COPILOT_SKILLS_DIRS+x}" ]; then
+        printf 'CHECK PASS COPILOT_SKILLS_DIRS\n'
+    else
+        printf 'CHECK FAIL COPILOT_SKILLS_DIRS: expected <unset>, got %s\n' "$COPILOT_SKILLS_DIRS"
+        return 1
+    fi
+    return 0
 }
 
 _ctx_check() {
@@ -1290,17 +1390,22 @@ _ctx_check() {
                 printf 'CHECK FAIL COPILOT_HOME: recorded <unset>, got %s\n' "${COPILOT_HOME:-}"
                 failures=$((failures+1))
             fi
+            _ctx_check_skills_dirs "$expected_home" "${dirs[@]}" || failures=$((failures+1))
             _ctx_check_skip_links_and_skills "$expected_home" "${dirs[@]}"
             ;;
         ephemeral-clean)
-            # Mode C: the recorded ephemeral path must still exist as a real
-            # (non-symlink) directory; never inspect its contents.
-            if [ -n "$_ctx_active_home_value" ] && [ -d "$_ctx_active_home_value" ] && [ ! -L "$_ctx_active_home_value" ]; then
+            # Mode C: PASS only when the current COPILOT_HOME still equals the
+            # recorded ephemeral path (presence and exact value) AND that path
+            # still exists as a real (non-symlink) directory. FAIL on unset,
+            # changed, or foreign-replaced values; never inspect contents.
+            if [ -n "${COPILOT_HOME+x}" ] && [ "$COPILOT_HOME" = "$_ctx_active_home_value" ] \
+               && [ -n "$_ctx_active_home_value" ] && [ -d "$_ctx_active_home_value" ] && [ ! -L "$_ctx_active_home_value" ]; then
                 printf 'CHECK PASS COPILOT_HOME\n'
             else
-                printf 'CHECK FAIL COPILOT_HOME: recorded ephemeral home %s is missing or not a real directory\n' "$_ctx_active_home_value"
+                printf 'CHECK FAIL COPILOT_HOME: expected recorded ephemeral home %s, got %s\n' "$_ctx_active_home_value" "${COPILOT_HOME:-<unset>}"
                 failures=$((failures+1))
             fi
+            _ctx_check_skills_dirs "$expected_home" "${dirs[@]}" || failures=$((failures+1))
             _ctx_check_skip_links_and_skills "$expected_home" "${dirs[@]}"
             ;;
         synthetic-home)
