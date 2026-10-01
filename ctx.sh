@@ -1073,9 +1073,12 @@ EOF
 
     # Create/repair desired skill symlinks (idempotent). Names that became a
     # collision are no longer desired and are skipped. Exactly one on-disk
-    # spelling per canonical key is kept: a correct exact-case link is left
-    # in place, but any other entry mapping to the same canonical key (e.g. a
-    # stale same-case sibling) is removed first (issue #40 finding 2).
+    # spelling per canonical key is kept: link_ok is set only by the
+    # enumerated entry whose on-disk spelling matches the desired one exactly
+    # and which is a correct link, so a differently-cased entry that a
+    # case-insensitive filesystem would alias can never suppress recreation of
+    # the desired spelling; every other entry mapping to the same canonical
+    # key is removed first (issue #40 P1).
     local name on_disk target link existing2 existing2_lc link_ok
     for name in "${desired_skill_order[@]}"; do
         [ -n "${desired_skills[$name]+set}" ] || continue
@@ -1083,19 +1086,17 @@ EOF
         target="${desired_skills[$name]}"
         link="$home_dir/skills/$on_disk"
         link_ok=0
-        if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
-            link_ok=1
-        fi
         while IFS= read -r existing2; do
             [ -n "$existing2" ] || continue
             if ! existing2_lc="$(_ctx_skill_canonical_name "$(basename "$existing2")")"; then
                 return 1
             fi
             if [ "$existing2_lc" = "$name" ]; then
-                if [ "$existing2" = "$link" ] && [ "$link_ok" -eq 1 ]; then
-                    continue
+                if [ "$existing2" = "$link" ] && [ -L "$existing2" ] && [ "$(readlink "$existing2")" = "$target" ]; then
+                    link_ok=1
+                else
+                    rm -rf "$existing2"
                 fi
-                rm -rf "$existing2"
             fi
         done < <(find "$home_dir/skills" -mindepth 1 -maxdepth 1 -print 2>/dev/null)
         if [ "$link_ok" -eq 1 ]; then

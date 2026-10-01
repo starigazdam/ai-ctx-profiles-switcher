@@ -1931,4 +1931,45 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         (ctx check) | Should -BeTrue
     }
 
+    It 'Issue40: desired spelling is recreated when only a differently-cased link exists' {
+        # Runs on every platform, including Windows: a correctly-targeted link
+        # seeded under the OLD casing must not satisfy the exact-case link
+        # check through case-insensitive path aliasing, so activation leaves
+        # the desired on-disk spelling behind as a correct link.
+        $proj = Join-Path $Script:TestTmp 'project-issue40-spelling'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'foo-skill'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Set-Location $proj
+
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $fooLink = Join-Path $env:COPILOT_HOME 'skills/foo-skill'
+        $fooLinkOld = Join-Path $env:COPILOT_HOME 'skills/Foo-Skill'
+        Test-CtxIsLink -Path $fooLink | Should -BeTrue
+
+        # Seed a correctly-targeted link under the OLD casing, removing the
+        # desired-casing entry so activation must recreate the desired
+        # spelling.
+        Remove-Item -LiteralPath $fooLink -Force
+        New-CtxLink -LinkPath $fooLinkOld -RealTarget (Join-Path $reviewDir '.github/skills/foo-skill') -Kind 'dir' | Out-Null
+        Test-CtxIsLink -Path $fooLinkOld | Should -BeTrue
+
+        # Activate with the desired spelling; the exact on-disk spelling must
+        # exist as a correct link afterwards.
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        Test-CtxIsLink -Path $fooLink | Should -BeTrue
+        (Get-CtxLinkTarget -Path $fooLink).TrimEnd('\','/') | Should -Be (Join-Path $reviewDir '.github/skills/foo-skill').TrimEnd('\','/')
+
+        # Because Test-Path aliases Foo-Skill and foo-skill on Windows, check
+        # the on-disk spelling by enumeration: exactly one entry named
+        # foo-skill and no entry named Foo-Skill after activation.
+        $skillNames = @(Get-ChildItem -LiteralPath (Join-Path $env:COPILOT_HOME 'skills') -Force | Select-Object -ExpandProperty Name)
+        @($skillNames | Where-Object { $_ -ceq 'foo-skill' }).Count | Should -Be 1
+        @($skillNames | Where-Object { $_ -ceq 'Foo-Skill' }).Count | Should -Be 0
+
+        (ctx check) | Should -BeTrue
+    }
+
 }

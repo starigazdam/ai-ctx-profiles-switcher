@@ -2259,3 +2259,35 @@ EOF
     run ctx check
     [ "$status" -eq 0 ]
 }
+
+@test "Issue40: desired spelling is recreated when only a differently-cased link exists" {
+    local proj="$TEST_TMP/project-issue40-spelling"
+    local review_dir
+    _make_profile review foo-skill
+    _make_profile review review-skill
+    review_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$review_dir" > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    local foo_link="$COPILOT_HOME/skills/foo-skill"
+    local foo_link_old="$COPILOT_HOME/skills/Foo-Skill"
+    [ -L "$foo_link" ]
+
+    # Seed a correctly-targeted link under the OLD casing, removing the
+    # desired-casing entry so activation must recreate the desired spelling.
+    rm -f "$foo_link"
+    ln -s "$review_dir/.github/skills/foo-skill" "$foo_link_old"
+    [ -L "$foo_link_old" ]
+
+    # Activation leaves the exact desired on-disk spelling behind as a correct
+    # link (regression: a differently-cased entry could previously satisfy the
+    # exact-case check through aliasing and suppress recreation).
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    [ -L "$foo_link" ]
+    [ "$(readlink "$foo_link")" = "$review_dir/.github/skills/foo-skill" ]
+
+    run ctx check
+    [ "$status" -eq 0 ]
+}

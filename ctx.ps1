@@ -1085,18 +1085,22 @@ function Set-CtxCopilotHome {
         $target = $desiredSkills[$key]
         $onDiskName = $desiredOnDisk[$key]
         $link = Join-Path $skillsHome $onDiskName
+        # Reconcile to exactly one on-disk spelling per canonical key. $linkOk
+        # is set only by the enumerated entry whose on-disk spelling matches
+        # the desired one exactly and which is a correct link, so a
+        # differently-cased entry that Test-Path would alias on Windows can
+        # never suppress recreation of the desired spelling. Every other entry
+        # mapping to the same canonical key is removed (stale same-case
+        # sibling or wrong-casing/wrong-target link).
         $linkOk = $false
-        if ((Test-Path -LiteralPath $link) -and (Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target) -eq $target)) {
-            $linkOk = $true
-        }
-        # Reconcile to exactly one on-disk spelling per canonical key: drop
-        # every entry that lowercases to this key except the exact-case
-        # correct link, so a stale same-case sibling is removed too.
         foreach ($existing in (Get-ChildItem -LiteralPath $skillsHome -Force -ErrorAction SilentlyContinue)) {
-            if ($existing.Name.ToLowerInvariant() -eq $key) {
-                if (-not (($existing.FullName -ceq $link) -and $linkOk)) {
-                    Remove-Item -LiteralPath $existing.FullName -Recurse -Force
-                }
+            if ($existing.Name.ToLowerInvariant() -ne $key) {
+                continue
+            }
+            if (($existing.Name -ceq $onDiskName) -and (Test-CtxIsLink -Path $existing.FullName -Target $target) -and ((Get-CtxLinkTarget -Path $existing.FullName -Target $target) -eq $target)) {
+                $linkOk = $true
+            } else {
+                Remove-Item -LiteralPath $existing.FullName -Recurse -Force
             }
         }
         if ($linkOk) {
