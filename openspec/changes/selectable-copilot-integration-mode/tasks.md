@@ -51,8 +51,8 @@
 
 ## 6. README Updates
 
-- [ ] 6.1 Document the three modes, the `AI_CTX_PROFILES_COPILOT_MODE` selector, Mode B's never-touches-`COPILOT_HOME` guidance (the user must clear/unset an old pointer themselves for Copilot's real default), Mode C's retained-ephemeral-dir cleanup responsibility (auth/session data, disk consumption, no auto-sweep), and `COPILOT_SKILLS_DIRS` semantics under "Skill discovery"/"Operational notes". Verify: manual read-through of the updated README sections.
-- [ ] 6.2 Update "Choosing a custom COPILOT_HOME location" to state that `home:` is Mode-A-only and rejected under Modes B/C, and update the testing/CI notes to reflect the two suites and the `windows-latest` Pester job without describing CI as Ubuntu-only. Verify: manual read-through of the updated sections.
+- [x] 6.1 Document the three modes, the `AI_CTX_PROFILES_COPILOT_MODE` selector, Mode B's never-touches-`COPILOT_HOME` guidance (the user must clear/unset an old pointer themselves for Copilot's real default), Mode C's retained-ephemeral-dir cleanup responsibility (auth/session data, disk consumption, no auto-sweep), and `COPILOT_SKILLS_DIRS` semantics under "Skill discovery"/"Operational notes". Verify: manual read-through of the updated README sections.
+- [x] 6.2 Update "Choosing a custom COPILOT_HOME location" to state that `home:` is Mode-A-only and rejected under Modes B/C, and update the testing/CI notes to reflect the two suites and the `windows-latest` Pester job without describing CI as Ubuntu-only. Verify: manual read-through of the updated sections.
 
 ## 7. CI and Review Gates
 

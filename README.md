@@ -147,6 +147,7 @@ Profile : review
 Profiles: dotnet, security
 
 AI_CTX_PROFILES=review+dotnet+security
+Mode: synthetic-home
 
 COPILOT_HOME=/home/user/.config/ctx/homes/review+dotnet+security
 
@@ -238,11 +239,113 @@ instructions from your `.ctx` entries, but it does **not** make it discover
 stored in those directories on its own. `ctx` solves this with genuine
 per-folder, session-isolated skill discovery via the `COPILOT_HOME`
 environment variable, which Copilot CLI respects as a full replacement for
-`~/.copilot`.
+`~/.copilot`. Mode A does this through the synthetic `COPILOT_HOME` tree
+below; Modes B/C instead export `COPILOT_SKILLS_DIRS` (see
+[Integration modes](#integration-modes)).
+
+### Integration modes
+
+`ctx` supports three Copilot integration modes, selected by the exact,
+case-sensitive `AI_CTX_PROFILES_COPILOT_MODE` environment variable. There is
+no CLI flag and no `.ctx` mode line. The selector is read once per actual
+activation (manual `ctx <profile>...`, `ctx load`, or a real `.ctx`
+auto-load); an invalid non-empty value errors out before any state change.
+Unset or empty means Mode A — today's behavior:
+
+| Selector | Mode | `COPILOT_HOME` |
+|----------|------|----------------|
+| unset / empty | **A — synthetic-home** | synthetic per-context home at `~/.config/ctx/homes/<context>/` |
+| `synthetic-home` | **A — synthetic-home** | same as unset |
+| `global-user` | **B — global-user** | never touched; left exactly as-is |
+| `ephemeral-clean` | **C — ephemeral-clean** | fresh, unique, empty temp dir per activation |
+
+```sh
+export AI_CTX_PROFILES_COPILOT_MODE=global-user        # Mode B
+export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean    # Mode C
+unset AI_CTX_PROFILES_COPILOT_MODE                     # back to Mode A
+```
+```powershell
+$env:AI_CTX_PROFILES_COPILOT_MODE = "global-user"        # Mode B
+$env:AI_CTX_PROFILES_COPILOT_MODE = "ephemeral-clean"    # Mode C
+Remove-Item Env:AI_CTX_PROFILES_COPILOT_MODE             # back to Mode A
+```
+
+Existing behavior with the selector unset stays Mode A; setting the selector
+to `global-user` or `ephemeral-clean` chooses Mode B or C instead. The
+selector stays in the shell for this and later activations:
+
+```sh
+# Before: no selector; unchanged synthetic-home default
+unset AI_CTX_PROFILES_COPILOT_MODE
+ctx review
+
+# After: opt into global-user for this and later activations
+export AI_CTX_PROFILES_COPILOT_MODE=global-user
+ctx review
+```
+
+`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` keeps its existing resolved-directory
+order/replacement semantics in every mode. Copilot defines no general
+precedence order among merged instruction sources; `ctx` does not claim to
+guarantee one.
+
+#### Mode A — synthetic-home (default)
+
+The existing default: `ctx` builds a synthetic per-context `COPILOT_HOME` at
+`~/.config/ctx/homes/<context>/`, symlinks the shared files/directories back
+to the real Copilot home so auth, settings, MCP servers, and session history
+keep working identically across contexts, and populates the per-context
+`skills/` tree from each resolved entry's `.github/skills`. Two risks are
+retained — this feature does not fix them:
+
+- Copilot's atomic temp-file+rename writes can replace a symlinked file
+  (empirically confirmed for `settings.json`), so that context can diverge
+  from the real shared file until the next activation's reconciliation
+  repairs it. See `docs/empirical-symlink-hazard.md`.
+- Concurrent contexts are last-reconciliation-wins.
+
+#### Mode B — global-user
+
+`ctx` never sets, unsets, deletes, or builds a synthetic `COPILOT_HOME`; any
+current value is left exactly as-is. If you want Copilot's real default, you
+must clear/unset an old pointer yourself:
+
+```sh
+unset COPILOT_HOME            # bash/zsh
+```
+```powershell
+Remove-Item Env:COPILOT_HOME  # PowerShell
+```
+
+Mode B sets/replaces `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` and
+`COPILOT_SKILLS_DIRS` from the active resolved directories.
+`COPILOT_SKILLS_DIRS` lists existing `<entry>/.github/skills` paths only,
+comma-joined in stable order; it is unset when none exist, and it is additive
+to Copilot's built-in skill locations, not an isolation mechanism.
+
+#### Mode C — ephemeral-clean
+
+Each activation creates a new, empty, unique temp `COPILOT_HOME`; no
+symlinks/copies to or from real `~/.copilot`, no reconciliation. Copilot may
+write auth/session/cache data there. `ctx clear` and `ctx clear --all` unset
+the env pointer but never delete the directory or its contents; `ctx` prints
+the retained path and tells users/workflows to move any needed data out and
+remove it manually. It consumes disk until removed — there is no
+auto-sweeper. Mode C is storage separation only, not a security or
+credential sandbox; `COPILOT_SKILLS_DIRS` is additive, not isolation.
+
+Important limitations of Modes B/C:
+
+- Mode B never restores or clears an old `COPILOT_HOME`; switching between
+  modes does not move or clean the pointer.
+- Mode C's temp directory accumulates until you remove it manually.
+- Neither mode reconciles shared Copilot config, so Mode A's symlink
+  self-repair does not apply.
 
 #### How it works
 
-Every time a context is activated (`ctx <profile> [profile...]` or `.ctx`
+This describes Mode A (synthetic-home), the default. Every time a context is
+activated (`ctx <profile> [profile...]` or `.ctx`
 auto-load), `ctx` computes and reconciles a per-context home directory at
 `~/.config/ctx/homes/<context-name>/` (e.g. `~/.config/ctx/homes/review+dotnet/`)
 and exports `COPILOT_HOME` to point at it:
@@ -292,6 +395,9 @@ review:/home/user/work/ai-config/profiles/review
 
 - `home:` is a reserved directive name — you cannot also define a
   profile entry called `home`.
+- `home:` is **Mode A only**: under `global-user` or `ephemeral-clean` a
+  `.ctx` file containing `home:` is rejected before any state change — it is
+  never silently ignored or reinterpreted. In Mode A the rules below apply.
 - Only one `home:` line is allowed per `.ctx` file; a duplicate is an
   error, same as any other invalid `.ctx` line.
 - The path resolves the same way as any other `.ctx` entry: relative to
@@ -320,17 +426,33 @@ review:/home/user/work/ai-config/profiles/review
 
 #### Operational notes
 
-`ctx` reconciles the context home on every activation and repairs managed
-links that were replaced by the CLI. This protects shared configuration from
-the CLI's file-replacement behavior. The context home is a cache and is not
-deleted by ordinary `ctx clear`; `ctx clear --all` removes the current cache
-and generated project artifacts.
+The reconciliation and hazards below apply to Mode A (synthetic-home) only:
+Modes B/C never build a synthetic `COPILOT_HOME`, so there is no shared-link
+tree to repair (see [Integration modes](#integration-modes)).
 
-Avoid running concurrent Copilot CLI sessions under different active contexts
-when both may write the same shared configuration: the last reconciliation
-wins. See the [design history](docs/design-history-copilot-home.md) and
+`ctx` reconciles the context home on every Mode A activation and repairs
+managed links that were replaced by the CLI, protecting shared configuration
+from the CLI's file-replacement behavior. Two Mode A hazards are retained and
+are **not** fixed by the integration-modes feature:
+
+- Copilot's atomic temp-file+rename writes can replace a symlinked file
+  (empirically confirmed for `settings.json`); that context can diverge from
+  the real shared file until the next activation's reconciliation repairs it.
+- Concurrent Copilot CLI sessions under different active contexts are
+  last-reconciliation-wins when both write the same shared configuration.
+
+The context home is a cache and is not deleted by ordinary `ctx clear`;
+`ctx clear --all` removes the current cache and generated project artifacts.
+See the [design history](docs/design-history-copilot-home.md) and
 [empirical hazard report](docs/empirical-symlink-hazard.md) for implementation
 rationale and historical investigation.
+
+In Modes B/C, `COPILOT_SKILLS_DIRS` lists only the existing
+`<entry>/.github/skills` directories of the active resolved entries,
+comma-joined in stable order, and is unset when none exist; it is additive to
+Copilot's built-in skill locations, not an isolation mechanism. `ctx` only
+unsets a `COPILOT_SKILLS_DIRS` value it set earlier in the session — a
+user-set value is never cleared.
 
 Older versions of `ctx` could create `.github/copilot/settings.local.json`.
 Current versions no longer write it; remove an old leftover manually if it is
