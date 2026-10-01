@@ -159,11 +159,18 @@ _ctx_print_status() {
     local profile="$1"
     local shared_csv="$2"
     local dirs_csv="$3"
+    local mode_raw mode_value
 
     printf '\n[AI Context]\n\n'
     printf 'Profile : %s\n' "${profile:-<none>}"
     printf 'Profiles: %s\n' "${shared_csv:-<none>}"
     printf '\nAI_CTX_PROFILES=%s\n' "${AI_CTX_PROFILES:-<unset>}"
+    mode_raw="${AI_CTX_PROFILES_COPILOT_MODE:-}"
+    if mode_value="$(_ctx_validate_copilot_mode)"; then
+        printf 'Mode: %s\n' "$mode_value"
+    else
+        printf 'Mode: %s (invalid)\n' "$mode_raw"
+    fi
     printf 'COPILOT_HOME=%s\n' "${COPILOT_HOME:-<unset>}"
     printf '\nCOPILOT_CUSTOM_INSTRUCTIONS_DIRS=\n'
     if [ -n "$dirs_csv" ]; then
@@ -921,6 +928,7 @@ _ctx_check() {
     local expected_context="" expected_dirs="" first=1 profile_lookup
     local -a names=() dirs=()
     local failures=0
+    local mode_expected="synthetic-home" mode_actual=""
     local -A seen_labels=() seen_targets=()
 
     if ! ctx_file="$(_ctx_find_ctx_file)"; then
@@ -935,6 +943,8 @@ _ctx_check() {
     names=("${_ctx_parsed_names[@]}"); dirs=("${_ctx_parsed_dirs[@]}")
     expected_dirs="$(IFS=,; printf '%s' "${dirs[*]}")"
     if [ "${AI_CTX_PROFILES:-}" = "$expected_context" ]; then printf 'CHECK PASS AI_CTX_PROFILES\n'; else printf 'CHECK FAIL AI_CTX_PROFILES: expected %s, got %s\n' "$expected_context" "${AI_CTX_PROFILES:-<unset>}"; failures=$((failures+1)); fi
+    if ! mode_actual="$(_ctx_validate_copilot_mode)"; then mode_actual="${AI_CTX_PROFILES_COPILOT_MODE:-}"; fi
+    if [ "$mode_actual" = "$mode_expected" ]; then printf 'CHECK PASS COPILOT_MODE\n'; else printf 'CHECK FAIL COPILOT_MODE: expected %s, got %s\n' "$mode_expected" "$mode_actual"; failures=$((failures+1)); fi
     if [ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" = "$expected_dirs" ]; then printf 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n'; else printf 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected %s, got %s\n' "$expected_dirs" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-<unset>}"; failures=$((failures+1)); fi
 
     local expected_home

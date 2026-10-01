@@ -1059,6 +1059,43 @@ EOF
     [ "$(stat -c '%Y %s' "$proj/.ctx")" = "$before_file" ]
 }
 
+@test "Mode A default-equivalence: unset and explicit synthetic-home are byte-identical for current and check" {
+    _make_profile review review-skill
+    local proj="$HOME/project-mode-default-equivalence"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    unset AI_CTX_PROFILES_COPILOT_MODE
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    run ctx current
+    [ "$status" -eq 0 ]
+    local current_unset="$output"
+    [[ "$current_unset" == *"Mode: synthetic-home"* ]]
+
+    _ctx_clear >/dev/null
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    run ctx current
+    [ "$status" -eq 0 ]
+    local current_explicit="$output"
+    [[ "$current_explicit" == *"Mode: synthetic-home"* ]]
+    [ "$current_explicit" = "$current_unset" ]
+
+    unset AI_CTX_PROFILES_COPILOT_MODE
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    local check_unset="$output"
+    [[ "$check_unset" == *"CHECK PASS COPILOT_MODE"* ]]
+
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    run ctx check
+    [ "$status" -eq 0 ]
+    local check_explicit="$output"
+    [[ "$check_explicit" == *"CHECK PASS COPILOT_MODE"* ]]
+    [ "$check_explicit" = "$check_unset" ]
+}
+
 @test "ctx check rejects activation-invalid labels, targets, and home directives read-only" {
     _make_profile review
     local proj="$HOME/project-check-parser-invalid"

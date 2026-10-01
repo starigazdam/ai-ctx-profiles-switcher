@@ -11,10 +11,10 @@
 
 ## 2. Mode A Diagnostic Addition
 
-- [ ] 2.1 Keep Mode A byte-identical (explicit `synthetic-home` ≡ unset) and add the active-mode report to `ctx current`/`ctx check` in `ctx.sh`. Verify: existing `tests/ctx.bats` cases pass unchanged and a manual `ctx current` shows the mode.
-- [ ] 2.2 Mirror 2.1 in `ctx.ps1` (`Show-CtxCurrent`/`Test-CtxActivation`). Verify: existing `tests/ctx.Tests.ps1` cases pass unchanged and a manual `ctx current` under `pwsh` shows the mode.
-- [ ] 2.3 Add bats case: Mode A default-equivalence — unset vs explicit `synthetic-home` is byte-identical. Verify: `bats tests/ctx.bats`.
-- [ ] 2.4 Mirror 2.3 in Pester (`tests/ctx.Tests.ps1`). Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 2.1 Keep Mode A byte-identical (explicit `synthetic-home` ≡ unset) and add the active-mode report to `ctx current`/`ctx check` in `ctx.sh`. Verify: existing `tests/ctx.bats` cases pass unchanged and a manual `ctx current` shows the mode.
+- [x] 2.2 Mirror 2.1 in `ctx.ps1` (`Show-CtxCurrent`/`Test-CtxActivation`). Verify: existing `tests/ctx.Tests.ps1` cases pass unchanged and a manual `ctx current` under `pwsh` shows the mode.
+- [x] 2.3 Add bats case: Mode A default-equivalence — unset vs explicit `synthetic-home` is byte-identical. Verify: `bats tests/ctx.bats`.
+- [x] 2.4 Mirror 2.3 in Pester (`tests/ctx.Tests.ps1`). Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
 
 ## 3. Mode B Environment/Home Semantics
 

@@ -165,6 +165,10 @@ function Write-CtxStatus {
     Write-Host "Profiles: $(if ($SharedCsv) { $SharedCsv } else { '<none>' })"
     Write-Host ""
     Write-Host "AI_CTX_PROFILES=$(if ($env:AI_CTX_PROFILES) { $env:AI_CTX_PROFILES } else { '<unset>' })"
+    $modeRaw = $env:AI_CTX_PROFILES_COPILOT_MODE
+    $modeValue = $null
+    try { $modeValue = Get-CtxValidatedCopilotMode } catch { $modeValue = $null }
+    if ($modeValue) { Write-Host "Mode: $modeValue" } else { Write-Host "Mode: $modeRaw (invalid)" }
     Write-Host "COPILOT_HOME=$(if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { '<unset>' })"
     Write-Host ""
     Write-Host "COPILOT_CUSTOM_INSTRUCTIONS_DIRS="
@@ -987,6 +991,9 @@ function Test-CtxActivation {
     $dir = $parsed.Dir; $names = @($parsed.Names); $dirs = @($parsed.Dirs); $homeOverride = $parsed.HomeOverride; $failures = 0
     $expectedContext = $parsed.Context; $expectedDirs = $dirs -join ','
     if ($env:AI_CTX_PROFILES -ceq $expectedContext) { Write-Host 'CHECK PASS AI_CTX_PROFILES' } else { Write-Host "CHECK FAIL AI_CTX_PROFILES: expected $expectedContext, got $(if($env:AI_CTX_PROFILES){$env:AI_CTX_PROFILES}else{'<unset>'})"; $failures++ }
+    $modeExpected = 'synthetic-home'; $modeActual = $null
+    try { $modeActual = Get-CtxValidatedCopilotMode } catch { $modeActual = $env:AI_CTX_PROFILES_COPILOT_MODE }
+    if ($modeActual -ceq $modeExpected) { Write-Host 'CHECK PASS COPILOT_MODE' } else { Write-Host "CHECK FAIL COPILOT_MODE: expected $modeExpected, got $(if($modeActual){$modeActual}else{'<unset>'})"; $failures++ }
     if ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq $expectedDirs) { Write-Host 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS' } else { Write-Host "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected $expectedDirs, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"; $failures++ }
     $expectedHome = if ($homeOverride) { $homeOverride } else { Join-Path (Get-CtxCopilotHomeRoot) (Get-CtxSanitizedContextName -Name $expectedContext) }
     if ($env:COPILOT_HOME -ceq $expectedHome -and (Test-Path -LiteralPath $expectedHome -PathType Container)) { Write-Host 'CHECK PASS COPILOT_HOME' } else { Write-Host "CHECK FAIL COPILOT_HOME: expected $expectedHome, got $(if($env:COPILOT_HOME){$env:COPILOT_HOME}else{'<unset>'})"; $failures++ }

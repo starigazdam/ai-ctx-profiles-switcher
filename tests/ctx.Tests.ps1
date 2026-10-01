@@ -658,6 +658,36 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:AI_CTX_PROFILES | Should -Be 'wrong'
     }
 
+    It 'Mode A default-equivalence: unset and explicit synthetic-home are byte-identical for current and check' {
+        $proj = Join-Path $env:HOME 'project-mode-default-equivalence'
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+
+        Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $currentUnset = @(& { Show-CtxCurrent } 6>&1)
+        ($currentUnset -join "`n") | Should -Match 'Mode: synthetic-home'
+
+        Clear-CtxContext | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $currentExplicit = @(& { Show-CtxCurrent } 6>&1)
+        ($currentExplicit -join "`n") | Should -Match 'Mode: synthetic-home'
+        ($currentExplicit -join "`n") | Should -Be ($currentUnset -join "`n")
+
+        Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
+        Set-Location $proj
+        $checkUnset = @(& { Test-CtxActivation } 6>&1)
+        ($checkUnset -join "`n") | Should -Match 'CHECK PASS COPILOT_MODE'
+
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        $checkExplicit = @(& { Test-CtxActivation } 6>&1)
+        ($checkExplicit -join "`n") | Should -Match 'CHECK PASS COPILOT_MODE'
+        ($checkExplicit -join "`n") | Should -Be ($checkUnset -join "`n")
+    }
+
     It 'direct ctx check returns a scalar Boolean status while preserving diagnostics' {
         $proj = Join-Path $Script:TestTmp 'project-check-direct'
         $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
