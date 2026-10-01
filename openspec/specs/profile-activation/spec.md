@@ -37,7 +37,7 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 
 ### Requirement: Clear the active context
 
-The system SHALL clear the active context with `ctx clear`, which unsets `AI_CTX_PROFILES`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and `COPILOT_HOME` while leaving the synthetic home directory on disk. With `ctx clear --all` the system SHALL additionally remove the currently-selected synthetic home directory and ctx-owned generated artifacts, subject to safety validation.
+The system SHALL clear the active context with `ctx clear`, which unsets `AI_CTX_PROFILES`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and `COPILOT_HOME` while leaving the synthetic home directory on disk. With `ctx clear --all` the system SHALL additionally remove the currently-selected synthetic home directory and ctx-owned generated artifacts, subject to safety validation. The clear behavior SHALL be mode-aware: `ctx clear` and `ctx clear --all` SHALL also unset `COPILOT_SKILLS_DIRS` when it was set by a prior Mode B or Mode C activation in this session; under Mode B they SHALL never touch `COPILOT_HOME`; and under Mode C they SHALL unset `COPILOT_HOME` without ever deleting the ephemeral directory or its contents. `ctx clear --all`'s common workspace-file and legacy settings-file cleanup SHALL still run in every mode.
 
 #### Scenario: ctx clear unsets the environment variables
 
@@ -69,9 +69,34 @@ The system SHALL clear the active context with `ctx clear`, which unsets `AI_CTX
 - **WHEN** `ctx clear --all` runs and a `.github/copilot/settings.local.json` file exists next to the nearest `.ctx` file
 - **THEN** the legacy settings file is removed
 
+#### Scenario: ctx clear unsets a session-set COPILOT_SKILLS_DIRS
+
+- **WHEN** `ctx clear` runs while `COPILOT_SKILLS_DIRS` was set by a prior Mode B or Mode C activation in this session
+- **THEN** `COPILOT_SKILLS_DIRS` is unset along with the other context variables
+
+#### Scenario: ctx clear under Mode B never touches COPILOT_HOME
+
+- **WHEN** a user runs `ctx clear` with an active Mode B context and `COPILOT_HOME` holds any value, including a custom one or one left over from a prior activation
+- **THEN** `AI_CTX_PROFILES`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and `COPILOT_SKILLS_DIRS` are unset while `COPILOT_HOME` is left exactly as-is
+
+#### Scenario: ctx clear --all under Mode B runs common cleanup and never touches COPILOT_HOME
+
+- **WHEN** a user runs `ctx clear --all` with an active Mode B context
+- **THEN** the common workspace-file and legacy settings-file cleanup still runs, and `COPILOT_HOME` is never read, set, unset, created, or deleted
+
+#### Scenario: ctx clear under Mode C leaves the ephemeral directory on disk
+
+- **WHEN** a user runs `ctx clear` with an active Mode C context
+- **THEN** `COPILOT_HOME` and `COPILOT_SKILLS_DIRS` are unset for the session and the ephemeral directory and its contents remain on disk
+
+#### Scenario: ctx clear --all under Mode C never deletes the ephemeral directory
+
+- **WHEN** a user runs `ctx clear --all` with an active Mode C context
+- **THEN** the common workspace-file and legacy settings-file cleanup still runs, and the ephemeral directory and its contents are never deleted
+
 ### Requirement: Show the current context
 
-The system SHALL report the active context with `ctx current`, printing the active profile(s) and the current environment variables when a context is active, or a no-active-context message when nothing is active.
+The system SHALL report the active context with `ctx current`, printing the active profile(s) and the current environment variables when a context is active, or a no-active-context message when nothing is active. `ctx current` SHALL also print the active Copilot integration mode — the mode of the matching activation, not merely the requested selector — and, in Modes B and C, the active `COPILOT_SKILLS_DIRS`.
 
 #### Scenario: Active context is printed
 
@@ -82,3 +107,13 @@ The system SHALL report the active context with `ctx current`, printing the acti
 
 - **WHEN** no context is active and a user runs `ctx current`
 - **THEN** a message stating that no active AI context exists is printed and the command exits successfully
+
+#### Scenario: Active context prints the active mode
+
+- **WHEN** a context is active and a user runs `ctx current`
+- **THEN** the active Copilot integration mode is printed, and a stale or mismatched `AI_CTX_PROFILES_COPILOT_MODE` sitting in the environment without a matching activation is not reported as the active mode
+
+#### Scenario: Mode B or Mode C active context prints the active COPILOT_SKILLS_DIRS
+
+- **WHEN** a context is active under Mode B or Mode C and a user runs `ctx current`
+- **THEN** the active `COPILOT_SKILLS_DIRS` is printed alongside the other context variables and the active mode
