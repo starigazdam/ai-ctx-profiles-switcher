@@ -2,12 +2,12 @@
 
 ## 1. Mode Selection and Validation
 
-- [ ] 1.1 Implement mode selection/validation in `ctx.sh`: read `AI_CTX_PROFILES_COPILOT_MODE` once per actual activation (manual `ctx <profile>...`, `ctx load`, and actual `.ctx` auto-load), accept exactly `synthetic-home`/`global-user`/`ephemeral-clean` case-sensitively, treat unset/empty as `synthetic-home` (byte-identical to today), and raise an error naming the allowed values for any other non-empty value before any export, workspace write, or home setup; never overwrite or unset the variable. Verify: `bats tests/ctx.bats` passes and a manual invalid-value run exits non-zero before any state change.
-- [ ] 1.2 Mirror 1.1 in `ctx.ps1` and verify parity. Verify: `Invoke-Pester tests/ctx.Tests.ps1` passes and a manual invalid-value run under `pwsh` exits non-zero before any state change.
-- [ ] 1.3 Add bats case: `home:` line + non-A mode conflict — the file is rejected before any state change and the previous context is untouched. Verify: `bats tests/ctx.bats`.
-- [ ] 1.4 Add bats case: validation-failure non-mutation — an invalid mode string or comma path leaves the previous context and all files untouched. Verify: `bats tests/ctx.bats`.
-- [ ] 1.5 Mirror 1.3 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
-- [ ] 1.6 Mirror 1.4 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 1.1 Implement mode selection/validation in `ctx.sh`: read `AI_CTX_PROFILES_COPILOT_MODE` once per actual activation (manual `ctx <profile>...`, `ctx load`, and actual `.ctx` auto-load), accept exactly `synthetic-home`/`global-user`/`ephemeral-clean` case-sensitively, treat unset/empty as `synthetic-home` (byte-identical to today), and raise an error naming the allowed values for any other non-empty value before any export, workspace write, or home setup; never overwrite or unset the variable. Verify: `bats tests/ctx.bats` passes and a manual invalid-value run exits non-zero before any state change.
+- [x] 1.2 Mirror 1.1 in `ctx.ps1` and verify parity. Verify: `Invoke-Pester tests/ctx.Tests.ps1` passes and a manual invalid-value run under `pwsh` exits non-zero before any state change.
+- [x] 1.3 Add bats case: `home:` line + non-A mode conflict — the file is rejected before any state change and the previous context is untouched. Verify: `bats tests/ctx.bats`.
+- [x] 1.4 Add bats case: validation-failure non-mutation — an invalid mode string leaves the previous context and all files untouched. Verify: `bats tests/ctx.bats`. (NOTE: tasks.md's text also says "...or comma path" — that sub-case is COPILOT_SKILLS_DIRS comma-rejection, which does not exist yet and belongs to task 3.6. Do NOT implement comma-rejection now. Cover only the invalid-mode-string sub-case here.)
+- [x] 1.5 Mirror 1.3 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 1.6 Mirror 1.4 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
 
 ## 2. Mode A Diagnostic Addition
 

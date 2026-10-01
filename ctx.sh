@@ -396,6 +396,8 @@ ctx() {
     local root profile_name profile_dir context_name context_lc profile_name_lc
     root="$(_ctx_root)"
     if [ ! -d "$root" ]; then printf 'ctx: error: AI config root does not exist: %s\n' "$root" >&2; return 1; fi
+    local mode
+    mode="$(_ctx_validate_copilot_mode)" || return 1
     local dirs_csv=""
     local -a resolved_dirs_manual=() context_names=() seen_names=()
     for context_name in "$@"; do
@@ -523,6 +525,22 @@ _ctx_validate_home_path() {
         [ ! -L "$prefix" ] || { printf 'ctx: error: unsafe home: symlink component in %s\n' "$candidate" >&2; return 1; }
     done
     printf '%s\n' "$canonical"
+}
+
+_ctx_validate_copilot_mode() {
+    # Select and validate the active Copilot integration mode. Accepts
+    # exactly synthetic-home | global-user | ephemeral-clean,
+    # case-sensitively; unset/empty defaults to synthetic-home (today's
+    # behavior). Prints the active mode to stdout and returns 0, or prints
+    # ctx: error: ... to stderr and returns 1.
+    local mode="${AI_CTX_PROFILES_COPILOT_MODE:-synthetic-home}"
+    case "$mode" in
+        synthetic-home|global-user|ephemeral-clean) : ;;
+        *)
+            printf 'ctx: error: invalid AI_CTX_PROFILES_COPILOT_MODE "%s" (allowed values: synthetic-home, global-user, ephemeral-clean)\n' "$mode" >&2
+            return 1 ;;
+    esac
+    printf '%s\n' "$mode"
 }
 
 # List of files
@@ -883,8 +901,13 @@ _ctx_parse_ctx_file() {
 }
 
 _ctx_load_ctx_file() {
-    local ctx_file="$1" dirs_csv shared_csv
+    local ctx_file="$1" dirs_csv shared_csv mode
     _ctx_parse_ctx_file "$ctx_file" || return 1
+    mode="$(_ctx_validate_copilot_mode)" || return 1
+    if [ -n "$_ctx_parsed_home" ] && [ "$mode" != "synthetic-home" ]; then
+        printf 'ctx: error: "home:" directive is only valid in synthetic-home mode (active mode: %s); allowed values: synthetic-home, global-user, ephemeral-clean\n' "$mode" >&2
+        return 1
+    fi
     dirs_csv="$(IFS=,; printf '%s' "${_ctx_parsed_dirs[*]}")"
     _ctx_update_workspace_file "$_ctx_parsed_dir" "${_ctx_parsed_pairs[@]}"
     export AI_CTX_PROFILES="$_ctx_parsed_context" COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv"

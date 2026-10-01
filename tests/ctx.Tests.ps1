@@ -58,6 +58,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
         Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
         Remove-Item Env:\CTX_AUTO_LOAD -ErrorAction SilentlyContinue
+        Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
         $Script:CtxAutoLoadDir = $null
         $Script:CtxAutoLoadHomeOverride = $null
 
@@ -504,6 +505,56 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
     It 'Test 29: home validator rejects AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT itself' {
         { Get-CtxValidatedHomePath -Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT } | Should -Throw '*unsafe home*'
+    }
+
+    It 'home: directive conflicts with a non-synthetic-home mode and leaves state untouched' {
+        $proj = Join-Path $env:HOME 'project-home-mode-conflict'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review'
+        $custom = Join-Path $env:HOME '.config/ctx/homes/mode-conflict'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home:$custom`nreview:$reviewDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx') } finally { $ErrorActionPreference = $prevEap }
+        $result | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'ctx: error:'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'home'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'global-user'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        Test-Path -LiteralPath $custom | Should -BeFalse
+    }
+
+    It 'an invalid copilot mode is rejected before any state change' {
+        $proj = Join-Path $env:HOME 'project-invalid-mode'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'bogus'
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx review } finally { $ErrorActionPreference = $prevEap }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'ctx: error:'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'synthetic-home'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'global-user'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'ephemeral-clean'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx') } finally { $ErrorActionPreference = $prevEap }
+        $result | Should -BeFalse
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        Test-Path -LiteralPath (Join-Path $proj 'project-invalid-mode.code-workspace') | Should -BeFalse
     }
 
     It 'workspace created by ctx is marked and removed by clear --all' {

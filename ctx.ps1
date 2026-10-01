@@ -368,6 +368,8 @@ function ctx {
         return
     }
 
+    try { $null = Get-CtxValidatedCopilotMode } catch { Write-Error "ctx: error: $_"; return }
+
     $profileName = $Contexts[0]
     $profileNames = @()
     $seenNames = @{}
@@ -448,6 +450,19 @@ function Get-CtxValidatedHomePath {
         }
     }
     return $canonical
+}
+
+function Get-CtxValidatedCopilotMode {
+    # Selects and validates the active Copilot integration mode. Accepts
+    # exactly synthetic-home | global-user | ephemeral-clean,
+    # case-sensitively; unset/empty defaults to synthetic-home (today's
+    # behavior). Returns the active mode, or throws naming the allowed
+    # values.
+    $mode = if ($env:AI_CTX_PROFILES_COPILOT_MODE) { $env:AI_CTX_PROFILES_COPILOT_MODE } else { 'synthetic-home' }
+    if ($mode -cnotin @('synthetic-home', 'global-user', 'ephemeral-clean')) {
+        throw "invalid AI_CTX_PROFILES_COPILOT_MODE `"$mode`" (allowed values: synthetic-home, global-user, ephemeral-clean)"
+    }
+    return $mode
 }
 
 function Get-CtxCopilotHomeSharedFiles {
@@ -947,6 +962,12 @@ function Parse-CtxFile {
 function Import-CtxFile {
     param([string]$CtxFile)
     try { $parsed = Parse-CtxFile -CtxFile $CtxFile } catch { Write-Error "ctx: error: $_"; return $false }
+    $mode = $null
+    try { $mode = Get-CtxValidatedCopilotMode } catch { Write-Error "ctx: error: $_"; return $false }
+    if ($parsed.HomeOverride -and ($mode -cne 'synthetic-home')) {
+        Write-Error "ctx: error: `"home:`" directive is only valid in synthetic-home mode (active mode: $mode); allowed values: synthetic-home, global-user, ephemeral-clean"
+        return $false
+    }
     Update-CtxWorkspaceFile -BaseDir $parsed.Dir -Names $parsed.Names -Dirs $parsed.Dirs
     $dirsCsv = $parsed.Dirs -join ','
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv

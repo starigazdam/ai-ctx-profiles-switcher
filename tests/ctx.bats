@@ -21,6 +21,7 @@ setup() {
     export REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
     unset AI_CTX_PROFILES AI_CONTEXT AI_CONFIG_ROOT CTX_HOMES_ROOT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME CTX_AUTO_LOAD
+    unset AI_CTX_PROFILES_COPILOT_MODE
     unset _ctx_auto_load_dir
 
     # shellcheck source=/dev/null
@@ -518,6 +519,59 @@ EOF
     [ "$status" -ne 0 ]
     run _ctx_validate_home_path "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT"
     [ "$status" -ne 0 ]
+}
+
+@test "home: directive conflicts with a non-synthetic-home mode and leaves state untouched" {
+    _make_profile review
+    local proj="$TEST_TMP/project-home-mode-conflict"
+    local custom="$HOME/.config/ctx/homes/mode-conflict"
+    mkdir -p "$proj"
+    printf 'home:%s\nreview:%s\n' "$custom" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+
+    run _ctx_load_ctx_file "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error:"* ]]
+    [[ "$output" == *"home"* ]]
+    [[ "$output" == *"global-user"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ ! -d "$custom" ]
+}
+
+@test "an invalid copilot mode is rejected before any state change" {
+    _make_profile review
+    local proj="$TEST_TMP/project-invalid-mode"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    export AI_CTX_PROFILES_COPILOT_MODE=bogus
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+
+    run ctx review
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error:"* ]]
+    [[ "$output" == *"synthetic-home"* ]]
+    [[ "$output" == *"global-user"* ]]
+    [[ "$output" == *"ephemeral-clean"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+
+    run _ctx_load_ctx_file "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ ! -e "$proj/project-invalid-mode.code-workspace" ]
 }
 
 @test "public ctx clear --all propagates unsafe home failure" {
