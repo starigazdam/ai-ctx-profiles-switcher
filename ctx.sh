@@ -251,9 +251,23 @@ _ctx_clear() {
     local prev_context="${AI_CTX_PROFILES:-}"
     local prev_home="${COPILOT_HOME:-}"
     local cleanup_status=0
+    # Mode B (global-user) never touches COPILOT_HOME and skips the --all
+    # home-directory removal, so resolve the live mode first. An invalid
+    # value is treated as synthetic-home so ctx clear stays usable to
+    # recover from a broken env value.
+    local clear_mode
+    if ! clear_mode="$(_ctx_validate_copilot_mode)"; then clear_mode="synthetic-home"; fi
     unset AI_CTX_PROFILES
     unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-    unset COPILOT_HOME
+    if [ "$clear_mode" != "global-user" ]; then
+        unset COPILOT_HOME
+    fi
+    # Only unset COPILOT_SKILLS_DIRS when ctx itself set it this session;
+    # a user's own value is left alone.
+    if [ "$_ctx_skills_dirs_owned" -eq 1 ]; then
+        unset COPILOT_SKILLS_DIRS
+        _ctx_skills_dirs_owned=0
+    fi
 
     if [ "${1:-}" = "--all" ]; then
         local dir_of_file="$_ctx_auto_load_dir"
@@ -309,27 +323,29 @@ _ctx_clear() {
             fi
         fi
 
-        if [ -n "$prev_context" ]; then
-            local sanitized homes_root home_dir
-            if [ -n "$_ctx_auto_load_home_override" ]; then
-                home_dir="$_ctx_auto_load_home_override"
-            else
-                sanitized="$(_ctx_sanitize_context_name "$prev_context")"
-                homes_root="$(_ctx_copilot_home_root)"
-                home_dir="$homes_root/$sanitized"
-            fi
-            if [ -z "$prev_home" ] || [ "$home_dir" != "$prev_home" ] || ! _ctx_validate_home_path "$home_dir" >/dev/null; then
-                printf 'ctx: error: refusing to remove unsafe or unselected home: %s\n' "$home_dir" >&2
-                return 1
-            fi
-            if [ -d "$home_dir" ] && [ ! -L "$home_dir" ]; then
-                local remove_status=0
-                rm -rf -- "$home_dir" || remove_status=$?
-                if [ "$remove_status" -ne 0 ]; then
-                    printf 'ctx: error: failed to remove %s (status %s)\n' "$home_dir" "$remove_status" >&2
-                    return "$remove_status"
+        if [ "$clear_mode" != "global-user" ]; then
+            if [ -n "$prev_context" ]; then
+                local sanitized homes_root home_dir
+                if [ -n "$_ctx_auto_load_home_override" ]; then
+                    home_dir="$_ctx_auto_load_home_override"
+                else
+                    sanitized="$(_ctx_sanitize_context_name "$prev_context")"
+                    homes_root="$(_ctx_copilot_home_root)"
+                    home_dir="$homes_root/$sanitized"
                 fi
-                printf 'ctx: removed %s\n' "$home_dir"
+                if [ -z "$prev_home" ] || [ "$home_dir" != "$prev_home" ] || ! _ctx_validate_home_path "$home_dir" >/dev/null; then
+                    printf 'ctx: error: refusing to remove unsafe or unselected home: %s\n' "$home_dir" >&2
+                    return 1
+                fi
+                if [ -d "$home_dir" ] && [ ! -L "$home_dir" ]; then
+                    local remove_status=0
+                    rm -rf -- "$home_dir" || remove_status=$?
+                    if [ "$remove_status" -ne 0 ]; then
+                        printf 'ctx: error: failed to remove %s (status %s)\n' "$home_dir" "$remove_status" >&2
+                        return "$remove_status"
+                    fi
+                    printf 'ctx: removed %s\n' "$home_dir"
+                fi
             fi
         fi
     fi
@@ -405,7 +421,7 @@ ctx() {
     if [ ! -d "$root" ]; then printf 'ctx: error: AI config root does not exist: %s\n' "$root" >&2; return 1; fi
     local mode
     mode="$(_ctx_validate_copilot_mode)" || return 1
-    local dirs_csv=""
+    local dirs_csv="" skills_dirs_csv=""
     local -a resolved_dirs_manual=() context_names=() seen_names=()
     for context_name in "$@"; do
         context_lc="$(_ctx_lowercase "$context_name")"
@@ -419,8 +435,36 @@ ctx() {
     done
     [ "${#context_names[@]}" -gt 0 ] || return 1
     profile_name="${context_names[0]}"
+    # COPILOT_SKILLS_DIRS is validated before any state change; a comma in
+    # an included skills path rejects the whole activation.
+    if ! skills_dirs_csv="$(_ctx_compute_skills_dirs_csv "${resolved_dirs_manual[@]}")"; then return 1; fi
     AI_CTX_PROFILES="${context_names[*]}"; AI_CTX_PROFILES="${AI_CTX_PROFILES// /+}"
-    if ! _ctx_setup_copilot_home "$AI_CTX_PROFILES" "" "${resolved_dirs_manual[@]}"; then return 1; fi
+    case "$mode" in
+        global-user)
+            # Mode B: never set up or touch COPILOT_HOME at all.
+            _ctx_skills_dirs_owned=1
+            ;;
+        synthetic-home|ephemeral-clean)
+            if ! _ctx_setup_copilot_home "$AI_CTX_PROFILES" "" "${resolved_dirs_manual[@]}"; then return 1; fi
+            ;;
+    esac
+    case "$mode" in
+        global-user|ephemeral-clean)
+            # B/C: export the freshly computed value; fully replaced each activation.
+            if [ -n "$skills_dirs_csv" ]; then
+                export COPILOT_SKILLS_DIRS="$skills_dirs_csv"
+            else
+                unset COPILOT_SKILLS_DIRS
+            fi
+            ;;
+        synthetic-home)
+            # A: only unset a value a prior B/C activation in this session set.
+            if [ "$_ctx_skills_dirs_owned" -eq 1 ]; then
+                unset COPILOT_SKILLS_DIRS
+                _ctx_skills_dirs_owned=0
+            fi
+            ;;
+    esac
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv" AI_CTX_PROFILES
     _ctx_print_status "$AI_CTX_PROFILES" "" "$dirs_csv"
 }
@@ -431,6 +475,11 @@ _ctx_auto_load_dir=""
 # .ctx file auto-loaded, so _ctx_clear --all knows to look for the
 # synthetic COPILOT_HOME at that location instead of the centralized one.
 _ctx_auto_load_home_override=""
+# Tracks whether ctx itself set COPILOT_SKILLS_DIRS in this session (Modes
+# B/C). Set to 1 on any B/C activation, read by _ctx_clear and by a switch
+# into Mode A so ctx only ever unsets a value it set this session, never a
+# user's own value; reset to 0 when the variable is unset.
+_ctx_skills_dirs_owned=0
 
 _ctx_ctx_file_has_noautoload() {
     # Returns 0 (true) when the given .ctx file contains a bare "noautoload"
@@ -548,6 +597,27 @@ _ctx_validate_copilot_mode() {
             return 1 ;;
     esac
     printf '%s\n' "$mode"
+}
+
+_ctx_compute_skills_dirs_csv() {
+    # Computes the COPILOT_SKILLS_DIRS value for Modes B/C: the existing
+    # <resolved-dir>/.github/skills directories of the given resolved dirs,
+    # in the same stable order they are given, comma-joined. Prints nothing
+    # when zero such directories exist. Side-effect-free: on failure prints
+    # ctx: error to stderr and returns 1, rejecting the whole activation
+    # before any state change.
+    local rd skill_dir csv=""
+    for rd in "$@"; do
+        skill_dir="$rd/.github/skills"
+        [ -d "$skill_dir" ] || continue
+        case "$skill_dir" in
+            *,*)
+                printf 'ctx: error: COPILOT_SKILLS_DIRS path contains a literal comma: %s\n' "$skill_dir" >&2
+                return 1 ;;
+        esac
+        [ -z "$csv" ] && csv="$skill_dir" || csv="$csv,$skill_dir"
+    done
+    printf '%s\n' "$csv"
 }
 
 # List of files
@@ -908,7 +978,7 @@ _ctx_parse_ctx_file() {
 }
 
 _ctx_load_ctx_file() {
-    local ctx_file="$1" dirs_csv shared_csv mode
+    local ctx_file="$1" dirs_csv shared_csv mode skills_dirs_csv
     _ctx_parse_ctx_file "$ctx_file" || return 1
     mode="$(_ctx_validate_copilot_mode)" || return 1
     if [ -n "$_ctx_parsed_home" ] && [ "$mode" != "synthetic-home" ]; then
@@ -916,9 +986,37 @@ _ctx_load_ctx_file() {
         return 1
     fi
     dirs_csv="$(IFS=,; printf '%s' "${_ctx_parsed_dirs[*]}")"
+    # COPILOT_SKILLS_DIRS is validated before any state change; a comma in
+    # an included skills path rejects the whole activation.
+    if ! skills_dirs_csv="$(_ctx_compute_skills_dirs_csv "${_ctx_parsed_dirs[@]}")"; then return 1; fi
     _ctx_update_workspace_file "$_ctx_parsed_dir" "${_ctx_parsed_pairs[@]}"
     export AI_CTX_PROFILES="$_ctx_parsed_context" COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv"
-    _ctx_setup_copilot_home "$_ctx_parsed_context" "$_ctx_parsed_home" "${_ctx_parsed_dirs[@]}" || return 1
+    case "$mode" in
+        global-user)
+            # Mode B: never set up or touch COPILOT_HOME at all.
+            _ctx_skills_dirs_owned=1
+            ;;
+        synthetic-home|ephemeral-clean)
+            _ctx_setup_copilot_home "$_ctx_parsed_context" "$_ctx_parsed_home" "${_ctx_parsed_dirs[@]}" || return 1
+            ;;
+    esac
+    case "$mode" in
+        global-user|ephemeral-clean)
+            # B/C: export the freshly computed value; fully replaced each activation.
+            if [ -n "$skills_dirs_csv" ]; then
+                export COPILOT_SKILLS_DIRS="$skills_dirs_csv"
+            else
+                unset COPILOT_SKILLS_DIRS
+            fi
+            ;;
+        synthetic-home)
+            # A: only unset a value a prior B/C activation in this session set.
+            if [ "$_ctx_skills_dirs_owned" -eq 1 ]; then
+                unset COPILOT_SKILLS_DIRS
+                _ctx_skills_dirs_owned=0
+            fi
+            ;;
+    esac
     _ctx_auto_load_home_override="$_ctx_parsed_home"
     if [ "$_ctx_parsed_context" = "$_ctx_parsed_first_name" ]; then shared_csv=""; else shared_csv="${_ctx_parsed_context#*+}"; shared_csv="${shared_csv//+/, }"; fi
     _ctx_print_status "$_ctx_parsed_first_name" "$shared_csv" "$dirs_csv"

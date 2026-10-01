@@ -18,17 +18,17 @@
 
 ## 3. Mode B Environment/Home Semantics
 
-- [ ] 3.1 Implement Mode B activation in `ctx.sh`: never read/set/unset/create/delete `COPILOT_HOME`; leave any value (user-set, leftover from A/C, or unset) exactly as-is; do not restore or clear an old pointer on an A/C→B switch. Verify: `bats tests/ctx.bats` passes and a manual check that a pre-set `COPILOT_HOME` is untouched after `ctx <profile>`.
-- [ ] 3.2 Implement `COPILOT_SKILLS_DIRS` wiring in `ctx.sh` for Modes B/C: existing `<resolved-root>/.github/skills` dirs of the active entries, stable order, comma-joined, unset when none exist, fully replaced each activation, unset on `ctx clear` and on a successful switch into Mode A, and rejection of a resolved path containing a literal comma before export with no side effects. Verify: `bats tests/ctx.bats` passes with the new Mode B cases.
-- [ ] 3.3 Mirror 3.1 and 3.2 in `ctx.ps1`. Verify: `Invoke-Pester tests/ctx.Tests.ps1` passes with the new Mode B cases.
-- [ ] 3.4 Add bats case: Mode B with `COPILOT_HOME` unset, custom, and leftover-from-A-or-C — left exactly as-is across activation and clear. Verify: `bats tests/ctx.bats`.
-- [ ] 3.5 Add bats case: Mode B with no skill dirs present — `COPILOT_SKILLS_DIRS` left unset, not empty. Verify: `bats tests/ctx.bats`.
-- [ ] 3.6 Add bats case: directory-order stability and comma-rejection in `COPILOT_SKILLS_DIRS` (existing dirs listed in stable order; a resolved path with a literal comma rejected before export). Verify: `bats tests/ctx.bats`.
-- [ ] 3.7 Add bats case: B/C→A transition correctly unsets a session-set `COPILOT_SKILLS_DIRS` while never touching a user-set value. Verify: `bats tests/ctx.bats`.
-- [ ] 3.8 Mirror 3.4 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
-- [ ] 3.9 Mirror 3.5 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
-- [ ] 3.10 Mirror 3.6 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
-- [ ] 3.11 Mirror 3.7 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 3.1 Implement Mode B activation in `ctx.sh`: never read/set/unset/create/delete `COPILOT_HOME`; leave any value (user-set, leftover from A/C, or unset) exactly as-is; do not restore or clear an old pointer on an A/C→B switch. Verify: `bats tests/ctx.bats` passes and a manual check that a pre-set `COPILOT_HOME` is untouched after `ctx <profile>`.
+- [x] 3.2 Implement `COPILOT_SKILLS_DIRS` wiring in `ctx.sh` for Modes B/C: existing `<resolved-root>/.github/skills` dirs of the active entries, stable order, comma-joined, unset when none exist, fully replaced each activation, unset on `ctx clear` and on a successful switch into Mode A, and rejection of a resolved path containing a literal comma before export with no side effects. Verify: `bats tests/ctx.bats` passes with the new Mode B cases.
+- [x] 3.3 Mirror 3.1 and 3.2 in `ctx.ps1`. Verify: `Invoke-Pester tests/ctx.Tests.ps1` passes with the new Mode B cases.
+- [x] 3.4 Add bats case: Mode B with `COPILOT_HOME` unset, custom, and leftover-from-A-or-C — left exactly as-is across activation and clear. Verify: `bats tests/ctx.bats`.
+- [x] 3.5 Add bats case: Mode B with no skill dirs present — `COPILOT_SKILLS_DIRS` left unset, not empty. Verify: `bats tests/ctx.bats`.
+- [x] 3.6 Add bats case: directory-order stability and comma-rejection in `COPILOT_SKILLS_DIRS` (existing dirs listed in stable order; a resolved path with a literal comma rejected before export). Verify: `bats tests/ctx.bats`.
+- [x] 3.7 Add bats case: B/C→A transition correctly unsets a session-set `COPILOT_SKILLS_DIRS` while never touching a user-set value. Verify: `bats tests/ctx.bats`.
+- [x] 3.8 Mirror 3.4 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 3.9 Mirror 3.5 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 3.10 Mirror 3.6 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 3.11 Mirror 3.7 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
 
 ## 4. Mode C Lifecycle
 

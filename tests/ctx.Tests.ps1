@@ -57,10 +57,12 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
         Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
         Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
         Remove-Item Env:\CTX_AUTO_LOAD -ErrorAction SilentlyContinue
         Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
         $Script:CtxAutoLoadDir = $null
         $Script:CtxAutoLoadHomeOverride = $null
+        $Script:CtxSkillsDirsOwned = $false
 
         Set-Location $env:HOME
         . $Script:CtxSrc
@@ -1015,6 +1017,113 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         ctx load (Join-Path $proj '.ctx')
         $ErrorActionPreference = $previous
         ($Error | Select-Object -First 1).ToString() | Should -Match 'invalid .ctx line'
+    }
+
+    It 'Mode B: COPILOT_HOME is left exactly as-is across activation and clear' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        # (a) unset before activation -> still unset after
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        ctx review
+        $env:COPILOT_HOME | Should -BeNullOrEmpty
+        Clear-CtxContext
+        $env:COPILOT_HOME | Should -BeNullOrEmpty
+
+        # (b) custom user value byte-identical after activation
+        $custom = Join-Path $Script:TestTmp 'custom-home'
+        $env:COPILOT_HOME = $custom
+        ctx review
+        $env:COPILOT_HOME | Should -Be $custom
+        Clear-CtxContext
+        $env:COPILOT_HOME | Should -Be $custom
+
+        # (c) leftover synthetic home from a prior Mode A activation is untouched
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx review
+        $leftover = $env:COPILOT_HOME
+        $leftover | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath $leftover -PathType Container | Should -BeTrue
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        ctx test
+        $env:COPILOT_HOME | Should -Be $leftover
+
+        # clear --all under Mode B: returns $true, COPILOT_HOME unchanged,
+        # workspace artifact still cleaned up
+        $proj = Join-Path $Script:TestTmp 'project-b-clear-all'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review2' -Skill 'review-skill'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review2:$reviewDir"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Should -BeTrue
+        $beforeHome = $env:COPILOT_HOME
+        $workspace = Join-Path $proj 'project-b-clear-all.code-workspace'
+        Test-Path -LiteralPath $workspace | Should -BeTrue
+        Clear-CtxContext -All | Should -BeTrue
+        $env:COPILOT_HOME | Should -Be $beforeHome
+        Test-Path -LiteralPath $workspace | Should -BeFalse
+    }
+
+    It 'Mode B: COPILOT_SKILLS_DIRS is unset (not empty) when no skills dirs exist' {
+        New-CtxTestProfile -Name 'review' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        ctx review
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+
+        Clear-CtxContext | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        ctx review
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+    }
+
+    It 'Mode B: COPILOT_SKILLS_DIRS keeps stable order and rejects comma paths' {
+        $alphaDir = New-CtxTestProfile -Name 'alpha' -Skill 'alpha-skill'
+        $betaDir = New-CtxTestProfile -Name 'beta' -Skill 'beta-skill'
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        # (a) existing skills dirs listed in the same stable order as the entries
+        ctx alpha beta
+        $expected = (Join-Path $alphaDir '.github\skills') + ',' + (Join-Path $betaDir '.github\skills')
+        $env:COPILOT_SKILLS_DIRS | Should -Be $expected
+
+        # fully replaced (not appended) on the next activation
+        ctx beta
+        $env:COPILOT_SKILLS_DIRS | Should -Be (Join-Path $betaDir '.github\skills')
+
+        # (b) a resolved path with a literal comma is rejected before any state change
+        $commaDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/a,b'
+        New-Item -ItemType Directory -Path (Join-Path $commaDir '.github\skills') -Force | Out-Null
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_HOME = 'previous-home'
+        $env:COPILOT_SKILLS_DIRS = 'previous-skills'
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx 'a,b' } finally { $ErrorActionPreference = $prevEap }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'comma'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'previous-skills'
+    }
+
+    It 'Mode B/C -> Mode A unsets a session-set COPILOT_SKILLS_DIRS but never a user value' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        # B activation sets COPILOT_SKILLS_DIRS (ctx-owned this session)
+        ctx review
+        $env:COPILOT_SKILLS_DIRS | Should -Not -BeNullOrEmpty
+
+        # switch into Mode A -> unset
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx test
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+
+        # fresh session state: a user-set value is never touched by Mode A
+        $Script:CtxSkillsDirsOwned = $false
+        $env:COPILOT_SKILLS_DIRS = 'my-own-value'
+        ctx review
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'my-own-value'
     }
 
 }

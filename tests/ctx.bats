@@ -20,9 +20,10 @@ setup() {
     # Repo root, for fixtures under examples/.
     export REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
-    unset AI_CTX_PROFILES AI_CONTEXT AI_CONFIG_ROOT CTX_HOMES_ROOT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME CTX_AUTO_LOAD
+    unset AI_CTX_PROFILES AI_CONTEXT AI_CONFIG_ROOT CTX_HOMES_ROOT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME COPILOT_SKILLS_DIRS CTX_AUTO_LOAD
     unset AI_CTX_PROFILES_COPILOT_MODE
     unset _ctx_auto_load_dir
+    unset _ctx_skills_dirs_owned
 
     # shellcheck source=/dev/null
     source "$CTX_SRC"
@@ -1307,4 +1308,115 @@ EOF
     run ctx load "$proj/.ctx"
     [ "$status" -ne 0 ]
     [[ "$output" == *"invalid .ctx line"* ]]
+}
+
+# --- Group 3: Mode B (global-user) environment/home semantics --------------
+
+@test "Mode B: COPILOT_HOME is left exactly as-is across activation and clear" {
+    _make_profile review review-skill
+    _make_profile test test-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # (a) unset before activation -> still unset after
+    unset COPILOT_HOME
+    ctx review
+    [ -z "${COPILOT_HOME:-}" ]
+    _ctx_clear
+    [ -z "${COPILOT_HOME:-}" ]
+
+    # (b) custom user value byte-identical after activation
+    export COPILOT_HOME="$TEST_TMP/custom-home"
+    ctx review
+    [ "$COPILOT_HOME" = "$TEST_TMP/custom-home" ]
+    _ctx_clear
+    [ "$COPILOT_HOME" = "$TEST_TMP/custom-home" ]
+
+    # (c) leftover synthetic home from a prior Mode A activation is untouched
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx review
+    local leftover="$COPILOT_HOME"
+    [ -n "$leftover" ]
+    [ -d "$leftover" ]
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    ctx test
+    [ "$COPILOT_HOME" = "$leftover" ]
+
+    # clear --all under Mode B: exits 0, COPILOT_HOME unchanged, workspace
+    # artifact still cleaned up
+    local proj="$TEST_TMP/project-b-clear-all"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx"
+    local before_home="$COPILOT_HOME"
+    local workspace="$proj/project-b-clear-all.code-workspace"
+    [ -f "$workspace" ]
+    _ctx_clear --all
+    [ "$?" -eq 0 ]
+    [ "$COPILOT_HOME" = "$before_home" ]
+    [ ! -e "$workspace" ]
+}
+
+@test "Mode B: COPILOT_SKILLS_DIRS is unset (not empty) when no skills dirs exist" {
+    _make_profile review
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    ctx review
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    _ctx_clear
+    ctx review
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+}
+
+@test "Mode B: COPILOT_SKILLS_DIRS keeps stable order and rejects comma paths" {
+    _make_profile alpha alpha-skill
+    _make_profile beta beta-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # (a) existing skills dirs listed in the same stable order as the entries
+    ctx alpha beta
+    [ "$COPILOT_SKILLS_DIRS" = "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/alpha/.github/skills,$AI_CTX_PROFILES_CONFIG_ROOT/profiles/beta/.github/skills" ]
+
+    # fully replaced (not appended) on the next activation
+    ctx beta
+    [ "$COPILOT_SKILLS_DIRS" = "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/beta/.github/skills" ]
+
+    # (b) a resolved path with a literal comma is rejected before any state change
+    local comma_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/a,b"
+    mkdir -p "$comma_dir/.github/skills"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_HOME=previous-home
+    export COPILOT_SKILLS_DIRS=previous-skills
+
+    run ctx a,b
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"comma"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ "$COPILOT_SKILLS_DIRS" = previous-skills ]
+}
+
+@test "Mode B/C -> Mode A unsets a session-set COPILOT_SKILLS_DIRS but never a user value" {
+    _make_profile review review-skill
+    _make_profile test test-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # B activation sets COPILOT_SKILLS_DIRS (ctx-owned this session)
+    ctx review
+    [ -n "$COPILOT_SKILLS_DIRS" ]
+
+    # switch into Mode A -> unset
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx test
+    [ -z "${COPILOT_SKILLS_DIRS:-}" ]
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+
+    # fresh session state: a user-set value is never touched by Mode A
+    _ctx_skills_dirs_owned=0
+    export COPILOT_SKILLS_DIRS=my-own-value
+    ctx review
+    [ "$COPILOT_SKILLS_DIRS" = my-own-value ]
 }

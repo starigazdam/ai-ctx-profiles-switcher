@@ -199,9 +199,23 @@ function Clear-CtxContext {
     $prevContext = $env:AI_CTX_PROFILES
     $prevHome = $env:COPILOT_HOME
     $cleanupFailed = $false
+    # Mode B (global-user) never touches COPILOT_HOME and skips the --all
+    # home-directory removal, so resolve the live mode first. An invalid
+    # value is treated as synthetic-home so Clear-CtxContext stays usable to
+    # recover from a broken env value.
+    $clearMode = 'synthetic-home'
+    try { $clearMode = Get-CtxValidatedCopilotMode } catch { $clearMode = 'synthetic-home' }
     Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
-    Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+    if ($clearMode -cne 'global-user') {
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+    }
+    # Only unset COPILOT_SKILLS_DIRS when ctx itself set it this session;
+    # a user's own value is left alone.
+    if ($Script:CtxSkillsDirsOwned) {
+        Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
+        $Script:CtxSkillsDirsOwned = $false
+    }
 
     if ($All) {
         $dirOfFile = $Script:CtxAutoLoadDir
@@ -266,27 +280,29 @@ function Clear-CtxContext {
             }
         }
 
-        if ($prevContext) {
-            if ($Script:CtxAutoLoadHomeOverride) {
-                $homeDir = $Script:CtxAutoLoadHomeOverride
-            } else {
-                $sanitized = Get-CtxSanitizedContextName -Name $prevContext
-                $homesRoot = Get-CtxCopilotHomeRoot
-                $homeDir = Join-Path $homesRoot $sanitized
-            }
-            if (-not $prevHome -or $homeDir -ne $prevHome) {
-                Write-Error "ctx: error: refusing to remove unsafe or unselected home: $homeDir" -ErrorAction Continue
-                return $false
-            }
-            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_" -ErrorAction Continue; return $false }
-            if ((Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
-                try {
-                    Remove-Item -LiteralPath $homeDir -Recurse -Force -ErrorAction Stop
-                } catch {
-                    Write-Error "ctx: error: failed to remove $homeDir`: $_" -ErrorAction Continue
+        if ($clearMode -cne 'global-user') {
+            if ($prevContext) {
+                if ($Script:CtxAutoLoadHomeOverride) {
+                    $homeDir = $Script:CtxAutoLoadHomeOverride
+                } else {
+                    $sanitized = Get-CtxSanitizedContextName -Name $prevContext
+                    $homesRoot = Get-CtxCopilotHomeRoot
+                    $homeDir = Join-Path $homesRoot $sanitized
+                }
+                if (-not $prevHome -or $homeDir -ne $prevHome) {
+                    Write-Error "ctx: error: refusing to remove unsafe or unselected home: $homeDir" -ErrorAction Continue
                     return $false
                 }
-                Write-Host "ctx: removed $homeDir"
+                try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_" -ErrorAction Continue; return $false }
+                if ((Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
+                    try {
+                        Remove-Item -LiteralPath $homeDir -Recurse -Force -ErrorAction Stop
+                    } catch {
+                        Write-Error "ctx: error: failed to remove $homeDir`: $_" -ErrorAction Continue
+                        return $false
+                    }
+                    Write-Host "ctx: removed $homeDir"
+                }
             }
         }
     }
@@ -372,7 +388,8 @@ function ctx {
         return
     }
 
-    try { $null = Get-CtxValidatedCopilotMode } catch { Write-Error "ctx: error: $_"; return }
+    $mode = $null
+    try { $mode = Get-CtxValidatedCopilotMode } catch { Write-Error "ctx: error: $_"; return }
 
     $profileName = $Contexts[0]
     $profileNames = @()
@@ -390,10 +407,31 @@ function ctx {
     $dirsCsv = $dirsList -join ','
     $sharedCsv = ""
 
+    # COPILOT_SKILLS_DIRS is validated before any state change; a comma in
+    # an included skills path rejects the whole activation.
+    $skillsDirsCsv = $null
+    try { $skillsDirsCsv = Get-CtxSkillsDirsCsv -ResolvedDirs $dirsList } catch { Write-Error "ctx: error: $_"; return }
+
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
     $env:AI_CTX_PROFILES = $profileNames -join '+'
 
-    Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirsList
+    if ($mode -ceq 'global-user') {
+        # Mode B: never set up or touch COPILOT_HOME at all.
+        $Script:CtxSkillsDirsOwned = $true
+    } else {
+        Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirsList
+    }
+
+    if ($mode -ceq 'global-user' -or $mode -ceq 'ephemeral-clean') {
+        # B/C: export the freshly computed value; fully replaced each activation.
+        if ($skillsDirsCsv) { $env:COPILOT_SKILLS_DIRS = $skillsDirsCsv } else { Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue }
+    } else {
+        # A: only unset a value a prior B/C activation in this session set.
+        if ($Script:CtxSkillsDirsOwned) {
+            Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
+            $Script:CtxSkillsDirsOwned = $false
+        }
+    }
 
     Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv -DirsCsv $dirsCsv
 }
@@ -406,6 +444,11 @@ $Script:CtxLastPwd = $null
 # .ctx file auto-loaded, so Clear-CtxContext -All knows to look for the
 # synthetic COPILOT_HOME at that location instead of the centralized one.
 $Script:CtxAutoLoadHomeOverride = $null
+# Tracks whether ctx itself set COPILOT_SKILLS_DIRS in this session (Modes
+# B/C). Set to $true on any B/C activation, read by Clear-CtxContext and by
+# a switch into Mode A so ctx only ever unsets a value it set this session,
+# never a user's own value; reset to $false when the variable is unset.
+$Script:CtxSkillsDirsOwned = $false
 
 function Get-CtxCopilotHomeRoot {
     if ($env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT) {
@@ -467,6 +510,28 @@ function Get-CtxValidatedCopilotMode {
         throw "invalid AI_CTX_PROFILES_COPILOT_MODE `"$mode`" (allowed values: synthetic-home, global-user, ephemeral-clean)"
     }
     return $mode
+}
+
+function Get-CtxSkillsDirsCsv {
+    # Computes the COPILOT_SKILLS_DIRS value for Modes B/C: the existing
+    # <resolved-dir>\.github\skills directories of the given resolved dirs,
+    # in the same stable order they are given, comma-joined. Returns $null
+    # when zero such directories exist. Side-effect-free: throws on a
+    # literal comma in an included skills path (no escaping mechanism
+    # exists), rejecting the whole activation before any state change.
+    param([string[]]$ResolvedDirs)
+    $skills = @()
+    foreach ($rd in $ResolvedDirs) {
+        $skillDir = Join-Path $rd '.github\skills'
+        if (Test-Path -LiteralPath $skillDir -PathType Container) {
+            if ($skillDir.Contains(',')) {
+                throw "COPILOT_SKILLS_DIRS path contains a literal comma: $skillDir"
+            }
+            $skills += $skillDir
+        }
+    }
+    if ($skills.Count -eq 0) { return $null }
+    return ($skills -join ',')
 }
 
 function Get-CtxCopilotHomeSharedFiles {
@@ -974,9 +1039,28 @@ function Import-CtxFile {
     }
     Update-CtxWorkspaceFile -BaseDir $parsed.Dir -Names $parsed.Names -Dirs $parsed.Dirs
     $dirsCsv = $parsed.Dirs -join ','
+    # COPILOT_SKILLS_DIRS is validated before any state change; a comma in
+    # an included skills path rejects the whole activation.
+    $skillsDirsCsv = $null
+    try { $skillsDirsCsv = Get-CtxSkillsDirsCsv -ResolvedDirs $parsed.Dirs } catch { Write-Error "ctx: error: $_"; return $false }
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
     $env:AI_CTX_PROFILES = $parsed.Context
-    Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride
+    if ($mode -ceq 'global-user') {
+        # Mode B: never set up or touch COPILOT_HOME at all.
+        $Script:CtxSkillsDirsOwned = $true
+    } else {
+        Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride
+    }
+    if ($mode -ceq 'global-user' -or $mode -ceq 'ephemeral-clean') {
+        # B/C: export the freshly computed value; fully replaced each activation.
+        if ($skillsDirsCsv) { $env:COPILOT_SKILLS_DIRS = $skillsDirsCsv } else { Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue }
+    } else {
+        # A: only unset a value a prior B/C activation in this session set.
+        if ($Script:CtxSkillsDirsOwned) {
+            Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
+            $Script:CtxSkillsDirsOwned = $false
+        }
+    }
     $Script:CtxAutoLoadHomeOverride = $parsed.HomeOverride
     $sharedCsv = ($parsed.Names | Select-Object -Skip 1) -join ', '
     Write-CtxStatus -ProfileName $parsed.Names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv
