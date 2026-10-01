@@ -20,8 +20,12 @@ setup() {
     # Repo root, for fixtures under examples/.
     export REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
-    unset AI_CTX_PROFILES AI_CONTEXT AI_CONFIG_ROOT CTX_HOMES_ROOT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME CTX_AUTO_LOAD
+    unset AI_CTX_PROFILES AI_CONTEXT AI_CONFIG_ROOT CTX_HOMES_ROOT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME COPILOT_SKILLS_DIRS CTX_AUTO_LOAD
+    unset AI_CTX_PROFILES_COPILOT_MODE
     unset _ctx_auto_load_dir
+    unset _ctx_skills_dirs_owned
+    unset _ctx_skills_dirs_was_set
+    unset _ctx_skills_dirs_value
 
     # shellcheck source=/dev/null
     source "$CTX_SRC"
@@ -49,10 +53,11 @@ teardown() {
     export AI_CTX_PROFILES=previous
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
 
-    run ctx review Review
+    local status=0
+    ctx review Review >"$TEST_TMP/dup.out" 2>&1 || status=$?
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *"duplicate profile"* ]]
+    [[ "$(<"$TEST_TMP/dup.out")" == *"duplicate profile"* ]]
     [ "$AI_CTX_PROFILES" = previous ]
     [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
 }
@@ -79,10 +84,11 @@ teardown() {
     printf 'review:@profile\nReview:@profile\n' > "$proj/.ctx"
     export AI_CTX_PROFILES=previous
 
-    run _ctx_load_ctx_file "$proj/.ctx"
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/dup-ctx.out" 2>&1 || status=$?
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *"duplicate .ctx entry label"* ]]
+    [[ "$(<"$TEST_TMP/dup-ctx.out")" == *"duplicate .ctx entry label"* ]]
     [ "$AI_CTX_PROFILES" = previous ]
 }
 
@@ -451,9 +457,10 @@ EOF
     mkdir -p "$proj"
     printf 'home:../outside\nreview:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
-    run _ctx_load_ctx_file "$proj/.ctx"
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/home-traverse.out" 2>&1 || status=$?
     [ "$status" -ne 0 ]
-    [[ "$output" == *"unsafe home"* ]]
+    [[ "$(<"$TEST_TMP/home-traverse.out")" == *"unsafe home"* ]]
     [ -z "${AI_CTX_PROFILES:-}" ]
     [ ! -d "$TEST_TMP/outside" ]
 }
@@ -464,9 +471,10 @@ EOF
     mkdir -p "$proj"
     printf 'home:%s\nreview:%s\n' "$TEST_TMP/unrelated" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
-    run _ctx_load_ctx_file "$proj/.ctx"
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/home-absolute.out" 2>&1 || status=$?
     [ "$status" -ne 0 ]
-    [[ "$output" == *"unsafe home"* ]]
+    [[ "$(<"$TEST_TMP/home-absolute.out")" == *"unsafe home"* ]]
     [ ! -d "$TEST_TMP/unrelated" ]
 }
 
@@ -476,9 +484,10 @@ EOF
     mkdir -p "$proj"
     for value in / ''; do
         printf 'home:%s\nreview:%s\n' "$value" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
-        run _ctx_load_ctx_file "$proj/.ctx"
+        local status=0
+        _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/home-boundaries.out" 2>&1 || status=$?
         [ "$status" -ne 0 ]
-        [[ "$output" == *"unsafe home"* || "$output" == *"invalid .ctx line"* ]]
+        [[ "$(<"$TEST_TMP/home-boundaries.out")" == *"unsafe home"* || "$(<"$TEST_TMP/home-boundaries.out")" == *"invalid .ctx line"* ]]
     done
 }
 
@@ -490,9 +499,10 @@ EOF
     ln -s "$outside" "$proj/link"
     printf 'home:%s\nreview:%s\n' "$proj/link/child" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
 
-    run _ctx_load_ctx_file "$proj/.ctx"
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/home-link.out" 2>&1 || status=$?
     [ "$status" -ne 0 ]
-    [[ "$output" == *"unsafe home"* ]]
+    [[ "$(<"$TEST_TMP/home-link.out")" == *"unsafe home"* ]]
     [ ! -d "$outside/child" ]
 }
 
@@ -503,7 +513,9 @@ EOF
     mkdir -p "$outside"
     ln -s "$outside" "$victim"
     printf 'important\n' > "$outside/data.txt"
-    export AI_CTX_PROFILES=review
+    # Establish a real Mode A activation record, then point COPILOT_HOME and
+    # the home override at the unsafe link so clear --all still refuses.
+    ctx review >/dev/null
     export COPILOT_HOME="$victim"
     _ctx_auto_load_home_override="$victim"
 
@@ -520,6 +532,62 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "home: directive conflicts with a non-synthetic-home mode and leaves state untouched" {
+    _make_profile review
+    local proj="$TEST_TMP/project-home-mode-conflict"
+    local custom="$HOME/.config/ctx/homes/mode-conflict"
+    mkdir -p "$proj"
+    printf 'home:%s\nreview:%s\n' "$custom" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/home-conflict.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/home-conflict.out")" == *"ctx: error:"* ]]
+    [[ "$(<"$TEST_TMP/home-conflict.out")" == *"home"* ]]
+    [[ "$(<"$TEST_TMP/home-conflict.out")" == *"global-user"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ ! -d "$custom" ]
+}
+
+@test "an invalid copilot mode is rejected before any state change" {
+    _make_profile review
+    local proj="$TEST_TMP/project-invalid-mode"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    export AI_CTX_PROFILES_COPILOT_MODE=bogus
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+
+    local status=0
+    ctx review >"$TEST_TMP/invalid-mode.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/invalid-mode.out")" == *"ctx: error:"* ]]
+    [[ "$(<"$TEST_TMP/invalid-mode.out")" == *"synthetic-home"* ]]
+    [[ "$(<"$TEST_TMP/invalid-mode.out")" == *"global-user"* ]]
+    [[ "$(<"$TEST_TMP/invalid-mode.out")" == *"ephemeral-clean"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+
+    status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/invalid-mode-load.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ ! -e "$proj/project-invalid-mode.code-workspace" ]
+}
+
 @test "public ctx clear --all propagates unsafe home failure" {
     _make_profile "review"
     local victim="$HOME/public-victim-home"
@@ -527,7 +595,9 @@ EOF
     mkdir -p "$outside"
     ln -s "$outside" "$victim"
     printf 'important\n' > "$outside/data.txt"
-    export AI_CTX_PROFILES=review
+    # Establish a real Mode A activation record, then point COPILOT_HOME and
+    # the home override at the unsafe link so clear --all still refuses.
+    ctx review >/dev/null
     export COPILOT_HOME="$victim"
     _ctx_auto_load_home_override="$victim"
 
@@ -539,10 +609,11 @@ EOF
 
 @test "ctx clear --all propagates a valid-home deletion failure" {
     _make_profile "review"
-    local victim="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
-    mkdir -p "$victim"
-    export AI_CTX_PROFILES=review
-    export COPILOT_HOME="$victim"
+    # Establish a real Mode A activation record; the synthetic home is the
+    # deletion target.
+    ctx review >/dev/null
+    local victim="$COPILOT_HOME"
+    [ -d "$victim" ]
 
     rm() { return 42; }
     run ctx clear --all
@@ -1005,6 +1076,43 @@ EOF
     [ "$(stat -c '%Y %s' "$proj/.ctx")" = "$before_file" ]
 }
 
+@test "Mode A default-equivalence: unset and explicit synthetic-home are byte-identical for current and check" {
+    _make_profile review review-skill
+    local proj="$HOME/project-mode-default-equivalence"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    unset AI_CTX_PROFILES_COPILOT_MODE
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    run ctx current
+    [ "$status" -eq 0 ]
+    local current_unset="$output"
+    [[ "$current_unset" == *"Mode: synthetic-home"* ]]
+
+    _ctx_clear >/dev/null
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    run ctx current
+    [ "$status" -eq 0 ]
+    local current_explicit="$output"
+    [[ "$current_explicit" == *"Mode: synthetic-home"* ]]
+    [ "$current_explicit" = "$current_unset" ]
+
+    unset AI_CTX_PROFILES_COPILOT_MODE
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    local check_unset="$output"
+    [[ "$check_unset" == *"CHECK PASS COPILOT_MODE"* ]]
+
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    run ctx check
+    [ "$status" -eq 0 ]
+    local check_explicit="$output"
+    [[ "$check_explicit" == *"CHECK PASS COPILOT_MODE"* ]]
+    [ "$check_explicit" = "$check_unset" ]
+}
+
 @test "ctx check rejects activation-invalid labels, targets, and home directives read-only" {
     _make_profile review
     local proj="$HOME/project-check-parser-invalid"
@@ -1030,18 +1138,20 @@ EOF
     export AI_CTX_PROFILES=previous
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
 
-    run ctx ../escaped
+    local status=0
+    ctx ../escaped >"$TEST_TMP/trav-manual.out" 2>&1 || status=$?
     [ "$status" -ne 0 ]
-    [[ "$output" == *"invalid profile identifier"* ]]
+    [[ "$(<"$TEST_TMP/trav-manual.out")" == *"invalid profile identifier"* ]]
     [ "$AI_CTX_PROFILES" = previous ]
     [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
 
     local proj="$HOME/project-profile-traversal"
     mkdir -p "$proj"
     printf '../escaped:@profile\nreview:@profile\n' > "$proj/.ctx"
-    run _ctx_load_ctx_file "$proj/.ctx"
+    status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/trav-ctx.out" 2>&1 || status=$?
     [ "$status" -ne 0 ]
-    [[ "$output" == *"invalid profile identifier"* ]]
+    [[ "$(<"$TEST_TMP/trav-ctx.out")" == *"invalid profile identifier"* ]]
     [ "$AI_CTX_PROFILES" = previous ]
     [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
 }
@@ -1216,4 +1326,729 @@ EOF
     run ctx load "$proj/.ctx"
     [ "$status" -ne 0 ]
     [[ "$output" == *"invalid .ctx line"* ]]
+}
+
+# --- Group 3: Mode B (global-user) environment/home semantics --------------
+
+@test "Mode B: COPILOT_HOME is left exactly as-is across activation and clear" {
+    _make_profile review review-skill
+    _make_profile test test-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # (a) unset before activation -> still unset after
+    unset COPILOT_HOME
+    ctx review
+    [ -z "${COPILOT_HOME:-}" ]
+    _ctx_clear
+    [ -z "${COPILOT_HOME:-}" ]
+
+    # (b) custom user value byte-identical after activation
+    export COPILOT_HOME="$TEST_TMP/custom-home"
+    ctx review
+    [ "$COPILOT_HOME" = "$TEST_TMP/custom-home" ]
+    _ctx_clear
+    [ "$COPILOT_HOME" = "$TEST_TMP/custom-home" ]
+
+    # (c) leftover synthetic home from a prior Mode A activation is untouched
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx review
+    local leftover="$COPILOT_HOME"
+    [ -n "$leftover" ]
+    [ -d "$leftover" ]
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    ctx test
+    [ "$COPILOT_HOME" = "$leftover" ]
+
+    # clear --all under Mode B: exits 0, COPILOT_HOME unchanged, workspace
+    # artifact still cleaned up
+    local proj="$TEST_TMP/project-b-clear-all"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx"
+    local before_home="$COPILOT_HOME"
+    local workspace="$proj/project-b-clear-all.code-workspace"
+    [ -f "$workspace" ]
+    _ctx_clear --all
+    [ "$?" -eq 0 ]
+    [ "$COPILOT_HOME" = "$before_home" ]
+    [ ! -e "$workspace" ]
+}
+
+@test "Mode B: COPILOT_SKILLS_DIRS is unset (not empty) when no skills dirs exist" {
+    _make_profile review
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    ctx review
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    _ctx_clear
+    ctx review
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+}
+
+@test "Mode B: COPILOT_SKILLS_DIRS keeps stable order and rejects comma paths" {
+    _make_profile alpha alpha-skill
+    _make_profile beta beta-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # (a) existing skills dirs listed in the same stable order as the entries
+    ctx alpha beta
+    [ "$COPILOT_SKILLS_DIRS" = "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/alpha/.github/skills,$AI_CTX_PROFILES_CONFIG_ROOT/profiles/beta/.github/skills" ]
+
+    # fully replaced (not appended) on the next activation
+    ctx beta
+    [ "$COPILOT_SKILLS_DIRS" = "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/beta/.github/skills" ]
+
+    # (b) a resolved path with a literal comma is rejected before any state change
+    local comma_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/a,b"
+    mkdir -p "$comma_dir/.github/skills"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_HOME=previous-home
+    export COPILOT_SKILLS_DIRS=previous-skills
+
+    local status=0
+    ctx a,b >"$TEST_TMP/comma.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/comma.out")" == *"comma"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ "$COPILOT_SKILLS_DIRS" = previous-skills ]
+}
+
+@test "Mode B/C -> Mode A unsets a session-set COPILOT_SKILLS_DIRS but never a user value" {
+    _make_profile review review-skill
+    _make_profile test test-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # B activation sets COPILOT_SKILLS_DIRS (ctx-owned this session)
+    ctx review
+    [ -n "$COPILOT_SKILLS_DIRS" ]
+
+    # switch into Mode A -> unset
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx test
+    [ -z "${COPILOT_SKILLS_DIRS:-}" ]
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+
+    # fresh session state: a user-set value is never touched by Mode A
+    _ctx_skills_dirs_owned=0
+    export COPILOT_SKILLS_DIRS=my-own-value
+    ctx review
+    [ "$COPILOT_SKILLS_DIRS" = my-own-value ]
+}
+
+# --- Group 4: Mode C (ephemeral-clean) lifecycle ----------------------------
+
+@test "Mode C: every activation gets a fresh unique ephemeral home; clear never deletes" {
+    _make_profile review review-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+
+    # (a) reactivating the same profile (no clear between) yields a different
+    # path, and BOTH ephemeral dirs stay on disk - Mode C never deletes
+    ctx review
+    local home1="$COPILOT_HOME"
+    ctx review
+    local home2="$COPILOT_HOME"
+    [ -n "$home1" ]
+    [ -n "$home2" ]
+    [ "$home1" != "$home2" ]
+    [ -d "$home1" ]
+    [ -d "$home2" ]
+
+    # (b) plain ctx clear unsets COPILOT_HOME but leaves home2 + marker on disk
+    touch "$home2/marker"
+    ctx clear >"$TEST_TMP/c-clear.out" 2>&1
+    [ -z "${COPILOT_HOME:-}" ]
+    [ -f "$home2/marker" ]
+    [ -d "$home2" ]
+
+    # (c) ctx clear --all reports the retained path, still never deletes, and
+    # the common workspace/settings cleanup still runs
+    local proj="$TEST_TMP/project-c-clear-all"
+    mkdir -p "$proj"
+    cat > "$proj/.ctx" <<EOF
+review:$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review
+EOF
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx"
+    local home3="$COPILOT_HOME"
+    touch "$home3/marker"
+    local workspace="$proj/project-c-clear-all.code-workspace"
+    [ -f "$workspace" ]
+    ctx clear --all >"$TEST_TMP/c-clear-all.out" 2>&1
+    local clear_all_status=$?
+    local clear_all_out
+    clear_all_out="$(<"$TEST_TMP/c-clear-all.out")"
+    [ "$clear_all_status" -eq 0 ]
+    [ -z "${COPILOT_HOME:-}" ]
+    [ -f "$home3/marker" ]
+    [ -d "$home3" ]
+    [[ "$clear_all_out" == *"retained"* ]]
+    [[ "$clear_all_out" == *"not deleted"* ]]
+    [[ "$clear_all_out" == *"$home3"* ]]
+    [[ "$clear_all_out" == *"consumes disk"* ]]
+    [[ "$clear_all_out" == *"manually removed"* ]]
+    [[ "$clear_all_out" == *"responsibility"* ]]
+    [ ! -e "$workspace" ]
+}
+
+# --- Group 5: mode-aware clear/current/check --------------------------------
+
+@test "Group5 5.3: clear per mode - B leaves COPILOT_HOME, C unsets/retains, A deletes, common cleanup runs" {
+    _make_profile review review-skill
+    _make_profile test test-skill
+
+    # Mode A: existing delete behavior remains (--all removes the synthetic home)
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx review >/dev/null
+    local a_home="$COPILOT_HOME"
+    [ -d "$a_home" ]
+    ctx clear --all >/dev/null
+    [ ! -d "$a_home" ]
+    [ -z "${COPILOT_HOME:-}" ]
+
+    # Mode B: plain clear and clear --all leave a pre-set COPILOT_HOME
+    # byte-identical and run the common workspace cleanup
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    export COPILOT_HOME="$TEST_TMP/b-custom-home"
+    local proj_b="$TEST_TMP/project-b-clear"
+    mkdir -p "$proj_b"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj_b/.ctx"
+    cd "$proj_b"
+    ctx load "$proj_b/.ctx" >/dev/null
+    [ "$COPILOT_HOME" = "$TEST_TMP/b-custom-home" ]
+    ctx clear
+    [ "$COPILOT_HOME" = "$TEST_TMP/b-custom-home" ]
+    ctx load "$proj_b/.ctx" >/dev/null
+    local ws_b="$proj_b/project-b-clear.code-workspace"
+    [ -f "$ws_b" ]
+    ctx clear --all
+    [ "$?" -eq 0 ]
+    [ "$COPILOT_HOME" = "$TEST_TMP/b-custom-home" ]
+    [ ! -e "$ws_b" ]
+    unset COPILOT_HOME
+
+    # Mode C: plain clear and clear --all unset COPILOT_HOME, retain path +
+    # marker, print the retained notice (incl. on plain clear), and clean the
+    # common workspace artifact
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    local proj_c="$TEST_TMP/project-c-clear"
+    mkdir -p "$proj_c"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj_c/.ctx"
+    cd "$proj_c"
+    ctx load "$proj_c/.ctx" >/dev/null
+    local c_home="$COPILOT_HOME"
+    touch "$c_home/marker"
+    ctx clear >"$TEST_TMP/c-clear-53.out" 2>&1
+    [ -z "${COPILOT_HOME:-}" ]
+    [ -f "$c_home/marker" ]
+    [ -d "$c_home" ]
+    [[ "$(<"$TEST_TMP/c-clear-53.out")" == *"retained"* ]]
+    [[ "$(<"$TEST_TMP/c-clear-53.out")" == *"not deleted"* ]]
+    [[ "$(<"$TEST_TMP/c-clear-53.out")" == *"$c_home"* ]]
+    [[ "$(<"$TEST_TMP/c-clear-53.out")" == *"consumes disk"* ]]
+    [[ "$(<"$TEST_TMP/c-clear-53.out")" == *"manually removed"* ]]
+    [[ "$(<"$TEST_TMP/c-clear-53.out")" == *"responsibility"* ]]
+
+    ctx load "$proj_c/.ctx" >/dev/null
+    local c_home2="$COPILOT_HOME"
+    touch "$c_home2/marker"
+    local ws_c="$proj_c/project-c-clear.code-workspace"
+    [ -f "$ws_c" ]
+    ctx clear --all >"$TEST_TMP/c-clear-all-53.out" 2>&1
+    [ "$?" -eq 0 ]
+    [ -z "${COPILOT_HOME:-}" ]
+    [ -f "$c_home2/marker" ]
+    [ -d "$c_home2" ]
+    [ ! -e "$ws_c" ]
+    [[ "$(<"$TEST_TMP/c-clear-all-53.out")" == *"retained"* ]]
+    [[ "$(<"$TEST_TMP/c-clear-all-53.out")" == *"consumes disk"* ]]
+    [[ "$(<"$TEST_TMP/c-clear-all-53.out")" == *"manually removed"* ]]
+    [[ "$(<"$TEST_TMP/c-clear-all-53.out")" == *"responsibility"* ]]
+}
+
+@test "Group5 5.4: current/check/clear use the recorded active mode, not a stale selector" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-stale-selector"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+
+    # Mode C activation, then change the selector to Mode B
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    ctx load "$proj/.ctx" >/dev/null
+    local c_home="$COPILOT_HOME"
+    [ -n "$c_home" ]
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Mode: ephemeral-clean"* ]]
+    [[ "$output" != *"Mode: global-user"* ]]
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_MODE"* ]]
+    [[ "$output" == *"does not match recorded active mode ephemeral-clean"* ]]
+
+    # clear uses the recorded Mode C: unsets COPILOT_HOME, retains the path
+    ctx clear >"$TEST_TMP/clear-54.out" 2>&1
+    [ -z "${COPILOT_HOME:-}" ]
+    [ -d "$c_home" ]
+    [[ "$(<"$TEST_TMP/clear-54.out")" == *"$c_home"* ]]
+    [[ "$(<"$TEST_TMP/clear-54.out")" == *"consumes disk"* ]]
+    [[ "$(<"$TEST_TMP/clear-54.out")" == *"manually removed"* ]]
+    [[ "$(<"$TEST_TMP/clear-54.out")" == *"responsibility"* ]]
+
+    # Mode B activation, then change the selector to Mode C
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    export COPILOT_HOME="$TEST_TMP/b-stale-home"
+    ctx load "$proj/.ctx" >/dev/null
+    [ "$COPILOT_HOME" = "$TEST_TMP/b-stale-home" ]
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Mode: global-user"* ]]
+    [[ "$output" != *"Mode: ephemeral-clean"* ]]
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_MODE"* ]]
+
+    # clear uses the recorded Mode B: COPILOT_HOME is left exactly as-is
+    ctx clear >/dev/null
+    [ "$COPILOT_HOME" = "$TEST_TMP/b-stale-home" ]
+}
+
+@test "Group5 5.5: check per mode - B recorded-home, C path-exists, SKIPs, unknown foreign state" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-check-modes"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    # (a) no .ctx remains a successful no-op
+    local noctx="$TEST_TMP/noctx"
+    mkdir -p "$noctx"
+    ( cd "$noctx" && run ctx check; [ "$status" -eq 0 ]; [[ "$output" == *"no .ctx file found"* ]] )
+
+    cd "$proj"
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # (b) Mode B originally-unset: PASS; drift -> FAIL; link/skill checks SKIP
+    unset COPILOT_HOME
+    ctx load "$proj/.ctx" >/dev/null
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
+    [[ "$output" == *"CHECK SKIP link:settings.json"* ]]
+    [[ "$output" == *"CHECK SKIP skill:review-skill"* ]]
+
+    export COPILOT_HOME="$TEST_TMP/drift-home"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_HOME"* ]]
+    unset COPILOT_HOME
+
+    # (c) Mode B originally-set: PASS when exact, FAIL on change
+    export COPILOT_HOME="$TEST_TMP/b-home"
+    ctx load "$proj/.ctx" >/dev/null
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
+    export COPILOT_HOME="$TEST_TMP/b-home-changed"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_HOME"* ]]
+    unset COPILOT_HOME
+
+    # (d) Mode C: real dir PASS; removed FAIL; symlink FAIL; never inspects contents
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    ctx load "$proj/.ctx" >/dev/null
+    local c_home="$COPILOT_HOME"
+    touch "$c_home/content-file"
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS COPILOT_HOME"* ]]
+    [[ "$output" == *"CHECK SKIP link:settings.json"* ]]
+    [[ "$output" == *"CHECK SKIP skill:review-skill"* ]]
+    [ -f "$c_home/content-file" ]
+
+    rm -rf "$c_home"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_HOME"* ]]
+
+    ctx load "$proj/.ctx" >/dev/null
+    local c_home2="$COPILOT_HOME"
+    rm -rf "$c_home2"
+    mkdir -p "$TEST_TMP/c-target"
+    ln -s "$TEST_TMP/c-target" "$c_home2"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_HOME"* ]]
+
+    # (e) foreign env state with no matching activation record -> CHECK UNKNOWN,
+    # never deleted, unknown alone does not become a false FAIL
+    mkdir -p "$TEST_TMP/foreign-home" "$TEST_TMP/foreign-skills"
+    ctx load "$proj/.ctx" >/dev/null
+    _ctx_reset_active_record
+    export COPILOT_HOME="$TEST_TMP/foreign-home"
+    export COPILOT_SKILLS_DIRS="$TEST_TMP/foreign-skills"
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Mode: <unknown>"* ]]
+    [[ "$output" == *"COPILOT_HOME=$TEST_TMP/foreign-home (unknown)"* ]]
+    [ -d "$TEST_TMP/foreign-home" ]
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK UNKNOWN COPILOT_MODE"* ]]
+    [[ "$output" == *"CHECK UNKNOWN COPILOT_HOME"* ]]
+    [[ "$output" == *"CHECK UNKNOWN COPILOT_SKILLS_DIRS"* ]]
+    [ -d "$TEST_TMP/foreign-home" ]
+    [ -d "$TEST_TMP/foreign-skills" ]
+}
+
+@test "Group5 5.6: Mode C replacement reports retained path only on success; old path remains" {
+    _make_profile review review-skill
+    _make_profile test test-skill
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+
+    # C -> C (same profile reactivated): notice for the old path, old dir kept
+    ctx review >/dev/null
+    local old_home="$COPILOT_HOME"
+    touch "$old_home/marker"
+    ctx review >"$TEST_TMP/repl-cc.out" 2>&1
+    [[ "$(<"$TEST_TMP/repl-cc.out")" == *"retained"* ]]
+    [[ "$(<"$TEST_TMP/repl-cc.out")" == *"$old_home"* ]]
+    [[ "$(<"$TEST_TMP/repl-cc.out")" == *"consumes disk"* ]]
+    [[ "$(<"$TEST_TMP/repl-cc.out")" == *"manually removed"* ]]
+    [[ "$(<"$TEST_TMP/repl-cc.out")" == *"responsibility"* ]]
+    [ -f "$old_home/marker" ]
+    [ -d "$old_home" ]
+    local new_home="$COPILOT_HOME"
+    [ "$old_home" != "$new_home" ]
+
+    # C -> B (switch selector): notice for the old path, COPILOT_HOME kept as-is
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    ctx test >"$TEST_TMP/repl-cb.out" 2>&1
+    [[ "$(<"$TEST_TMP/repl-cb.out")" == *"retained"* ]]
+    [[ "$(<"$TEST_TMP/repl-cb.out")" == *"$new_home"* ]]
+    [[ "$(<"$TEST_TMP/repl-cb.out")" == *"consumes disk"* ]]
+    [[ "$(<"$TEST_TMP/repl-cb.out")" == *"manually removed"* ]]
+    [[ "$(<"$TEST_TMP/repl-cb.out")" == *"responsibility"* ]]
+    [ "$COPILOT_HOME" = "$new_home" ]
+    [ -d "$new_home" ]
+
+    # Failed replacement (temp-home creation fails): no notice, previous state
+    # and session record are untouched
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    mktemp() { return 1; }
+    export -f mktemp
+    local status=0
+    ctx test >"$TEST_TMP/repl-fail.out" 2>&1 || status=$?
+    unset -f mktemp
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/repl-fail.out")" != *"retained"* ]]
+    [ "$AI_CTX_PROFILES" = test ]
+    [ "$COPILOT_HOME" = "$new_home" ]
+    [ "$_ctx_active_mode" = "global-user" ]
+    [ "$_ctx_active_context" = test ]
+}
+
+@test "Group5 5.7: Mode C temp-home failure leaves env, session record, and workspace files untouched" {
+    _make_profile review review-skill
+    _make_profile test test-skill
+    local proj="$TEST_TMP/project-c-preflight"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+
+    # manual entry path: prior activation, then force temp-home failure
+    ctx review >/dev/null
+    local old_profiles="$AI_CTX_PROFILES"
+    local old_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    local old_home="$COPILOT_HOME"
+    mktemp() { return 1; }
+    export -f mktemp
+    local status=0
+    ctx test >"$TEST_TMP/c-fail-manual.out" 2>&1 || status=$?
+    unset -f mktemp
+    [ "$status" -ne 0 ]
+    [ "$AI_CTX_PROFILES" = "$old_profiles" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$old_dirs" ]
+    [ "$COPILOT_HOME" = "$old_home" ]
+    [ "$_ctx_active_mode" = "ephemeral-clean" ]
+    [ "$_ctx_active_home_value" = "$old_home" ]
+
+    # load entry path: force temp-home failure; env, record, and the adjacent
+    # workspace file all remain unchanged
+    cd "$proj"
+    ctx load "$proj/.ctx" >/dev/null
+    local l_profiles="$AI_CTX_PROFILES"
+    local l_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    local l_home="$COPILOT_HOME"
+    local ws="$proj/project-c-preflight.code-workspace"
+    [ -f "$ws" ]
+    local ws_before
+    ws_before="$(stat -c '%Y %s' "$ws")"
+    mktemp() { return 1; }
+    export -f mktemp
+    status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/c-fail-load.out" 2>&1 || status=$?
+    unset -f mktemp
+    [ "$status" -ne 0 ]
+    [ "$AI_CTX_PROFILES" = "$l_profiles" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$l_dirs" ]
+    [ "$COPILOT_HOME" = "$l_home" ]
+    [ "$_ctx_active_mode" = "ephemeral-clean" ]
+    [ "$_ctx_active_home_value" = "$l_home" ]
+    [ "$(stat -c '%Y %s' "$ws")" = "$ws_before" ]
+}
+
+@test "Group5 5.8: clear --all with no activation record treats home as unknown and never deletes" {
+    _make_profile review
+    local proj="$TEST_TMP/project-clear-unknown"
+    mkdir -p "$proj"
+    # Foreign context whose COPILOT_HOME happens to equal the otherwise-computed
+    # synthetic-home path, but with NO ctx activation record: clear must not
+    # guess Mode A or delete it.
+    local foreign_home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    mkdir -p "$foreign_home"
+    touch "$foreign_home/marker"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    local workspace="$proj/project-clear-unknown.code-workspace"
+    printf '{"generatedBy":"ctx"}\n' > "$workspace"
+    export AI_CTX_PROFILES=review
+    export COPILOT_HOME="$foreign_home"
+    _ctx_auto_load_dir="$proj"
+
+    run ctx clear --all
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unknown"* ]]
+    [[ "$output" == *"no matching activation record"* ]]
+    [[ "$output" != *"synthetic-home"* ]]
+    [ -d "$foreign_home" ]
+    [ -f "$foreign_home/marker" ]
+    [ ! -e "$workspace" ]
+}
+
+@test "Group5 5.9: Mode C owns COPILOT_SKILLS_DIRS across clear and Mode A switch" {
+    _make_profile review review-skill
+    _make_profile test
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+
+    # C activation with actual skills: the var is set and ctx-owned
+    ctx review
+    [ -n "$COPILOT_SKILLS_DIRS" ]
+    [ "$_ctx_skills_dirs_owned" -eq 1 ]
+
+    # ctx clear unsets the owned var and resets the flag
+    ctx clear
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+    [ "$_ctx_skills_dirs_owned" -eq 0 ]
+
+    # re-activate C, then switch into Mode A: the owned var is unset
+    ctx review
+    [ -n "$COPILOT_SKILLS_DIRS" ]
+    [ "$_ctx_skills_dirs_owned" -eq 1 ]
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx test
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+    [ "$_ctx_skills_dirs_owned" -eq 0 ]
+
+    # B/C ownership is flag-true even when no skills dirs exist (var unset)
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    _ctx_clear
+    ctx test
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+    [ "$_ctx_skills_dirs_owned" -eq 1 ]
+
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    _ctx_clear
+    ctx test
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+    [ "$_ctx_skills_dirs_owned" -eq 1 ]
+}
+
+# --- Group 5 remediation (PR #45 review): findings 1, 3, 4, 5 -----------------
+
+@test "Group5 6.1: Mode C changed/unset/foreign COPILOT_HOME is not misattributed" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-c-home-drift"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    ctx load "$proj/.ctx" >/dev/null
+    local rec_home="$COPILOT_HOME"
+    touch "$rec_home/marker"
+    [ -n "$rec_home" ]
+
+    # (a) changed value: current reports unknown, check FAILs, clear preserves
+    # the user's value while still reporting the recorded path as retained
+    export COPILOT_HOME="$TEST_TMP/user-replacement"
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Mode: <unknown>"* ]]
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_HOME"* ]]
+    ctx clear >"$TEST_TMP/clear-drift.out" 2>&1
+    [ "$COPILOT_HOME" = "$TEST_TMP/user-replacement" ]
+    [[ "$(<"$TEST_TMP/clear-drift.out")" == *"retained"* ]]
+    [[ "$(<"$TEST_TMP/clear-drift.out")" == *"changed"* ]]
+    [ -d "$rec_home" ]
+    [ -f "$rec_home/marker" ]
+
+    # (b) unset value: check FAILs, clear leaves it unset but reports retained
+    ctx load "$proj/.ctx" >/dev/null
+    local rec_home2="$COPILOT_HOME"
+    unset COPILOT_HOME
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_HOME"* ]]
+    ctx clear >"$TEST_TMP/clear-unset.out" 2>&1
+    [ -z "${COPILOT_HOME:-}" ]
+    [[ "$(<"$TEST_TMP/clear-unset.out")" == *"retained"* ]]
+    [ -d "$rec_home2" ]
+
+    # (c) foreign replacement: check FAILs, clear preserves the foreign dir,
+    # and neither the recorded path nor the foreign path is deleted
+    ctx load "$proj/.ctx" >/dev/null
+    local rec_home3="$COPILOT_HOME"
+    mkdir -p "$TEST_TMP/foreign-replacement"
+    export COPILOT_HOME="$TEST_TMP/foreign-replacement"
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_HOME"* ]]
+    ctx clear >"$TEST_TMP/clear-foreign.out" 2>&1
+    [ "$COPILOT_HOME" = "$TEST_TMP/foreign-replacement" ]
+    [[ "$(<"$TEST_TMP/clear-foreign.out")" == *"retained"* ]]
+    [ -d "$TEST_TMP/foreign-replacement" ]
+    [ -d "$rec_home3" ]
+}
+
+@test "Group5 6.3: Mode A comma-containing skills paths still activate" {
+    local comma_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/a,b"
+    mkdir -p "$comma_dir/.github/skills" "$comma_dir/.github/instructions"
+    echo "# a,b" > "$comma_dir/.github/instructions/a,b.instructions.md"
+
+    # selector unset (Mode A default): comma path activates, skills var unset
+    unset AI_CTX_PROFILES_COPILOT_MODE
+    ctx a,b
+    [ "$AI_CTX_PROFILES" = "a,b" ]
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+
+    # explicit synthetic-home: same
+    _ctx_clear
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx a,b
+    [ "$AI_CTX_PROFILES" = "a,b" ]
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+
+    # .ctx direct-path entry whose resolved path contains a literal comma
+    # (non-comma label): Mode A must load it and leave COPILOT_SKILLS_DIRS
+    # untouched/unset under both unset selector and explicit synthetic-home.
+    local dotctx_dir="$TEST_TMP/comma,dir"
+    mkdir -p "$dotctx_dir/.github/skills"
+    local proj="$TEST_TMP/project-comma-ctx"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$dotctx_dir" > "$proj/.ctx"
+
+    _ctx_clear
+    unset AI_CTX_PROFILES_COPILOT_MODE
+    _ctx_load_ctx_file "$proj/.ctx"
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [ "$COPILOT_HOME" = "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review" ]
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+
+    _ctx_clear
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx load "$proj/.ctx"
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [ "$COPILOT_HOME" = "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review" ]
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+}
+
+@test "Group5 6.4: B/C skills ownership preserves a later user value on clear and Mode A switch" {
+    _make_profile review review-skill
+    _make_profile test
+
+    # (a) ctx set the var (B); user replaces it; clear preserves the user value
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    ctx review
+    [ -n "$COPILOT_SKILLS_DIRS" ]
+    export COPILOT_SKILLS_DIRS=user-own-value
+    ctx clear
+    [ "$COPILOT_SKILLS_DIRS" = user-own-value ]
+
+    # (b) ctx left it unset (C, no skills); user later sets a value; clear preserves it
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    ctx test
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+    export COPILOT_SKILLS_DIRS=user-own-value
+    ctx clear
+    [ "$COPILOT_SKILLS_DIRS" = user-own-value ]
+
+    # (c) ctx set the var (C); Mode A switch unsets it since still matching
+    _ctx_clear
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    ctx review
+    [ -n "$COPILOT_SKILLS_DIRS" ]
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx test
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+
+    # (d) ctx set the var (C); user replaces it; Mode A switch preserves it
+    _ctx_clear
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    ctx review
+    export COPILOT_SKILLS_DIRS=user-own-value
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx test
+    [ "$COPILOT_SKILLS_DIRS" = user-own-value ]
+}
+
+@test "Group5 6.5: check audits COPILOT_SKILLS_DIRS in Mode B/C" {
+    _make_profile review review-skill
+    _make_profile test
+    local proj="$TEST_TMP/project-check-skills"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # (a) expected value -> PASS
+    ctx load "$proj/.ctx" >/dev/null
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS COPILOT_SKILLS_DIRS"* ]]
+
+    # (b) missing value -> FAIL
+    unset COPILOT_SKILLS_DIRS
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_SKILLS_DIRS"* ]]
+
+    # (c) wrong value -> FAIL
+    export COPILOT_SKILLS_DIRS=wrong-value
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_SKILLS_DIRS"* ]]
+    unset COPILOT_SKILLS_DIRS
+
+    # (d) unexpected value when no skills dirs exist (Mode C) -> FAIL
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    printf 'test:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/test" > "$proj/.ctx"
+    ctx load "$proj/.ctx" >/dev/null
+    [ -z "${COPILOT_SKILLS_DIRS+x}" ]
+    export COPILOT_SKILLS_DIRS=unexpected-value
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_SKILLS_DIRS"* ]]
 }

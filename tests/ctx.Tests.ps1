@@ -57,9 +57,19 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
         Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
         Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
         Remove-Item Env:\CTX_AUTO_LOAD -ErrorAction SilentlyContinue
+        Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
         $Script:CtxAutoLoadDir = $null
         $Script:CtxAutoLoadHomeOverride = $null
+        $Script:CtxSkillsDirsOwned = $false
+        $Script:CtxSkillsDirsWasSet = $false
+        $Script:CtxSkillsDirsValue = $null
+        $Script:CtxActiveMode = $null
+        $Script:CtxActiveContext = $null
+        $Script:CtxActiveCustomDirs = $null
+        $Script:CtxActiveHomeWasSet = $false
+        $Script:CtxActiveHomeValue = $null
 
         Set-Location $env:HOME
         . $Script:CtxSrc
@@ -455,12 +465,16 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
     }
 
     It 'Test 25: Clear-CtxContext -All refuses an unsafe selected home' {
+        New-CtxTestProfile -Name 'review' | Out-Null
         $victim = Join-Path $env:HOME 'victim-home'
         $outside = Join-Path $Script:TestTmp 'victim-outside'
         New-Item -ItemType Directory -Path $outside -Force | Out-Null
         New-Item -ItemType SymbolicLink -Path $victim -Target $outside -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $outside 'data.txt') -Value 'important'
-        $env:AI_CTX_PROFILES = 'review'; $env:COPILOT_HOME = $victim; $Script:CtxAutoLoadHomeOverride = $victim
+        # Establish a real Mode A activation record, then point COPILOT_HOME
+        # and the override at the unsafe link so clear --all still refuses.
+        ctx review | Out-Null
+        $env:COPILOT_HOME = $victim; $Script:CtxAutoLoadHomeOverride = $victim
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
         try { Clear-CtxContext -All } finally { $ErrorActionPreference = $prevEap }
         Test-Path -LiteralPath (Join-Path $victim 'data.txt') | Should -BeTrue
@@ -468,9 +482,12 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
     }
 
     It 'Test 26: Clear-CtxContext -All propagates a valid-home deletion failure' {
-        $victim = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review'
-        New-Item -ItemType Directory -Path $victim -Force | Out-Null
-        $env:AI_CTX_PROFILES = 'review'; $env:COPILOT_HOME = $victim
+        New-CtxTestProfile -Name 'review' | Out-Null
+        # Establish a real Mode A activation record; the synthetic home is the
+        # deletion target.
+        ctx review | Out-Null
+        $victim = $env:COPILOT_HOME
+        Test-Path -LiteralPath $victim -PathType Container | Should -BeTrue
         Mock Remove-Item { }
         Mock Remove-Item { throw 'simulated deletion failure' } -ParameterFilter { $LiteralPath -eq $victim }
 
@@ -504,6 +521,56 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
     It 'Test 29: home validator rejects AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT itself' {
         { Get-CtxValidatedHomePath -Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT } | Should -Throw '*unsafe home*'
+    }
+
+    It 'home: directive conflicts with a non-synthetic-home mode and leaves state untouched' {
+        $proj = Join-Path $env:HOME 'project-home-mode-conflict'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review'
+        $custom = Join-Path $env:HOME '.config/ctx/homes/mode-conflict'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "home:$custom`nreview:$reviewDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx') } finally { $ErrorActionPreference = $prevEap }
+        $result | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'ctx: error:'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'home'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'global-user'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        Test-Path -LiteralPath $custom | Should -BeFalse
+    }
+
+    It 'an invalid copilot mode is rejected before any state change' {
+        $proj = Join-Path $env:HOME 'project-invalid-mode'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'bogus'
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx review } finally { $ErrorActionPreference = $prevEap }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'ctx: error:'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'synthetic-home'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'global-user'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'ephemeral-clean'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx') } finally { $ErrorActionPreference = $prevEap }
+        $result | Should -BeFalse
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        Test-Path -LiteralPath (Join-Path $proj 'project-invalid-mode.code-workspace') | Should -BeFalse
     }
 
     It 'workspace created by ctx is marked and removed by clear --all' {
@@ -605,6 +672,36 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $result[-1] | Should -BeFalse
         Test-CtxIsLink -Path $settings | Should -BeFalse
         $env:AI_CTX_PROFILES | Should -Be 'wrong'
+    }
+
+    It 'Mode A default-equivalence: unset and explicit synthetic-home are byte-identical for current and check' {
+        $proj = Join-Path $env:HOME 'project-mode-default-equivalence'
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+
+        Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $currentUnset = @(& { Show-CtxCurrent } 6>&1)
+        ($currentUnset -join "`n") | Should -Match 'Mode: synthetic-home'
+
+        Clear-CtxContext | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $currentExplicit = @(& { Show-CtxCurrent } 6>&1)
+        ($currentExplicit -join "`n") | Should -Match 'Mode: synthetic-home'
+        ($currentExplicit -join "`n") | Should -Be ($currentUnset -join "`n")
+
+        Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
+        Set-Location $proj
+        $checkUnset = @(& { Test-CtxActivation } 6>&1)
+        ($checkUnset -join "`n") | Should -Match 'CHECK PASS COPILOT_MODE'
+
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        $checkExplicit = @(& { Test-CtxActivation } 6>&1)
+        ($checkExplicit -join "`n") | Should -Match 'CHECK PASS COPILOT_MODE'
+        ($checkExplicit -join "`n") | Should -Be ($checkUnset -join "`n")
     }
 
     It 'direct ctx check returns a scalar Boolean status while preserving diagnostics' {
@@ -934,6 +1031,715 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         ctx load (Join-Path $proj '.ctx')
         $ErrorActionPreference = $previous
         ($Error | Select-Object -First 1).ToString() | Should -Match 'invalid .ctx line'
+    }
+
+    It 'Mode B: COPILOT_HOME is left exactly as-is across activation and clear' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        # (a) unset before activation -> still unset after
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        ctx review
+        $env:COPILOT_HOME | Should -BeNullOrEmpty
+        Clear-CtxContext
+        $env:COPILOT_HOME | Should -BeNullOrEmpty
+
+        # (b) custom user value byte-identical after activation
+        $custom = Join-Path $Script:TestTmp 'custom-home'
+        $env:COPILOT_HOME = $custom
+        ctx review
+        $env:COPILOT_HOME | Should -Be $custom
+        Clear-CtxContext
+        $env:COPILOT_HOME | Should -Be $custom
+
+        # (c) leftover synthetic home from a prior Mode A activation is untouched
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx review
+        $leftover = $env:COPILOT_HOME
+        $leftover | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath $leftover -PathType Container | Should -BeTrue
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        ctx test
+        $env:COPILOT_HOME | Should -Be $leftover
+
+        # clear --all under Mode B: returns $true, COPILOT_HOME unchanged,
+        # workspace artifact still cleaned up
+        $proj = Join-Path $Script:TestTmp 'project-b-clear-all'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review2' -Skill 'review-skill'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review2:$reviewDir"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Should -BeTrue
+        $beforeHome = $env:COPILOT_HOME
+        $workspace = Join-Path $proj 'project-b-clear-all.code-workspace'
+        Test-Path -LiteralPath $workspace | Should -BeTrue
+        Clear-CtxContext -All | Should -BeTrue
+        $env:COPILOT_HOME | Should -Be $beforeHome
+        Test-Path -LiteralPath $workspace | Should -BeFalse
+    }
+
+    It 'Mode B: COPILOT_SKILLS_DIRS is unset (not empty) when no skills dirs exist' {
+        New-CtxTestProfile -Name 'review' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        ctx review
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+
+        Clear-CtxContext | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        ctx review
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+    }
+
+    It 'Mode B: COPILOT_SKILLS_DIRS keeps stable order and rejects comma paths' {
+        $alphaDir = New-CtxTestProfile -Name 'alpha' -Skill 'alpha-skill'
+        $betaDir = New-CtxTestProfile -Name 'beta' -Skill 'beta-skill'
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        # (a) existing skills dirs listed in the same stable order as the entries
+        ctx alpha beta
+        $expected = (Join-Path $alphaDir '.github\skills') + ',' + (Join-Path $betaDir '.github\skills')
+        $env:COPILOT_SKILLS_DIRS | Should -Be $expected
+
+        # fully replaced (not appended) on the next activation
+        ctx beta
+        $env:COPILOT_SKILLS_DIRS | Should -Be (Join-Path $betaDir '.github\skills')
+
+        # (b) a resolved path with a literal comma is rejected before any state change
+        $commaDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/a,b'
+        New-Item -ItemType Directory -Path (Join-Path $commaDir '.github\skills') -Force | Out-Null
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_HOME = 'previous-home'
+        $env:COPILOT_SKILLS_DIRS = 'previous-skills'
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx 'a,b' } finally { $ErrorActionPreference = $prevEap }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'comma'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'previous-skills'
+    }
+
+    It 'Mode B/C -> Mode A unsets a session-set COPILOT_SKILLS_DIRS but never a user value' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        # B activation sets COPILOT_SKILLS_DIRS (ctx-owned this session)
+        ctx review
+        $env:COPILOT_SKILLS_DIRS | Should -Not -BeNullOrEmpty
+
+        # switch into Mode A -> unset
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx test
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+
+        # fresh session state: a user-set value is never touched by Mode A
+        $Script:CtxSkillsDirsOwned = $false
+        $env:COPILOT_SKILLS_DIRS = 'my-own-value'
+        ctx review
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'my-own-value'
+    }
+
+    It 'Mode C: every activation gets a fresh unique ephemeral home; clear never deletes' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+
+        # (a) reactivating the same profile (no clear between) yields a
+        # different path, and BOTH ephemeral dirs stay on disk - Mode C never
+        # deletes
+        ctx review
+        $home1 = $env:COPILOT_HOME
+        ctx review
+        $home2 = $env:COPILOT_HOME
+        $home1 | Should -Not -BeNullOrEmpty
+        $home2 | Should -Not -BeNullOrEmpty
+        $home1 | Should -Not -Be $home2
+        Test-Path -LiteralPath $home1 -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath $home2 -PathType Container | Should -BeTrue
+
+        # (b) plain ctx clear unsets COPILOT_HOME but leaves home2 + marker on disk
+        New-Item -Path (Join-Path $home2 'marker') -ItemType File -Force | Out-Null
+        ctx clear | Out-Null
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $home2 'marker') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath $home2 -PathType Container | Should -BeTrue
+
+        # (c) ctx clear --all reports the retained path, still never deletes,
+        # and the common workspace/settings cleanup still runs
+        $proj = Join-Path $Script:TestTmp 'project-c-clear-all'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Should -BeTrue
+        $home3 = $env:COPILOT_HOME
+        New-Item -Path (Join-Path $home3 'marker') -ItemType File -Force | Out-Null
+        $workspace = Join-Path $proj 'project-c-clear-all.code-workspace'
+        Test-Path -LiteralPath $workspace -PathType Leaf | Should -BeTrue
+        $clearAllOutput = (Clear-CtxContext -All 6>&1 | Out-String)
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $home3 'marker') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath $home3 -PathType Container | Should -BeTrue
+        $clearAllOutput | Should -Match 'retained'
+        $clearAllOutput | Should -Match 'not deleted'
+        $clearAllOutput | Should -Match ([regex]::Escape($home3))
+        $clearAllOutput | Should -Match 'consumes disk'
+        $clearAllOutput | Should -Match 'manually removed'
+        $clearAllOutput | Should -Match 'responsibility'
+        Test-Path -LiteralPath $workspace -PathType Leaf | Should -BeFalse
+    }
+
+    # --- Group 5: mode-aware clear/current/check --------------------------
+
+    It 'Group5 5.3: clear per mode - B leaves COPILOT_HOME, C unsets/retains, A deletes, common cleanup runs' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+
+        # Mode A: existing delete behavior remains (--all removes the synthetic home)
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx review | Out-Null
+        $aHome = $env:COPILOT_HOME
+        Test-Path -LiteralPath $aHome -PathType Container | Should -BeTrue
+        ctx clear --all | Out-Null
+        Test-Path -LiteralPath $aHome | Should -BeFalse
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+
+        # Mode B: plain clear and clear --all leave COPILOT_HOME byte-identical
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $customHome = Join-Path $Script:TestTmp 'b-custom-home'
+        $env:COPILOT_HOME = $customHome
+        $projB = Join-Path $Script:TestTmp 'project-b-clear'
+        New-Item -ItemType Directory -Path $projB -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $projB '.ctx') -Value "review:$reviewDir"
+        Set-Location $projB
+        ctx load (Join-Path $projB '.ctx') | Out-Null
+        $env:COPILOT_HOME | Should -Be $customHome
+        ctx clear | Out-Null
+        $env:COPILOT_HOME | Should -Be $customHome
+        ctx load (Join-Path $projB '.ctx') | Out-Null
+        $wsB = Join-Path $projB 'project-b-clear.code-workspace'
+        Test-Path -LiteralPath $wsB -PathType Leaf | Should -BeTrue
+        ctx clear --all | Out-Null
+        $env:COPILOT_HOME | Should -Be $customHome
+        Test-Path -LiteralPath $wsB | Should -BeFalse
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+
+        # Mode C: plain clear and clear --all unset COPILOT_HOME, retain path +
+        # marker, print the retained notice (incl. plain clear), clean common artifacts
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        $projC = Join-Path $Script:TestTmp 'project-c-clear'
+        New-Item -ItemType Directory -Path $projC -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $projC '.ctx') -Value "review:$reviewDir"
+        Set-Location $projC
+        ctx load (Join-Path $projC '.ctx') | Out-Null
+        $cHome = $env:COPILOT_HOME
+        New-Item -Path (Join-Path $cHome 'marker') -ItemType File -Force | Out-Null
+        $clearOut = @(& { ctx clear } 6>&1)
+        ($clearOut -join "`n") | Should -Match 'retained'
+        ($clearOut -join "`n") | Should -Match 'not deleted'
+        ($clearOut -join "`n") | Should -Match ([regex]::Escape($cHome))
+        ($clearOut -join "`n") | Should -Match 'consumes disk'
+        ($clearOut -join "`n") | Should -Match 'manually removed'
+        ($clearOut -join "`n") | Should -Match 'responsibility'
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cHome 'marker') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath $cHome -PathType Container | Should -BeTrue
+
+        ctx load (Join-Path $projC '.ctx') | Out-Null
+        $cHome2 = $env:COPILOT_HOME
+        New-Item -Path (Join-Path $cHome2 'marker') -ItemType File -Force | Out-Null
+        $wsC = Join-Path $projC 'project-c-clear.code-workspace'
+        Test-Path -LiteralPath $wsC -PathType Leaf | Should -BeTrue
+        $clearAllOut = @(& { ctx clear --all } 6>&1)
+        ($clearAllOut -join "`n") | Should -Match 'retained'
+        ($clearAllOut -join "`n") | Should -Match 'consumes disk'
+        ($clearAllOut -join "`n") | Should -Match 'manually removed'
+        ($clearAllOut -join "`n") | Should -Match 'responsibility'
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $cHome2 'marker') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath $cHome2 -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath $wsC | Should -BeFalse
+    }
+
+    It 'Group5 5.4: current/check/clear use the recorded active mode, not a stale selector' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $proj = Join-Path $Script:TestTmp 'project-stale-selector'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Set-Location $proj
+
+        # Mode C activation, then change the selector to Mode B
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        ctx load $ctxFile | Out-Null
+        $cHome = $env:COPILOT_HOME
+        $cHome | Should -Not -BeNullOrEmpty
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        $current = @(& { Show-CtxCurrent } 6>&1)
+        ($current -join "`n") | Should -Match 'Mode: ephemeral-clean'
+        ($current -join "`n") | Should -Not -Match 'Mode: global-user'
+
+        $check = @(& { Test-CtxActivation } 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL COPILOT_MODE'
+        ($check -join "`n") | Should -Match 'does not match recorded active mode ephemeral-clean'
+
+        # clear uses the recorded Mode C: unsets COPILOT_HOME, retains the path
+        ctx clear | Out-Null
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+        Test-Path -LiteralPath $cHome -PathType Container | Should -BeTrue
+
+        # Mode B activation, then change the selector to Mode C
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $bHome = Join-Path $Script:TestTmp 'b-stale-home'
+        $env:COPILOT_HOME = $bHome
+        ctx load $ctxFile | Out-Null
+        $env:COPILOT_HOME | Should -Be $bHome
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+
+        $current = @(& { Show-CtxCurrent } 6>&1)
+        ($current -join "`n") | Should -Match 'Mode: global-user'
+        ($current -join "`n") | Should -Not -Match 'Mode: ephemeral-clean'
+
+        $check = @(& { Test-CtxActivation } 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL COPILOT_MODE'
+
+        # clear uses the recorded Mode B: COPILOT_HOME is left exactly as-is
+        ctx clear | Out-Null
+        $env:COPILOT_HOME | Should -Be $bHome
+    }
+
+    It 'Group5 5.5: check per mode - B recorded-home, C path-exists, SKIPs, unknown foreign state' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $proj = Join-Path $Script:TestTmp 'project-check-modes'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+
+        # (a) no .ctx remains a successful no-op
+        $noctx = Join-Path $Script:TestTmp 'noctx'
+        New-Item -ItemType Directory -Path $noctx -Force | Out-Null
+        Set-Location $noctx
+        $noop = @(& { Test-CtxActivation } 6>&1)
+        ($noop -join "`n") | Should -Match 'no .ctx file found'
+        ($noop -join "`n") | Should -Match 'True'
+
+        Set-Location $proj
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        # (b) Mode B originally-unset: PASS; drift -> FAIL; link/skill checks SKIP
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $ok = @(& { Test-CtxActivation } 6>&1)
+        ($ok -join "`n") | Should -Match 'CHECK PASS COPILOT_HOME'
+        ($ok -join "`n") | Should -Match 'CHECK SKIP link:settings.json'
+        ($ok -join "`n") | Should -Match 'CHECK SKIP skill:review-skill'
+        ($ok -join "`n") | Should -Match 'ctx check: PASS'
+
+        $env:COPILOT_HOME = Join-Path $Script:TestTmp 'drift-home'
+        $fail = @(& { Test-CtxActivation } 6>&1)
+        ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_HOME'
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+
+        # (c) Mode B originally-set: PASS when exact, FAIL on change
+        $env:COPILOT_HOME = Join-Path $Script:TestTmp 'b-home'
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $ok = @(& { Test-CtxActivation } 6>&1)
+        ($ok -join "`n") | Should -Match 'CHECK PASS COPILOT_HOME'
+        $env:COPILOT_HOME = Join-Path $Script:TestTmp 'b-home-changed'
+        $fail = @(& { Test-CtxActivation } 6>&1)
+        ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_HOME'
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+
+        # (d) Mode C: real dir PASS; removed FAIL; symlink FAIL; never inspects contents
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $cHome = $env:COPILOT_HOME
+        Set-Content -LiteralPath (Join-Path $cHome 'content-file') -Value 'x'
+        $ok = @(& { Test-CtxActivation } 6>&1)
+        ($ok -join "`n") | Should -Match 'CHECK PASS COPILOT_HOME'
+        ($ok -join "`n") | Should -Match 'CHECK SKIP link:settings.json'
+        ($ok -join "`n") | Should -Match 'CHECK SKIP skill:review-skill'
+        Test-Path -LiteralPath (Join-Path $cHome 'content-file') -PathType Leaf | Should -BeTrue
+
+        Remove-Item -LiteralPath $cHome -Recurse -Force
+        $fail = @(& { Test-CtxActivation } 6>&1)
+        ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_HOME'
+
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $cHome2 = $env:COPILOT_HOME
+        Remove-Item -LiteralPath $cHome2 -Recurse -Force
+        $target = Join-Path $Script:TestTmp 'c-target'
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        New-Item -ItemType SymbolicLink -Path $cHome2 -Target $target -Force | Out-Null
+        $fail = @(& { Test-CtxActivation } 6>&1)
+        ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_HOME'
+
+        # (e) foreign env state with no matching activation record -> CHECK UNKNOWN,
+        # never deleted, unknown alone does not become a false FAIL
+        $foreignHome = Join-Path $Script:TestTmp 'foreign-home'
+        $foreignSkills = Join-Path $Script:TestTmp 'foreign-skills'
+        New-Item -ItemType Directory -Path $foreignHome, $foreignSkills -Force | Out-Null
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        Reset-CtxActiveRecord
+        $env:COPILOT_HOME = $foreignHome
+        $env:COPILOT_SKILLS_DIRS = $foreignSkills
+        $current = @(& { Show-CtxCurrent } 6>&1)
+        ($current -join "`n") | Should -Match 'Mode: <unknown>'
+        ($current -join "`n") | Should -Match ([regex]::Escape("COPILOT_HOME=$foreignHome (unknown)"))
+        $check = @(& { Test-CtxActivation } 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK UNKNOWN COPILOT_MODE'
+        ($check -join "`n") | Should -Match 'CHECK UNKNOWN COPILOT_HOME'
+        ($check -join "`n") | Should -Match 'CHECK UNKNOWN COPILOT_SKILLS_DIRS'
+        Test-Path -LiteralPath $foreignHome -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath $foreignSkills -PathType Container | Should -BeTrue
+    }
+
+    It 'Group5 5.6: Mode C replacement reports retained path only on success; old path remains' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+
+        # C -> C (same profile reactivated): notice for the old path, old dir kept
+        ctx review | Out-Null
+        $oldHome = $env:COPILOT_HOME
+        New-Item -Path (Join-Path $oldHome 'marker') -ItemType File -Force | Out-Null
+        $replCc = @(& { ctx review } 6>&1)
+        ($replCc -join "`n") | Should -Match 'retained'
+        ($replCc -join "`n") | Should -Match ([regex]::Escape($oldHome))
+        ($replCc -join "`n") | Should -Match 'consumes disk'
+        ($replCc -join "`n") | Should -Match 'manually removed'
+        ($replCc -join "`n") | Should -Match 'responsibility'
+        Test-Path -LiteralPath (Join-Path $oldHome 'marker') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath $oldHome -PathType Container | Should -BeTrue
+        $newHome = $env:COPILOT_HOME
+        $newHome | Should -Not -Be $oldHome
+
+        # C -> B (switch selector): notice for the old path, COPILOT_HOME kept as-is
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $replCb = @(& { ctx test } 6>&1)
+        ($replCb -join "`n") | Should -Match 'retained'
+        ($replCb -join "`n") | Should -Match ([regex]::Escape($newHome))
+        ($replCb -join "`n") | Should -Match 'consumes disk'
+        ($replCb -join "`n") | Should -Match 'manually removed'
+        ($replCb -join "`n") | Should -Match 'responsibility'
+        $env:COPILOT_HOME | Should -Be $newHome
+        Test-Path -LiteralPath $newHome -PathType Container | Should -BeTrue
+
+        # Failed replacement: temp-home creation fails, no notice, state + record intact
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        Mock New-CtxEphemeralCopilotHome { throw 'simulated temp-home failure' }
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        $failed = @(& { ctx test } 6>&1)
+        $ErrorActionPreference = $prevEap
+        ($failed -join "`n") | Should -Not -Match 'retained'
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'temp-home failure'
+        $env:AI_CTX_PROFILES | Should -Be 'test'
+        $env:COPILOT_HOME | Should -Be $newHome
+        $Script:CtxActiveMode | Should -Be 'global-user'
+        $Script:CtxActiveContext | Should -Be 'test'
+    }
+
+    It 'Group5 5.7a: Mode C temp-home failure (manual entry) leaves env and session record untouched' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+
+        ctx review | Out-Null
+        $oldProfiles = $env:AI_CTX_PROFILES
+        $oldDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $oldHome = $env:COPILOT_HOME
+        Mock New-CtxEphemeralCopilotHome { throw 'simulated temp-home failure' }
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx test } finally { $ErrorActionPreference = $prevEap }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'temp-home failure'
+        $env:AI_CTX_PROFILES | Should -Be $oldProfiles
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $oldDirs
+        $env:COPILOT_HOME | Should -Be $oldHome
+        $Script:CtxActiveMode | Should -Be 'ephemeral-clean'
+        $Script:CtxActiveHomeValue | Should -Be $oldHome
+    }
+
+    It 'Group5 5.7b: Mode C temp-home failure (load entry) leaves env, record, and workspace files untouched' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-c-preflight'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        Set-Location $proj
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Should -BeTrue
+        $lProfiles = $env:AI_CTX_PROFILES
+        $lDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $lHome = $env:COPILOT_HOME
+        $ws = Join-Path $proj 'project-c-preflight.code-workspace'
+        Test-Path -LiteralPath $ws -PathType Leaf | Should -BeTrue
+        $wsBefore = (Get-Item -LiteralPath $ws -Force).LastWriteTimeUtc
+
+        Mock New-CtxEphemeralCopilotHome { throw 'simulated temp-home failure' }
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        $result = $null
+        try { $result = Import-CtxFile -CtxFile (Join-Path $proj '.ctx') } finally { $ErrorActionPreference = $prevEap }
+        $result | Should -BeFalse
+        $env:AI_CTX_PROFILES | Should -Be $lProfiles
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $lDirs
+        $env:COPILOT_HOME | Should -Be $lHome
+        $Script:CtxActiveMode | Should -Be 'ephemeral-clean'
+        $Script:CtxActiveHomeValue | Should -Be $lHome
+        (Get-Item -LiteralPath $ws -Force).LastWriteTimeUtc | Should -Be $wsBefore
+    }
+
+    It 'Group5 5.8: Clear-CtxContext -All with no activation record treats home as unknown and never deletes' {
+        New-CtxTestProfile -Name 'review' | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-clear-unknown'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        # Foreign context whose COPILOT_HOME happens to equal the otherwise-computed
+        # synthetic-home path, but with NO ctx activation record: clear must not
+        # guess Mode A or delete it.
+        $foreignHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review'
+        New-Item -ItemType Directory -Path $foreignHome -Force | Out-Null
+        New-Item -Path (Join-Path $foreignHome 'marker') -ItemType File -Force | Out-Null
+        $workspace = Join-Path $proj 'project-clear-unknown.code-workspace'
+        Set-Content -LiteralPath $workspace -Value '{"generatedBy":"ctx"}'
+        $env:AI_CTX_PROFILES = 'review'
+        $env:COPILOT_HOME = $foreignHome
+        $Script:CtxAutoLoadDir = $proj
+
+        $clearOutput = @(& { Clear-CtxContext -All } 3>&1 6>&1)
+        ($clearOutput -join "`n") | Should -Match 'unknown'
+        ($clearOutput -join "`n") | Should -Match 'no matching activation record'
+        ($clearOutput -join "`n") | Should -Not -Match 'synthetic-home'
+        Test-Path -LiteralPath $foreignHome -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $foreignHome 'marker') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath $workspace | Should -BeFalse
+    }
+
+    It 'Group5 5.9: Mode C owns COPILOT_SKILLS_DIRS across clear and Mode A switch' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+
+        # C activation with actual skills: the var is set and ctx-owned
+        ctx review | Out-Null
+        $env:COPILOT_SKILLS_DIRS | Should -Not -BeNullOrEmpty
+        $Script:CtxSkillsDirsOwned | Should -BeTrue
+
+        # ctx clear unsets the owned var and resets the flag
+        ctx clear | Out-Null
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+        $Script:CtxSkillsDirsOwned | Should -BeFalse
+
+        # re-activate C, then switch into Mode A: the owned var is unset
+        ctx review | Out-Null
+        $env:COPILOT_SKILLS_DIRS | Should -Not -BeNullOrEmpty
+        $Script:CtxSkillsDirsOwned | Should -BeTrue
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx test | Out-Null
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+        $Script:CtxSkillsDirsOwned | Should -BeFalse
+
+        # B/C ownership is flag-true even when no skills dirs exist (var unset)
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        Clear-CtxContext | Out-Null
+        ctx test | Out-Null
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+        $Script:CtxSkillsDirsOwned | Should -BeTrue
+
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        Clear-CtxContext | Out-Null
+        ctx test | Out-Null
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+        $Script:CtxSkillsDirsOwned | Should -BeTrue
+    }
+
+    # --- Group 5 remediation (PR #45 review): findings 1-5 ------------------
+
+    It 'Group5 6.1: Mode C changed/unset/foreign COPILOT_HOME is not misattributed' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $proj = Join-Path $Script:TestTmp 'project-c-home-drift'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Set-Location $proj
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $recHome = $env:COPILOT_HOME
+        New-Item -Path (Join-Path $recHome 'marker') -ItemType File -Force | Out-Null
+
+        # (a) changed value: current reports unknown, check FAILs, clear
+        # preserves the user's value while still reporting the recorded path
+        $userReplacement = Join-Path $Script:TestTmp 'user-replacement'
+        $env:COPILOT_HOME = $userReplacement
+        $current = @(& { Show-CtxCurrent } 6>&1)
+        ($current -join "`n") | Should -Match 'Mode: <unknown>'
+        $check = @(& { Test-CtxActivation } 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL COPILOT_HOME'
+        $clearOut = @(& { Clear-CtxContext } 3>&1 6>&1)
+        ($clearOut -join "`n") | Should -Match 'retained'
+        ($clearOut -join "`n") | Should -Match 'changed'
+        $env:COPILOT_HOME | Should -Be $userReplacement
+        Test-Path -LiteralPath (Join-Path $recHome 'marker') -PathType Leaf | Should -BeTrue
+
+        # (b) unset value: check FAILs, clear leaves it unset but reports retained
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $recHome2 = $env:COPILOT_HOME
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        $check = @(& { Test-CtxActivation } 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL COPILOT_HOME'
+        $clearOut = @(& { Clear-CtxContext } 3>&1 6>&1)
+        ($clearOut -join "`n") | Should -Match 'retained'
+        Test-Path Env:\COPILOT_HOME | Should -BeFalse
+        Test-Path -LiteralPath $recHome2 -PathType Container | Should -BeTrue
+
+        # (c) foreign replacement: check FAILs, clear preserves the foreign dir,
+        # and neither the recorded path nor the foreign path is deleted
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $recHome3 = $env:COPILOT_HOME
+        $foreign = Join-Path $Script:TestTmp 'foreign-replacement'
+        New-Item -ItemType Directory -Path $foreign -Force | Out-Null
+        $env:COPILOT_HOME = $foreign
+        $check = @(& { Test-CtxActivation } 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL COPILOT_HOME'
+        $clearOut = @(& { Clear-CtxContext } 3>&1 6>&1)
+        ($clearOut -join "`n") | Should -Match 'retained'
+        $env:COPILOT_HOME | Should -Be $foreign
+        Test-Path -LiteralPath $foreign -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath $recHome3 -PathType Container | Should -BeTrue
+    }
+
+    It 'Group5 6.2: Mode C ephemeral COPILOT_HOME is owner-only on non-Windows' {
+        if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+            Set-ItResult -Skipped -Because 'Windows relies on the per-user temp parent ACL'
+            return
+        }
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        ctx review | Out-Null
+        $effective = [System.IO.File]::GetUnixFileMode($env:COPILOT_HOME)
+        $expected = [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite -bor [System.IO.UnixFileMode]::UserExecute
+        $effective | Should -Be $expected
+    }
+
+    It 'Group5 6.3: Mode A comma-containing skills paths still activate' {
+        $commaDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/a,b'
+        New-Item -ItemType Directory -Path (Join-Path $commaDir '.github\skills') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $commaDir '.github\instructions') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $commaDir '.github/instructions/a,b.instructions.md') -Value '# a,b'
+        Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
+        ctx 'a,b' | Out-Null
+        $env:AI_CTX_PROFILES | Should -Be 'a,b'
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+        Clear-CtxContext | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx 'a,b' | Out-Null
+        $env:AI_CTX_PROFILES | Should -Be 'a,b'
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+
+        # .ctx direct-path entry whose resolved path contains a literal comma
+        # (non-comma label): Mode A must load it and leave COPILOT_SKILLS_DIRS
+        # untouched/unset under both unset selector and explicit synthetic-home.
+        $dotctxDir = Join-Path $Script:TestTmp 'comma,dir'
+        New-Item -ItemType Directory -Path (Join-Path $dotctxDir '.github\skills') -Force | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-comma-ctx'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$dotctxDir"
+        $expectedHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review'
+
+        Clear-CtxContext | Out-Null
+        Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
+        Import-CtxFile -CtxFile $ctxFile | Should -BeTrue
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $env:COPILOT_HOME | Should -Be $expectedHome
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+
+        Clear-CtxContext | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        Import-CtxFile -CtxFile $ctxFile | Should -BeTrue
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $env:COPILOT_HOME | Should -Be $expectedHome
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+    }
+
+    It 'Group5 6.4: B/C skills ownership preserves a later user value on clear and Mode A switch' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' | Out-Null
+
+        # (a) ctx set the var (B); user replaces it; clear preserves the user value
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        ctx review | Out-Null
+        $env:COPILOT_SKILLS_DIRS | Should -Not -BeNullOrEmpty
+        $env:COPILOT_SKILLS_DIRS = 'user-own-value'
+        ctx clear | Out-Null
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'user-own-value'
+
+        # (b) ctx left it unset (C, no skills); user later sets a value; clear preserves it
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        ctx test | Out-Null
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+        $env:COPILOT_SKILLS_DIRS = 'user-own-value'
+        ctx clear | Out-Null
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'user-own-value'
+
+        # (c) ctx set the var (C); Mode A switch unsets it since still matching
+        Clear-CtxContext | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        ctx review | Out-Null
+        $env:COPILOT_SKILLS_DIRS | Should -Not -BeNullOrEmpty
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx test | Out-Null
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+
+        # (d) ctx set the var (C); user replaces it; Mode A switch preserves it
+        Clear-CtxContext | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        ctx review | Out-Null
+        $env:COPILOT_SKILLS_DIRS = 'user-own-value'
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        ctx test | Out-Null
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'user-own-value'
+    }
+
+    It 'Group5 6.5: check audits COPILOT_SKILLS_DIRS in Mode B/C' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        New-CtxTestProfile -Name 'test' | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-check-skills'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Set-Location $proj
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        # (a) expected value -> PASS
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $ok = @(& { Test-CtxActivation } 6>&1)
+        ($ok -join "`n") | Should -Match 'CHECK PASS COPILOT_SKILLS_DIRS'
+        ($ok -join "`n") | Should -Match 'ctx check: PASS'
+
+        # (b) missing value -> FAIL
+        Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
+        $fail = @(& { Test-CtxActivation } 6>&1)
+        ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_SKILLS_DIRS'
+
+        # (c) wrong value -> FAIL
+        $env:COPILOT_SKILLS_DIRS = 'wrong-value'
+        $fail = @(& { Test-CtxActivation } 6>&1)
+        ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_SKILLS_DIRS'
+        Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
+
+        # (d) unexpected value when no skills dirs exist (Mode C) -> FAIL
+        $testDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'test'
+        Set-Content -LiteralPath $ctxFile -Value "test:$testDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        Test-Path Env:\COPILOT_SKILLS_DIRS | Should -BeFalse
+        $env:COPILOT_SKILLS_DIRS = 'unexpected-value'
+        $fail = @(& { Test-CtxActivation } 6>&1)
+        ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_SKILLS_DIRS'
     }
 
 }

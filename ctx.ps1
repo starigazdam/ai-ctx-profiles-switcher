@@ -165,7 +165,24 @@ function Write-CtxStatus {
     Write-Host "Profiles: $(if ($SharedCsv) { $SharedCsv } else { '<none>' })"
     Write-Host ""
     Write-Host "AI_CTX_PROFILES=$(if ($env:AI_CTX_PROFILES) { $env:AI_CTX_PROFILES } else { '<unset>' })"
-    Write-Host "COPILOT_HOME=$(if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { '<unset>' })"
+    if (Test-CtxActiveRecordMatches) {
+        # Report the actually active mode from the matching activation
+        # record, never the raw selector: a stale/mismatched
+        # AI_CTX_PROFILES_COPILOT_MODE without a matching activation is not
+        # reported as active.
+        Write-Host "Mode: $($Script:CtxActiveMode)"
+        if ($Script:CtxActiveMode -cne 'synthetic-home') {
+            Write-Host "COPILOT_SKILLS_DIRS=$(if ($env:COPILOT_SKILLS_DIRS) { $env:COPILOT_SKILLS_DIRS } else { '<unset>' })"
+        }
+        Write-Host "COPILOT_HOME=$(if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { '<unset>' })"
+    } else {
+        # A context is active but there is no matching local activation
+        # record: mode and any COPILOT_HOME/COPILOT_SKILLS_DIRS present are
+        # unattributable, so label them unknown rather than guessing.
+        Write-Host "Mode: <unknown>"
+        if (Test-Path Env:\COPILOT_SKILLS_DIRS) { Write-Host "COPILOT_SKILLS_DIRS=$env:COPILOT_SKILLS_DIRS (unknown)" }
+        if (Test-Path Env:\COPILOT_HOME) { Write-Host "COPILOT_HOME=$env:COPILOT_HOME (unknown)" } else { Write-Host "COPILOT_HOME=<unset>" }
+    }
     Write-Host ""
     Write-Host "COPILOT_CUSTOM_INSTRUCTIONS_DIRS="
     if ($DirsCsv) {
@@ -193,11 +210,60 @@ function Clear-CtxContext {
     param([switch]$All)
 
     $prevContext = $env:AI_CTX_PROFILES
-    $prevHome = $env:COPILOT_HOME
     $cleanupFailed = $false
+    # Use the recorded mode of the matching activation, NOT the live selector
+    # (which may be stale). With no matching record, home ownership is
+    # unknown: ctx must never guess a mode from the selector or from the home
+    # path, so COPILOT_HOME is left untouched and no home is deleted. Mode B
+    # never touches COPILOT_HOME; Mode C never deletes the ephemeral home and
+    # handles a drifted/replaced COPILOT_HOME separately below.
+    $clearMode = Get-CtxActiveRecordMode
+    # Capture COPILOT_HOME only where it is needed: the Mode A deletion safety
+    # check (before the variable is unset below). Mode B clear and Mode C
+    # clear never read it for ownership - Mode C uses the recorded ephemeral
+    # path and Mode B leaves the variable untouched.
+    $prevHome = $null
+    if ($clearMode -ceq 'synthetic-home') {
+        $prevHome = $env:COPILOT_HOME
+    }
     Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
     Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
-    Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+    switch ($clearMode) {
+        'synthetic-home' {
+            Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        }
+        'ephemeral-clean' {
+            # Mode C: unset COPILOT_HOME only when it still exactly equals the
+            # recorded ephemeral path; a user's replacement value is preserved.
+            if ((Test-Path Env:\COPILOT_HOME) -and ($env:COPILOT_HOME -ceq $Script:CtxActiveHomeValue)) {
+                Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+            }
+        }
+        default {
+            # Mode B and unknown: never touch COPILOT_HOME.
+        }
+    }
+    # Unset COPILOT_SKILLS_DIRS only when the current value still matches what
+    # ctx established this session; a user's own or later value is left alone.
+    Unset-CtxOwnedSkillsDirs
+    # No matching activation record: report a present COPILOT_HOME as unknown
+    # rather than attributing it to a mode or guessing a deletion target. On
+    # the unknown path COPILOT_HOME is still set, so read it directly.
+    if (-not $clearMode -and $env:COPILOT_HOME) {
+        Write-Warning "ctx: warning: no matching activation record; COPILOT_HOME is unowned (unknown), left as-is: $($env:COPILOT_HOME)"
+    }
+    # The Mode C retained-path notice prints for BOTH plain clear and
+    # clear --all, before the active record is cleared. A COPILOT_HOME that
+    # no longer equals the recorded ephemeral path is preserved and reported
+    # as changed/unowned.
+    if ($clearMode -ceq 'ephemeral-clean') {
+        if ($Script:CtxActiveHomeValue) {
+            Write-CtxRetainedEphemeralHome -Path $Script:CtxActiveHomeValue
+        }
+        if ((Test-Path Env:\COPILOT_HOME) -and ($env:COPILOT_HOME -cne $Script:CtxActiveHomeValue)) {
+            Write-Warning "ctx: warning: COPILOT_HOME has changed from the recorded ephemeral path (unowned, unknown), left as-is: $($env:COPILOT_HOME)"
+        }
+    }
 
     if ($All) {
         $dirOfFile = $Script:CtxAutoLoadDir
@@ -262,7 +328,10 @@ function Clear-CtxContext {
             }
         }
 
-        if ($prevContext) {
+        # Mode B never touches COPILOT_HOME and skips the synthetic-home
+        # deletion block entirely; Mode C never deletes the ephemeral home.
+        # Only Mode A's existing safety-validated deletion runs.
+        if ($clearMode -ceq 'synthetic-home' -and $prevContext) {
             if ($Script:CtxAutoLoadHomeOverride) {
                 $homeDir = $Script:CtxAutoLoadHomeOverride
             } else {
@@ -272,21 +341,27 @@ function Clear-CtxContext {
             }
             if (-not $prevHome -or $homeDir -ne $prevHome) {
                 Write-Error "ctx: error: refusing to remove unsafe or unselected home: $homeDir" -ErrorAction Continue
-                return $false
-            }
-            try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_" -ErrorAction Continue; return $false }
-            if ((Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
-                try {
-                    Remove-Item -LiteralPath $homeDir -Recurse -Force -ErrorAction Stop
-                } catch {
-                    Write-Error "ctx: error: failed to remove $homeDir`: $_" -ErrorAction Continue
-                    return $false
+                $cleanupFailed = $true
+            } else {
+                try { $null = Get-CtxValidatedHomePath -Path $homeDir } catch { Write-Error "ctx: error: $_" -ErrorAction Continue; $cleanupFailed = $true }
+                if (-not $cleanupFailed -and (Test-Path -LiteralPath $homeDir -PathType Container) -and -not (Test-CtxIsLink -Path $homeDir)) {
+                    try {
+                        Remove-Item -LiteralPath $homeDir -Recurse -Force -ErrorAction Stop
+                    } catch {
+                        Write-Error "ctx: error: failed to remove $homeDir`: $_" -ErrorAction Continue
+                        $cleanupFailed = $true
+                    }
+                    if (-not $cleanupFailed) {
+                        Write-Host "ctx: removed $homeDir"
+                    }
                 }
-                Write-Host "ctx: removed $homeDir"
             }
         }
     }
 
+    # Never leave a stale active record for an already-cleared context, even
+    # when --all reported an unrelated artifact cleanup error above.
+    Reset-CtxActiveRecord
     $Script:CtxAutoLoadDir = $null
     $Script:CtxAutoLoadHomeOverride = $null
     Write-Host "AI context cleared."
@@ -368,6 +443,9 @@ function ctx {
         return
     }
 
+    $mode = $null
+    try { $mode = Get-CtxValidatedCopilotMode } catch { Write-Error "ctx: error: $_"; return }
+
     $profileName = $Contexts[0]
     $profileNames = @()
     $seenNames = @{}
@@ -384,10 +462,55 @@ function ctx {
     $dirsCsv = $dirsList -join ','
     $sharedCsv = ""
 
-    $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
-    $env:AI_CTX_PROFILES = $profileNames -join '+'
+    # COPILOT_SKILLS_DIRS is computed/validated only in Modes B/C before any
+    # state change; a comma in an included skills path rejects the activation.
+    # Mode A must not run this new validation or otherwise change its parsing.
+    $skillsDirsCsv = $null
+    if ($mode -ceq 'global-user' -or $mode -ceq 'ephemeral-clean') {
+        try { $skillsDirsCsv = Get-CtxSkillsDirsCsv -ResolvedDirs $dirsList } catch { Write-Error "ctx: error: $_"; return }
+    }
 
-    Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirsList
+    $newContext = $profileNames -join '+'
+    $newHome = $null
+    if ($mode -ceq 'ephemeral-clean') {
+        # Mode C: preflight home creation before any state change so a
+        # failure leaves the previous context and all files untouched.
+        try { $newHome = New-CtxEphemeralCopilotHome } catch { Write-Error "ctx: error: $_"; return }
+    }
+    $oldEphemeralHome = $null
+    if ((Get-CtxActiveRecordMode) -ceq 'ephemeral-clean') {
+        # Remember the replaced Mode C home so its retained-path notice can be
+        # printed only after the replacement below actually succeeds.
+        $oldEphemeralHome = $Script:CtxActiveHomeValue
+    }
+
+    $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
+    $env:AI_CTX_PROFILES = $newContext
+
+    if ($mode -ceq 'global-user') {
+        # Mode B: never set up or touch COPILOT_HOME at all.
+    } elseif ($mode -ceq 'ephemeral-clean') {
+        $env:COPILOT_HOME = $newHome
+    } else {
+        Set-CtxCopilotHome -ContextName $env:AI_CTX_PROFILES -ResolvedDirs $dirsList
+    }
+
+    if ($mode -ceq 'global-user' -or $mode -ceq 'ephemeral-clean') {
+        # B/C: export the freshly computed value; fully replaced each
+        # activation, then record its exact state as ctx-owned this session.
+        if ($skillsDirsCsv) { $env:COPILOT_SKILLS_DIRS = $skillsDirsCsv } else { Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue }
+        Set-CtxActiveSkillsDirsRecord
+    } else {
+        # A: unset only a value that still matches what a prior B/C activation
+        # in this session established; a user's own value is never touched.
+        Unset-CtxOwnedSkillsDirs
+    }
+
+    # Publish the session record only after a fully successful activation.
+    Set-CtxActiveRecord -Mode $mode
+    if ($oldEphemeralHome) {
+        Write-CtxRetainedEphemeralHome -Path $oldEphemeralHome
+    }
 
     Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv -DirsCsv $dirsCsv
 }
@@ -400,6 +523,119 @@ $Script:CtxLastPwd = $null
 # .ctx file auto-loaded, so Clear-CtxContext -All knows to look for the
 # synthetic COPILOT_HOME at that location instead of the centralized one.
 $Script:CtxAutoLoadHomeOverride = $null
+# Tracks the exact COPILOT_SKILLS_DIRS state ctx established this session
+# (Modes B/C). $Script:CtxSkillsDirsOwned is $true while such a record
+# exists; $Script:CtxSkillsDirsWasSet records whether the activation left the
+# variable set, and $Script:CtxSkillsDirsValue records its exact value when
+# set. Clear and a switch into Mode A unset the variable only when the current
+# presence/value still matches this record, so a user's later value is never
+# erased. Failed activations never touch the record.
+$Script:CtxSkillsDirsOwned = $false
+$Script:CtxSkillsDirsWasSet = $false
+$Script:CtxSkillsDirsValue = $null
+
+# Session-local activation record (no on-disk registry). Written only after
+# an activation has actually succeeded; reset on clear and never on a failed
+# activation. `ctx current`/`ctx check` report the mode and home of the
+# matching record, never the raw selector, so a stale
+# AI_CTX_PROFILES_COPILOT_MODE without a matching activation is not reported
+# as active.
+$Script:CtxActiveMode = $null
+$Script:CtxActiveContext = $null
+$Script:CtxActiveCustomDirs = $null
+$Script:CtxActiveHomeWasSet = $false
+$Script:CtxActiveHomeValue = $null
+
+function Get-CtxActiveRecordMode {
+    # Returns the recorded mode when the activation record's context and
+    # custom-instructions directories still match the current environment, or
+    # $null otherwise. COPILOT_HOME is deliberately not compared here: clear
+    # and replacement notices handle Mode C home drift separately, and only
+    # current/check require full record fidelity.
+    if (-not $Script:CtxActiveMode) { return $null }
+    if ($Script:CtxActiveContext -cne $env:AI_CTX_PROFILES) { return $null }
+    if ($Script:CtxActiveCustomDirs -cne $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS) { return $null }
+    return $Script:CtxActiveMode
+}
+
+function Test-CtxActiveRecordMatches {
+    # Returns $true when the session-local activation record matches the
+    # current activated context (AI_CTX_PROFILES and
+    # COPILOT_CUSTOM_INSTRUCTIONS_DIRS unchanged since the activation). A
+    # record whose context no longer matches is foreign/stale and must not be
+    # attributed. For Mode C the record additionally matches only while the
+    # current COPILOT_HOME is still the exact recorded ephemeral path, so a
+    # changed/foreign home is never attributed to the recorded activation.
+    $mode = Get-CtxActiveRecordMode
+    if (-not $mode) { return $false }
+    if ($mode -ceq 'ephemeral-clean') {
+        if (-not (Test-Path Env:\COPILOT_HOME)) { return $false }
+        if ($env:COPILOT_HOME -cne $Script:CtxActiveHomeValue) { return $false }
+    }
+    return $true
+}
+
+function Set-CtxActiveRecord {
+    # $Mode: the mode that actually activated. Must be called only after the
+    # activation succeeded and the environment is fully set up.
+    param([string]$Mode)
+    $Script:CtxActiveMode = $Mode
+    $Script:CtxActiveContext = $env:AI_CTX_PROFILES
+    $Script:CtxActiveCustomDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    if ($Mode -ceq 'global-user') {
+        $Script:CtxActiveHomeWasSet = $null -ne (Get-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue)
+        $Script:CtxActiveHomeValue = $env:COPILOT_HOME
+    } elseif ($Mode -ceq 'ephemeral-clean') {
+        $Script:CtxActiveHomeWasSet = $true
+        $Script:CtxActiveHomeValue = $env:COPILOT_HOME
+    } else {
+        $Script:CtxActiveHomeWasSet = $false
+        $Script:CtxActiveHomeValue = $null
+    }
+}
+
+function Reset-CtxActiveRecord {
+    $Script:CtxActiveMode = $null
+    $Script:CtxActiveContext = $null
+    $Script:CtxActiveCustomDirs = $null
+    $Script:CtxActiveHomeWasSet = $false
+    $Script:CtxActiveHomeValue = $null
+}
+
+function Set-CtxActiveSkillsDirsRecord {
+    # Records the exact COPILOT_SKILLS_DIRS state a successful B/C activation
+    # established this session, so clear and a Mode A switch unset the variable
+    # only when the current value still matches; a user's later value is
+    # preserved.
+    $Script:CtxSkillsDirsOwned = $true
+    if (Test-Path Env:\COPILOT_SKILLS_DIRS) {
+        $Script:CtxSkillsDirsWasSet = $true
+        $Script:CtxSkillsDirsValue = $env:COPILOT_SKILLS_DIRS
+    } else {
+        $Script:CtxSkillsDirsWasSet = $false
+        $Script:CtxSkillsDirsValue = $null
+    }
+}
+
+function Unset-CtxOwnedSkillsDirs {
+    # Unsets COPILOT_SKILLS_DIRS only when the current presence/value still
+    # matches what a prior B/C activation in this session established; never
+    # touches a user's own value. Resets the ownership record regardless.
+    if ($Script:CtxSkillsDirsOwned) {
+        if ($Script:CtxSkillsDirsWasSet -and (Test-Path Env:\COPILOT_SKILLS_DIRS) -and ($env:COPILOT_SKILLS_DIRS -ceq $Script:CtxSkillsDirsValue)) {
+            Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
+        }
+        $Script:CtxSkillsDirsOwned = $false
+        $Script:CtxSkillsDirsWasSet = $false
+        $Script:CtxSkillsDirsValue = $null
+    }
+}
+
+function Write-CtxRetainedEphemeralHome {
+    # $Path: the retained ephemeral home path (never deleted by ctx).
+    param([string]$Path)
+    Write-Host "ctx: retained ephemeral COPILOT_HOME (not deleted): $Path — may contain Copilot auth/session/cache data; moving any needed data out is the user's or workflow's responsibility; it consumes disk until the directory is manually removed"
+}
 
 function Get-CtxCopilotHomeRoot {
     if ($env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT) {
@@ -448,6 +684,41 @@ function Get-CtxValidatedHomePath {
         }
     }
     return $canonical
+}
+
+function Get-CtxValidatedCopilotMode {
+    # Selects and validates the active Copilot integration mode. Accepts
+    # exactly synthetic-home | global-user | ephemeral-clean,
+    # case-sensitively; unset/empty defaults to synthetic-home (today's
+    # behavior). Returns the active mode, or throws naming the allowed
+    # values.
+    $mode = if ($env:AI_CTX_PROFILES_COPILOT_MODE) { $env:AI_CTX_PROFILES_COPILOT_MODE } else { 'synthetic-home' }
+    if ($mode -cnotin @('synthetic-home', 'global-user', 'ephemeral-clean')) {
+        throw "invalid AI_CTX_PROFILES_COPILOT_MODE `"$mode`" (allowed values: synthetic-home, global-user, ephemeral-clean)"
+    }
+    return $mode
+}
+
+function Get-CtxSkillsDirsCsv {
+    # Computes the COPILOT_SKILLS_DIRS value for Modes B/C: the existing
+    # <resolved-dir>\.github\skills directories of the given resolved dirs,
+    # in the same stable order they are given, comma-joined. Returns $null
+    # when zero such directories exist. Side-effect-free: throws on a
+    # literal comma in an included skills path (no escaping mechanism
+    # exists), rejecting the whole activation before any state change.
+    param([string[]]$ResolvedDirs)
+    $skills = @()
+    foreach ($rd in $ResolvedDirs) {
+        $skillDir = Join-Path $rd '.github\skills'
+        if (Test-Path -LiteralPath $skillDir -PathType Container) {
+            if ($skillDir.Contains(',')) {
+                throw "COPILOT_SKILLS_DIRS path contains a literal comma: $skillDir"
+            }
+            $skills += $skillDir
+        }
+    }
+    if ($skills.Count -eq 0) { return $null }
+    return ($skills -join ',')
 }
 
 function Get-CtxCopilotHomeSharedFiles {
@@ -675,6 +946,46 @@ function Resolve-CtxLink {
     }
 
     return $true
+}
+
+function New-CtxEphemeralCopilotHome {
+    # Mode C (ephemeral-clean): creates a brand-new, unique, empty
+    # COPILOT_HOME on every call via GetTempPath() + a GUID suffix (no
+    # new dependency). Never reused, never looked up by name. No
+    # symlinks/copies to or from the real Copilot home, no
+    # reconciliation, no skills subfolder. Returns the created path; it
+    # does NOT set $env:COPILOT_HOME so callers can preflight Mode C home
+    # creation before any state change. Colliding paths are rejected (no
+    # -Force, so a candidate that raced into existence after the pre-check
+    # is not silently accepted); there is no retry loop.
+    #
+    # On non-Windows the directory can hold Copilot auth/session/cache data,
+    # so it is made owner-only (0700) and the effective mode is verified
+    # before returning; on failure the just-created empty path is removed and
+    # the activation fails without touching prior context. Windows relies on
+    # the per-user temp parent ACL and does not use Unix mode APIs.
+    $base = [System.IO.Path]::GetTempPath()
+    $name = 'ctx-ephemeral-' + [System.Guid]::NewGuid().ToString('N')
+    $homeDir = Join-Path $base $name
+    if (Test-Path -LiteralPath $homeDir) {
+        throw "ctx: error: ephemeral COPILOT_HOME candidate already exists, refusing: $homeDir"
+    }
+    New-Item -ItemType Directory -Path $homeDir -ErrorAction Stop | Out-Null
+    $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
+    if (-not $isWindowsLike) {
+        try {
+            $ownerOnly = [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite -bor [System.IO.UnixFileMode]::UserExecute
+            [System.IO.File]::SetUnixFileMode($homeDir, $ownerOnly)
+            $effective = [System.IO.File]::GetUnixFileMode($homeDir)
+            if ($effective -cne $ownerOnly) {
+                throw "ctx: error: ephemeral COPILOT_HOME permissions not owner-only: $homeDir"
+            }
+        } catch {
+            Remove-Item -LiteralPath $homeDir -Force -ErrorAction SilentlyContinue
+            throw
+        }
+    }
+    return $homeDir
 }
 
 function Set-CtxCopilotHome {
@@ -947,16 +1258,114 @@ function Parse-CtxFile {
 function Import-CtxFile {
     param([string]$CtxFile)
     try { $parsed = Parse-CtxFile -CtxFile $CtxFile } catch { Write-Error "ctx: error: $_"; return $false }
-    Update-CtxWorkspaceFile -BaseDir $parsed.Dir -Names $parsed.Names -Dirs $parsed.Dirs
+    $mode = $null
+    try { $mode = Get-CtxValidatedCopilotMode } catch { Write-Error "ctx: error: $_"; return $false }
+    if ($parsed.HomeOverride -and ($mode -cne 'synthetic-home')) {
+        Write-Error "ctx: error: `"home:`" directive is only valid in synthetic-home mode (active mode: $mode); allowed values: synthetic-home, global-user, ephemeral-clean"
+        return $false
+    }
     $dirsCsv = $parsed.Dirs -join ','
+    # COPILOT_SKILLS_DIRS is computed/validated only in Modes B/C before any
+    # state change; a comma in an included skills path rejects the activation.
+    # Mode A must not run this new validation or otherwise change its parsing.
+    $skillsDirsCsv = $null
+    if ($mode -ceq 'global-user' -or $mode -ceq 'ephemeral-clean') {
+        try { $skillsDirsCsv = Get-CtxSkillsDirsCsv -ResolvedDirs $parsed.Dirs } catch { Write-Error "ctx: error: $_"; return $false }
+    }
+    $newHome = $null
+    if ($mode -ceq 'ephemeral-clean') {
+        # Mode C: preflight home creation before any state change (including
+        # the workspace-file write) so a failure leaves the previous context
+        # and all files untouched.
+        try { $newHome = New-CtxEphemeralCopilotHome } catch { Write-Error "ctx: error: $_"; return $false }
+    }
+    $oldEphemeralHome = $null
+    if ((Get-CtxActiveRecordMode) -ceq 'ephemeral-clean') {
+        # Remember the replaced Mode C home so its retained-path notice can be
+        # printed only after the replacement below actually succeeds.
+        $oldEphemeralHome = $Script:CtxActiveHomeValue
+    }
+    Update-CtxWorkspaceFile -BaseDir $parsed.Dir -Names $parsed.Names -Dirs $parsed.Dirs
     $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $dirsCsv
     $env:AI_CTX_PROFILES = $parsed.Context
-    Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride
+    if ($mode -ceq 'global-user') {
+        # Mode B: never set up or touch COPILOT_HOME at all.
+    } elseif ($mode -ceq 'ephemeral-clean') {
+        $env:COPILOT_HOME = $newHome
+    } else {
+        Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride
+    }
+    if ($mode -ceq 'global-user' -or $mode -ceq 'ephemeral-clean') {
+        # B/C: export the freshly computed value; fully replaced each
+        # activation, then record its exact state as ctx-owned this session.
+        if ($skillsDirsCsv) { $env:COPILOT_SKILLS_DIRS = $skillsDirsCsv } else { Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue }
+        Set-CtxActiveSkillsDirsRecord
+    } else {
+        # A: unset only a value that still matches what a prior B/C activation
+        # in this session established; a user's own value is never touched.
+        Unset-CtxOwnedSkillsDirs
+    }
     $Script:CtxAutoLoadHomeOverride = $parsed.HomeOverride
+    # Publish the session record only after a fully successful activation.
+    Set-CtxActiveRecord -Mode $mode
+    if ($oldEphemeralHome) {
+        Write-CtxRetainedEphemeralHome -Path $oldEphemeralHome
+    }
     $sharedCsv = ($parsed.Names | Select-Object -Skip 1) -join ', '
     Write-CtxStatus -ProfileName $parsed.Names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv
     return $true
 }
+function Write-CtxSkipLinksAndSkills {
+    # Modes B/C and unattributable (no-record) state do not own the Mode-A
+    # synthetic-home shared-link or skill-symlink trees; those checks report
+    # CHECK SKIP rather than FAIL. $ResolvedDirs is the list of resolved .ctx
+    # dirs used to list the desired skill names.
+    param([string[]]$ResolvedDirs)
+    foreach ($f in ((Get-CtxCopilotHomeSharedFiles) + (Get-CtxCopilotHomeSharedDirs))) {
+        Write-Host "CHECK SKIP link:$f"
+    }
+    $desired = @()
+    foreach ($rd in $ResolvedDirs) {
+        $skillDir = Join-Path $rd '.github\skills'
+        if (Test-Path -LiteralPath $skillDir -PathType Container) {
+            foreach ($s in (Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name)) {
+                $desired += $s.Name
+            }
+        }
+    }
+    foreach ($name in ($desired | Sort-Object -Unique)) {
+        Write-Host "CHECK SKIP skill:$name"
+    }
+}
+
+function Write-CtxCheckSkillsDirs {
+    # Modes B/C: audits COPILOT_SKILLS_DIRS against the expected stable CSV
+    # derived from the existing .github\skills directories of the parsed .ctx
+    # entries (same computation as activation). Emits CHECK PASS/FAIL and
+    # returns $true on pass; when the expected CSV cannot be computed (e.g. a
+    # literal comma path) it emits CHECK SKIP rather than guessing. Read-only.
+    param([string[]]$ResolvedDirs)
+    $expectedCsv = $null
+    try { $expectedCsv = Get-CtxSkillsDirsCsv -ResolvedDirs $ResolvedDirs } catch {
+        Write-Host 'CHECK SKIP COPILOT_SKILLS_DIRS'
+        return $true
+    }
+    if ($expectedCsv) {
+        if ((Test-Path Env:\COPILOT_SKILLS_DIRS) -and ($env:COPILOT_SKILLS_DIRS -ceq $expectedCsv)) {
+            Write-Host 'CHECK PASS COPILOT_SKILLS_DIRS'
+            return $true
+        }
+        Write-Host "CHECK FAIL COPILOT_SKILLS_DIRS: expected $expectedCsv, got $(if($env:COPILOT_SKILLS_DIRS){$env:COPILOT_SKILLS_DIRS}else{'<unset>'})"
+        return $false
+    }
+    if (-not (Test-Path Env:\COPILOT_SKILLS_DIRS)) {
+        Write-Host 'CHECK PASS COPILOT_SKILLS_DIRS'
+        return $true
+    }
+    Write-Host "CHECK FAIL COPILOT_SKILLS_DIRS: expected <unset>, got $($env:COPILOT_SKILLS_DIRS)"
+    return $false
+}
+
 function Test-CtxActivation {
     # Read-only audit of the nearest .ctx activation. This function deliberately
     # does not call Import-CtxFile or Set-CtxCopilotHome.
@@ -966,28 +1375,100 @@ function Test-CtxActivation {
     $dir = $parsed.Dir; $names = @($parsed.Names); $dirs = @($parsed.Dirs); $homeOverride = $parsed.HomeOverride; $failures = 0
     $expectedContext = $parsed.Context; $expectedDirs = $dirs -join ','
     if ($env:AI_CTX_PROFILES -ceq $expectedContext) { Write-Host 'CHECK PASS AI_CTX_PROFILES' } else { Write-Host "CHECK FAIL AI_CTX_PROFILES: expected $expectedContext, got $(if($env:AI_CTX_PROFILES){$env:AI_CTX_PROFILES}else{'<unset>'})"; $failures++ }
+    # The active mode is the mode of the matching session-local activation
+    # record, never the raw selector. A record matches only while its context
+    # and custom-instructions directories match the parsed .ctx file; a stale
+    # or mismatched record is not guessed at.
+    $recordedMode = $null
+    if ($Script:CtxActiveMode -and ($Script:CtxActiveContext -ceq $expectedContext) -and ($Script:CtxActiveCustomDirs -ceq $expectedDirs)) {
+        $recordedMode = $Script:CtxActiveMode
+    }
+    if ($recordedMode) {
+        $selectorMode = $null
+        try { $selectorMode = Get-CtxValidatedCopilotMode } catch { $selectorMode = $null }
+        if (-not $selectorMode) {
+            Write-Host "CHECK FAIL COPILOT_MODE: invalid selector `"$(if($env:AI_CTX_PROFILES_COPILOT_MODE){$env:AI_CTX_PROFILES_COPILOT_MODE}else{'<unset>'})`" (allowed values: synthetic-home, global-user, ephemeral-clean), recorded active mode $recordedMode"
+            $failures++
+        } elseif ($selectorMode -ceq $recordedMode) {
+            Write-Host "CHECK PASS COPILOT_MODE: recorded $recordedMode matches selector"
+        } else {
+            Write-Host "CHECK FAIL COPILOT_MODE: selector $selectorMode does not match recorded active mode $recordedMode"
+            $failures++
+        }
+    } else {
+        Write-Host 'CHECK UNKNOWN COPILOT_MODE: no matching local activation record'
+    }
     if ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq $expectedDirs) { Write-Host 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS' } else { Write-Host "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected $expectedDirs, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"; $failures++ }
     $expectedHome = if ($homeOverride) { $homeOverride } else { Join-Path (Get-CtxCopilotHomeRoot) (Get-CtxSanitizedContextName -Name $expectedContext) }
-    if ($env:COPILOT_HOME -ceq $expectedHome -and (Test-Path -LiteralPath $expectedHome -PathType Container)) { Write-Host 'CHECK PASS COPILOT_HOME' } else { Write-Host "CHECK FAIL COPILOT_HOME: expected $expectedHome, got $(if($env:COPILOT_HOME){$env:COPILOT_HOME}else{'<unset>'})"; $failures++ }
-    foreach ($f in (Get-CtxCopilotHomeSharedFiles) + (Get-CtxCopilotHomeSharedDirs)) {
-        $link = Join-Path $expectedHome $f; $target = Join-Path (Get-CtxCopilotDir) $f
-        if ((Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target).TrimEnd('\','/') -eq $target.TrimEnd('\','/'))) { Write-Host "CHECK PASS link:$f" } else { Write-Host "CHECK FAIL link:${f}: expected link to $target"; $failures++ }
-    }
-    $desired = @{}
-    foreach ($rd in $dirs) { $skillDir = Join-Path $rd '.github\skills'; if (Test-Path -LiteralPath $skillDir -PathType Container) { foreach ($s in Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name) { $desired[$s.Name] = $s.FullName } } }
-    foreach ($name in ($desired.Keys | Sort-Object)) {
-        $link = Join-Path $expectedHome "skills\$name"
-        if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $desired[$name])) { Write-Host "CHECK PASS skill:$name" } else { Write-Host "CHECK FAIL skill:${name}: missing or wrong target"; $failures++ }
-    }
-    $actualSkillNames = @()
-    $skillsHome = Join-Path $expectedHome 'skills'
-    if (Test-Path -LiteralPath $skillsHome -PathType Container) {
-        $actualSkillNames = @(Get-ChildItem -LiteralPath $skillsHome -Force | Sort-Object Name | Select-Object -ExpandProperty Name)
-    }
-    foreach ($actualName in $actualSkillNames) {
-        if (-not $desired.ContainsKey($actualName)) {
-            Write-Host "CHECK FAIL skill:${actualName}: unexpected skill"
-            $failures++
+    switch ($recordedMode) {
+        'global-user' {
+            # Mode B: compare COPILOT_HOME only against the exact recorded
+            # activation-time value (including still-unset); never inspect the
+            # global ~/.copilot.
+            if ($Script:CtxActiveHomeWasSet) {
+                if ((Test-Path Env:\COPILOT_HOME) -and ($env:COPILOT_HOME -ceq $Script:CtxActiveHomeValue)) {
+                    Write-Host 'CHECK PASS COPILOT_HOME'
+                } else {
+                    Write-Host "CHECK FAIL COPILOT_HOME: recorded $($Script:CtxActiveHomeValue), got $(if($env:COPILOT_HOME){$env:COPILOT_HOME}else{'<unset>'})"
+                    $failures++
+                }
+            } elseif (-not (Test-Path Env:\COPILOT_HOME)) {
+                Write-Host 'CHECK PASS COPILOT_HOME'
+            } else {
+                Write-Host "CHECK FAIL COPILOT_HOME: recorded <unset>, got $($env:COPILOT_HOME)"
+                $failures++
+            }
+            if (-not (Write-CtxCheckSkillsDirs -ResolvedDirs $dirs)) { $failures++ }
+            Write-CtxSkipLinksAndSkills -ResolvedDirs $dirs
+        }
+        'ephemeral-clean' {
+            # Mode C: PASS only when the current COPILOT_HOME still equals the
+            # recorded ephemeral path (presence and exact value) AND that path
+            # still exists as a real (non-symlink) directory. FAIL on unset,
+            # changed, or foreign-replaced values; never inspect contents.
+            if ((Test-Path Env:\COPILOT_HOME) -and ($env:COPILOT_HOME -ceq $Script:CtxActiveHomeValue) -and $Script:CtxActiveHomeValue -and (Test-Path -LiteralPath $Script:CtxActiveHomeValue -PathType Container) -and -not (Test-CtxIsLink -Path $Script:CtxActiveHomeValue)) {
+                Write-Host 'CHECK PASS COPILOT_HOME'
+            } else {
+                Write-Host "CHECK FAIL COPILOT_HOME: expected recorded ephemeral home $($Script:CtxActiveHomeValue), got $(if($env:COPILOT_HOME){$env:COPILOT_HOME}else{'<unset>'})"
+                $failures++
+            }
+            if (-not (Write-CtxCheckSkillsDirs -ResolvedDirs $dirs)) { $failures++ }
+            Write-CtxSkipLinksAndSkills -ResolvedDirs $dirs
+        }
+        'synthetic-home' {
+            # Mode A: existing COPILOT_HOME + shared-link + skill checks
+            # unchanged (only the mode line/report differs).
+            if ($env:COPILOT_HOME -ceq $expectedHome -and (Test-Path -LiteralPath $expectedHome -PathType Container)) { Write-Host 'CHECK PASS COPILOT_HOME' } else { Write-Host "CHECK FAIL COPILOT_HOME: expected $expectedHome, got $(if($env:COPILOT_HOME){$env:COPILOT_HOME}else{'<unset>'})"; $failures++ }
+            foreach ($f in (Get-CtxCopilotHomeSharedFiles) + (Get-CtxCopilotHomeSharedDirs)) {
+                $link = Join-Path $expectedHome $f; $target = Join-Path (Get-CtxCopilotDir) $f
+                if ((Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target).TrimEnd('\','/') -eq $target.TrimEnd('\','/'))) { Write-Host "CHECK PASS link:$f" } else { Write-Host "CHECK FAIL link:${f}: expected link to $target"; $failures++ }
+            }
+            $desired = @{}
+            foreach ($rd in $dirs) { $skillDir = Join-Path $rd '.github\skills'; if (Test-Path -LiteralPath $skillDir -PathType Container) { foreach ($s in Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name) { $desired[$s.Name] = $s.FullName } } }
+            foreach ($name in ($desired.Keys | Sort-Object)) {
+                $link = Join-Path $expectedHome "skills\$name"
+                if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $desired[$name])) { Write-Host "CHECK PASS skill:$name" } else { Write-Host "CHECK FAIL skill:${name}: missing or wrong target"; $failures++ }
+            }
+            $actualSkillNames = @()
+            $skillsHome = Join-Path $expectedHome 'skills'
+            if (Test-Path -LiteralPath $skillsHome -PathType Container) {
+                $actualSkillNames = @(Get-ChildItem -LiteralPath $skillsHome -Force | Sort-Object Name | Select-Object -ExpandProperty Name)
+            }
+            foreach ($actualName in $actualSkillNames) {
+                if (-not $desired.ContainsKey($actualName)) {
+                    Write-Host "CHECK FAIL skill:${actualName}: unexpected skill"
+                    $failures++
+                }
+            }
+        }
+        default {
+            # No matching activation record: a present COPILOT_HOME or
+            # COPILOT_SKILLS_DIRS is unattributable, so report CHECK UNKNOWN
+            # rather than guessing. Unknown diagnostics are not applicable
+            # checks and do not increment the failure count.
+            if (Test-Path Env:\COPILOT_HOME) { Write-Host 'CHECK UNKNOWN COPILOT_HOME: present with no matching local activation record' }
+            if (Test-Path Env:\COPILOT_SKILLS_DIRS) { Write-Host 'CHECK UNKNOWN COPILOT_SKILLS_DIRS: present with no matching local activation record' }
+            Write-CtxSkipLinksAndSkills -ResolvedDirs $dirs
         }
     }
     Write-Host 'CHECK SKIP skills: copilot probe disabled in read-only check'
