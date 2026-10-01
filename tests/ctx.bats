@@ -2121,3 +2121,141 @@ EOF
     [[ "$output" == *"$review_dir"* ]]
     [[ "$output" == *"$security_dir"* ]]
 }
+
+@test "Issue40: non-ASCII case-fold collision (ZÄHLER vs zähler) is diagnosed and skipped" {
+    local proj="$TEST_TMP/project-issue40-unicode"
+    local review_dir security_dir
+    _make_profile review ZÄHLER
+    _make_profile review review-skill
+    _make_profile security zähler
+    _make_profile security security-skill
+    review_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    security_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/security"
+    mkdir -p "$proj"
+    printf 'review:%s\nsecurity:%s\n' "$review_dir" "$security_dir" > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/issue40-unicode.out" 2>&1
+    local act_out
+    act_out="$(<"$TEST_TMP/issue40-unicode.out")"
+    [[ "$act_out" == *"collision"* ]]
+    [[ "$act_out" == *"zähler"* ]]
+    [[ "$act_out" == *"$review_dir"* ]]
+    [[ "$act_out" == *"$security_dir"* ]]
+    [ ! -e "$COPILOT_HOME/skills/ZÄHLER" ]
+    [ ! -e "$COPILOT_HOME/skills/zähler" ]
+    [ -L "$COPILOT_HOME/skills/review-skill" ]
+    [ -L "$COPILOT_HOME/skills/security-skill" ]
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL skill:zähler"* ]]
+    [[ "$output" == *"collision"* ]]
+    [[ "$output" == *"$review_dir"* ]]
+    [[ "$output" == *"$security_dir"* ]]
+}
+
+@test "Issue40: stale case-only sibling is detected by check and removed on reactivation" {
+    # Only meaningful on a case-sensitive filesystem, where two spellings of
+    # the same canonical name can coexist.
+    printf 'probe\n' > "$TEST_TMP/caseprobe"
+    if [ -e "$TEST_TMP/CASEPROBE" ]; then
+        skip "filesystem is case-insensitive"
+    fi
+
+    local proj="$TEST_TMP/project-issue40-stale-case"
+    local review_dir
+    _make_profile review foo-skill
+    _make_profile review review-skill
+    review_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$review_dir" > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    [ -L "$COPILOT_HOME/skills/foo-skill" ]
+
+    # Simulate a stale same-case sibling left behind by an earlier partial
+    # state on a case-sensitive filesystem.
+    ln -s "$review_dir/.github/skills/foo-skill" "$COPILOT_HOME/skills/Foo-Skill"
+    [ -L "$COPILOT_HOME/skills/Foo-Skill" ]
+
+    # Read-only check must detect the duplicate canonical name and fail.
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL skill:foo-skill"* ]]
+    [[ "$output" == *"duplicate"* ]]
+
+    # Reactivation reconciles to exactly one on-disk spelling.
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    [ -L "$COPILOT_HOME/skills/foo-skill" ]
+    [ ! -e "$COPILOT_HOME/skills/Foo-Skill" ]
+
+    run ctx check
+    [ "$status" -eq 0 ]
+}
+
+@test "Issue40: Greek final-sigma invariant lowercase collision (ΟΣ vs οσ) is diagnosed and skipped" {
+    local proj="$TEST_TMP/project-issue40-greek"
+    local review_dir security_dir
+    _make_profile review ΟΣ
+    _make_profile review review-skill
+    _make_profile security οσ
+    _make_profile security security-skill
+    review_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    security_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/security"
+    mkdir -p "$proj"
+    printf 'review:%s\nsecurity:%s\n' "$review_dir" "$security_dir" > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/issue40-greek.out" 2>&1
+    local act_out
+    act_out="$(<"$TEST_TMP/issue40-greek.out")"
+    [[ "$act_out" == *"collision"* ]]
+    [[ "$act_out" == *"οσ"* ]]
+    [[ "$act_out" == *"$review_dir"* ]]
+    [[ "$act_out" == *"$security_dir"* ]]
+    [ ! -e "$COPILOT_HOME/skills/ΟΣ" ]
+    [ ! -e "$COPILOT_HOME/skills/οσ" ]
+    [ -L "$COPILOT_HOME/skills/review-skill" ]
+    [ -L "$COPILOT_HOME/skills/security-skill" ]
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL skill:οσ"* ]]
+    [[ "$output" == *"collision"* ]]
+    [[ "$output" == *"$review_dir"* ]]
+    [[ "$output" == *"$security_dir"* ]]
+}
+
+@test "Issue40: Turkish dotted İ and i are distinct under invariant lowercase (no collision)" {
+    # Only meaningful on a case-sensitive filesystem, where two spellings of
+    # the same canonical name can coexist; on case-insensitive filesystems
+    # the on-disk links themselves would alias.
+    printf 'probe\n' > "$TEST_TMP/caseprobe"
+    if [ -e "$TEST_TMP/CASEPROBE" ]; then
+        skip "filesystem is case-insensitive"
+    fi
+
+    local proj="$TEST_TMP/project-issue40-turkish"
+    local review_dir security_dir
+    _make_profile review İstanbul
+    _make_profile review review-skill
+    _make_profile security istanbul
+    _make_profile security security-skill
+    review_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    security_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/security"
+    mkdir -p "$proj"
+    printf 'review:%s\nsecurity:%s\n' "$review_dir" "$security_dir" > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/issue40-turkish.out" 2>&1
+    local act_out
+    act_out="$(<"$TEST_TMP/issue40-turkish.out")"
+    [[ "$act_out" != *"collision"* ]]
+    [ -L "$COPILOT_HOME/skills/İstanbul" ]
+    [ -L "$COPILOT_HOME/skills/istanbul" ]
+
+    run ctx check
+    [ "$status" -eq 0 ]
+}

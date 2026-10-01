@@ -127,6 +127,49 @@ _ctx_lowercase() {
     printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+_ctx_skill_canonical_name() {
+    # Lowercases a skill basename exactly the way PowerShell's
+    # ToLowerInvariant() does, so the two shells agree on skill-name
+    # collisions for non-ASCII names (issue #40). Pure-ASCII names use the
+    # fast tr path (LC_ALL=C, so A-Z folding is locale-independent) with no
+    # external dependency. Non-ASCII names are folded with python3/python
+    # (stdlib, locale-independent UTF-8) one code point at a time, keeping the
+    # original code point whenever its lowercase mapping would expand to
+    # multiple code points (e.g. U+0130) or when the whole-word mapping would
+    # be context-sensitive (e.g. Greek final sigma), matching .NET's simple
+    # per-character invariant mapping. It fails with a clear error when
+    # neither interpreter is available, rather than silently diverging.
+    local name="$1"
+    if printf '%s' "$name" | LC_ALL=C grep -q '[^ -~]'; then
+        local python_bin=""
+        if command -v python3 >/dev/null 2>&1; then
+            python_bin="python3"
+        elif command -v python >/dev/null 2>&1; then
+            python_bin="python"
+        else
+            printf 'ctx: error: cannot lowercase non-ASCII skill name "%s" (python3/python not found)\n' "$name" >&2
+            return 1
+        fi
+        local folded
+        folded="$(printf '%s' "$name" | "$python_bin" -c '
+import sys
+s = sys.stdin.buffer.read().decode("utf-8")
+out = []
+for c in s:
+    low = c.lower()
+    out.append(low if len(low) == 1 else c)
+sys.stdout.buffer.write("".join(out).encode("utf-8"))
+')" || {
+            printf 'ctx: error: cannot lowercase non-ASCII skill name "%s"\n' "$name" >&2
+            return 1
+        }
+        printf '%s\n' "$folded"
+        return 0
+    fi
+    printf '%s\n' "$name" | LC_ALL=C tr '[:upper:]' '[:lower:]'
+    return 0
+}
+
 _ctx_usage() {
     cat <<'EOF'
 Usage:
@@ -973,8 +1016,9 @@ EOF
 
     # Reconcile skills/: desired (name -> target) pairs come from each
     # resolved dir's .github/skills subfolder, if present. Skill names are
-    # compared case-insensitively (COPILOT_HOME targets are case-insensitive
-    # on Windows), so two source dirs contributing "foo" and "Foo" collide
+    # compared case-insensitively using the same canonical key as PowerShell's
+    # ToLowerInvariant() (COPILOT_HOME targets are case-insensitive on
+    # Windows), so two source dirs contributing "foo" and "Foo" collide
     # and the whole colliding group is skipped (issue #40).
     local -A desired_skills=() desired_skill_names=() collided_skills=() collided_contribs=()
     local -a desired_skill_order=() collided_skill_order=()
@@ -985,7 +1029,9 @@ EOF
         local s
         while IFS= read -r s; do
             sname="$(basename "$s")"
-            lcname="$(_ctx_lowercase "$sname")"
+            if ! lcname="$(_ctx_skill_canonical_name "$sname")"; then
+                return 1
+            fi
             if [ -n "${collided_skills[$lcname]+set}" ]; then
                 collided_contribs[$lcname]="${collided_contribs[$lcname]}, $rd"
             elif [ -n "${desired_skills[$lcname]+set}" ]; then
@@ -1010,10 +1056,13 @@ EOF
     # Remove stale skill symlinks no longer in desired set (a colliding
     # group is skipped, so any stale link of theirs is removed too).
     if [ -d "$home_dir/skills" ]; then
-        local existing ename
+        local existing ename existing_lc
         while IFS= read -r existing; do
             ename="$(basename "$existing")"
-            if [ -z "${desired_skills[$(_ctx_lowercase "$ename")]:-}" ]; then
+            if ! existing_lc="$(_ctx_skill_canonical_name "$ename")"; then
+                return 1
+            fi
+            if [ -z "${desired_skills[$existing_lc]:-}" ]; then
                 # Skills are directory symlinks; rm -rf mirrors
                 # _ctx_reconcile_symlink and the PowerShell equivalent
                 # (Remove-Item -Recurse -Force).
@@ -1022,23 +1071,36 @@ EOF
         done < <(find "$home_dir/skills" -mindepth 1 -maxdepth 1 -print)
     fi
 
-    # Create/repair desired skill symlinks (idempotent), removing any
-    # pre-existing entry that matches case-insensitively first. Names that
-    # became a collision are no longer desired and are skipped.
-    local name on_disk target link existing2
+    # Create/repair desired skill symlinks (idempotent). Names that became a
+    # collision are no longer desired and are skipped. Exactly one on-disk
+    # spelling per canonical key is kept: a correct exact-case link is left
+    # in place, but any other entry mapping to the same canonical key (e.g. a
+    # stale same-case sibling) is removed first (issue #40 finding 2).
+    local name on_disk target link existing2 existing2_lc link_ok
     for name in "${desired_skill_order[@]}"; do
         [ -n "${desired_skills[$name]+set}" ] || continue
         on_disk="${desired_skill_names[$name]}"
         target="${desired_skills[$name]}"
         link="$home_dir/skills/$on_disk"
+        link_ok=0
         if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
-            continue
+            link_ok=1
         fi
         while IFS= read -r existing2; do
-            if [ "$(_ctx_lowercase "$(basename "$existing2")")" = "$name" ]; then
+            [ -n "$existing2" ] || continue
+            if ! existing2_lc="$(_ctx_skill_canonical_name "$(basename "$existing2")")"; then
+                return 1
+            fi
+            if [ "$existing2_lc" = "$name" ]; then
+                if [ "$existing2" = "$link" ] && [ "$link_ok" -eq 1 ]; then
+                    continue
+                fi
                 rm -rf "$existing2"
             fi
         done < <(find "$home_dir/skills" -mindepth 1 -maxdepth 1 -print 2>/dev/null)
+        if [ "$link_ok" -eq 1 ]; then
+            continue
+        fi
         if ! ln -s "$target" "$link" 2>/dev/null; then
             printf 'ctx: warning: could not create skill symlink %s -> %s\n' "$link" "$target" >&2
         fi
@@ -1455,15 +1517,19 @@ EOF
             done <<EOF
 $(_ctx_copilot_home_shared_dirs)
 EOF
-            local -A seen=() collided=() first_target=() contributors=() actual=()
-            local -a all_names=() actual_names=()
+            local -A seen=() collided=() first_target=() contributors=() actual=() actual_seen=() actual_dup=()
+            local -a all_names=() actual_names=() actual_dup_names=()
             local rd skill_dir s skill_name lcname
             for rd in "${dirs[@]}"; do
                 skill_dir="$rd/.github/skills"
                 [ -d "$skill_dir" ] || continue
                 while IFS= read -r s; do
                     skill_name="$(basename "$s")"
-                    lcname="$(_ctx_lowercase "$skill_name")"
+                    if ! lcname="$(_ctx_skill_canonical_name "$skill_name")"; then
+                        printf 'CHECK FAIL skill:%s: cannot canonicalize skill name (python3/python not found)\n' "$skill_name"
+                        failures=$((failures+1))
+                        continue
+                    fi
                     if [ -n "${collided[$lcname]+set}" ]; then
                         contributors[$lcname]="${contributors[$lcname]}, $rd"
                     elif [ -n "${seen[$lcname]+set}" ]; then
@@ -1479,8 +1545,21 @@ EOF
             done
             while IFS= read -r s; do
                 skill_name="$(basename "$s")"
+                if ! lcname="$(_ctx_skill_canonical_name "$skill_name")"; then
+                    printf 'CHECK FAIL skill:%s: cannot canonicalize skill name (python3/python not found)\n' "$skill_name"
+                    failures=$((failures+1))
+                    continue
+                fi
                 actual_names+=("$skill_name")
-                actual[$(_ctx_lowercase "$skill_name")]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"
+                actual[$lcname]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"
+                if [ -n "${actual_seen[$lcname]+set}" ]; then
+                    if [ -z "${actual_dup[$lcname]+set}" ]; then
+                        actual_dup[$lcname]=1
+                        actual_dup_names+=("$lcname")
+                    fi
+                else
+                    actual_seen[$lcname]=1
+                fi
             done < <(find "$expected_home/skills" -mindepth 1 -maxdepth 1 -print)
             local sorted_skills
             sorted_skills="$(printf '%s\n' "${all_names[@]}" | sort)"
@@ -1496,10 +1575,19 @@ EOF
                     failures=$((failures+1))
                 fi
             done <<< "$sorted_skills"
+            local dname
+            for dname in "${actual_dup_names[@]}"; do
+                printf 'CHECK FAIL skill:%s: duplicate actual skill name\n' "$dname"
+                failures=$((failures+1))
+            done
             sorted_skills="$(printf '%s\n' "${actual_names[@]}" | sort)"
             while IFS= read -r skill_name; do
                 [ -n "$skill_name" ] || continue
-                lcname="$(_ctx_lowercase "$skill_name")"
+                if ! lcname="$(_ctx_skill_canonical_name "$skill_name")"; then
+                    printf 'CHECK FAIL skill:%s: cannot canonicalize skill name (python3/python not found)\n' "$skill_name"
+                    failures=$((failures+1))
+                    continue
+                fi
                 [ -n "${seen[$lcname]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }
             done <<< "$sorted_skills"
             ;;

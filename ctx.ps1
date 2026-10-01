@@ -1085,20 +1085,25 @@ function Set-CtxCopilotHome {
         $target = $desiredSkills[$key]
         $onDiskName = $desiredOnDisk[$key]
         $link = Join-Path $skillsHome $onDiskName
-        $needsCreate = $true
+        $linkOk = $false
         if ((Test-Path -LiteralPath $link) -and (Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target) -eq $target)) {
-            $needsCreate = $false
-        } else {
-            Get-ChildItem -LiteralPath $skillsHome -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                if ($_.Name.ToLowerInvariant() -eq $key) {
-                    Remove-Item -LiteralPath $_.FullName -Recurse -Force
+            $linkOk = $true
+        }
+        # Reconcile to exactly one on-disk spelling per canonical key: drop
+        # every entry that lowercases to this key except the exact-case
+        # correct link, so a stale same-case sibling is removed too.
+        foreach ($existing in (Get-ChildItem -LiteralPath $skillsHome -Force -ErrorAction SilentlyContinue)) {
+            if ($existing.Name.ToLowerInvariant() -eq $key) {
+                if (-not (($existing.FullName -ceq $link) -and $linkOk)) {
+                    Remove-Item -LiteralPath $existing.FullName -Recurse -Force
                 }
             }
         }
-        if ($needsCreate) {
-            if (-not (New-CtxLink -LinkPath $link -RealTarget $target -Kind 'dir')) {
-                Write-Warning "ctx: warning: could not create skill link $link -> $target"
-            }
+        if ($linkOk) {
+            continue
+        }
+        if (-not (New-CtxLink -LinkPath $link -RealTarget $target -Kind 'dir')) {
+            Write-Warning "ctx: warning: could not create skill link $link -> $target"
         }
     }
 
@@ -1500,11 +1505,26 @@ function Test-CtxActivation {
             if (Test-Path -LiteralPath $skillsHome -PathType Container) {
                 $actualSkillNames = @(Get-ChildItem -LiteralPath $skillsHome -Force | Sort-Object Name | Select-Object -ExpandProperty Name)
             }
+            # A canonical key must have exactly one on-disk spelling; more
+            # than one actual entry aliasing to it is a stale same-case
+            # sibling and fails the read-only check.
+            $actualSeen = @{}
+            $actualDup = @{}
             foreach ($actualName in $actualSkillNames) {
-                if (-not $counts.ContainsKey($actualName.ToLowerInvariant())) {
+                $key = $actualName.ToLowerInvariant()
+                if ($actualSeen.ContainsKey($key)) {
+                    $actualDup[$key] = $true
+                } else {
+                    $actualSeen[$key] = $true
+                }
+                if (-not $counts.ContainsKey($key)) {
                     Write-Host "CHECK FAIL skill:${actualName}: unexpected skill"
                     $failures++
                 }
+            }
+            foreach ($dupKey in ($actualDup.Keys | Sort-Object)) {
+                Write-Host "CHECK FAIL skill:${dupKey}: duplicate actual skill name"
+                $failures++
             }
         }
         default {
