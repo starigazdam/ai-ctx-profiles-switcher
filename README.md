@@ -483,12 +483,15 @@ Invoke-Pester tests/ctx.Tests.ps1
 
 ### CI
 
-`.github/workflows/test.yml` runs both suites on every push/PR that touches
-`ctx.sh`, `ctx.ps1`, or `tests/**`, on `ubuntu-latest` only (`pwsh` ships
-preinstalled on that image, so it exercises real `ctx.ps1` logic — just
-without the Windows-only symlink → junction → hardlink fallback ladder,
-which stays manual-verification-only since `ubuntu-latest` doesn't hit
-Windows-style symlink permission errors).
+`.github/workflows/test.yml` runs on every push/PR that touches `ctx.sh`,
+`ctx.ps1`, or `tests/**`, as two jobs: both suites on `ubuntu-latest`
+(`pwsh` ships preinstalled on that image, so it exercises real `ctx.ps1`
+logic there too), plus the Pester suite again on native `windows-latest`.
+Whether the Windows-hosted runner's account privileges actually force the
+Windows-only symlink → junction → hardlink fallback ladder down to the
+junction/hardlink rungs, or symlinks just succeed there too, isn't
+verified — treat that ladder's lower rungs as still manual-verification-only
+until someone checks.
 
 ## Change workflow (OpenSpec)
 
