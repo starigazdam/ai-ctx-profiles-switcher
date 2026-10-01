@@ -159,19 +159,35 @@ _ctx_print_status() {
     local profile="$1"
     local shared_csv="$2"
     local dirs_csv="$3"
-    local mode_raw mode_value
 
     printf '\n[AI Context]\n\n'
     printf 'Profile : %s\n' "${profile:-<none>}"
     printf 'Profiles: %s\n' "${shared_csv:-<none>}"
     printf '\nAI_CTX_PROFILES=%s\n' "${AI_CTX_PROFILES:-<unset>}"
-    mode_raw="${AI_CTX_PROFILES_COPILOT_MODE:-}"
-    if mode_value="$(_ctx_validate_copilot_mode)"; then
-        printf 'Mode: %s\n' "$mode_value"
+    if _ctx_active_record_matches; then
+        # Report the actually active mode from the matching activation
+        # record, never the raw selector: a stale/mismatched
+        # AI_CTX_PROFILES_COPILOT_MODE without a matching activation is not
+        # reported as active.
+        printf 'Mode: %s\n' "$_ctx_active_mode"
+        if [ "$_ctx_active_mode" != "synthetic-home" ]; then
+            printf 'COPILOT_SKILLS_DIRS=%s\n' "${COPILOT_SKILLS_DIRS:-<unset>}"
+        fi
+        printf 'COPILOT_HOME=%s\n' "${COPILOT_HOME:-<unset>}"
     else
-        printf 'Mode: %s (invalid)\n' "$mode_raw"
+        # A context is active but there is no matching local activation
+        # record: mode and any COPILOT_HOME/COPILOT_SKILLS_DIRS present are
+        # unattributable, so label them unknown rather than guessing.
+        printf 'Mode: <unknown>\n'
+        if [ -n "${COPILOT_SKILLS_DIRS+x}" ]; then
+            printf 'COPILOT_SKILLS_DIRS=%s (unknown)\n' "$COPILOT_SKILLS_DIRS"
+        fi
+        if [ -n "${COPILOT_HOME+x}" ]; then
+            printf 'COPILOT_HOME=%s (unknown)\n' "$COPILOT_HOME"
+        else
+            printf 'COPILOT_HOME=<unset>\n'
+        fi
     fi
-    printf 'COPILOT_HOME=%s\n' "${COPILOT_HOME:-<unset>}"
     printf '\nCOPILOT_CUSTOM_INSTRUCTIONS_DIRS=\n'
     if [ -n "$dirs_csv" ]; then
         printf '%s\n' "$dirs_csv" | tr ',' '\n'
@@ -249,17 +265,27 @@ _ctx_clear() {
     # "<folder-name>.code-workspace" file), instead of just leaving them in
     # place for next time.
     local prev_context="${AI_CTX_PROFILES:-}"
-    local prev_home="${COPILOT_HOME:-}"
     local cleanup_status=0
-    # Mode B (global-user) never touches COPILOT_HOME and skips the --all
-    # home-directory removal, so resolve the live mode first. An invalid
-    # value is treated as synthetic-home so ctx clear stays usable to
-    # recover from a broken env value.
-    local clear_mode
-    if ! clear_mode="$(_ctx_validate_copilot_mode)"; then clear_mode="synthetic-home"; fi
+    # Use the recorded mode of the matching activation, NOT the live selector
+    # (which may be stale). With no matching record, home ownership is
+    # unknown: ctx must never guess a mode from the selector or from the home
+    # path, so COPILOT_HOME is left untouched and no home is deleted. Mode B
+    # never touches COPILOT_HOME; Mode C never deletes the ephemeral home.
+    local clear_mode=""
+    if _ctx_active_record_matches; then
+        clear_mode="$_ctx_active_mode"
+    fi
+    # Capture COPILOT_HOME only where it is needed: the Mode A deletion safety
+    # check (before the variable is unset below). Mode B clear and Mode C
+    # clear never read it - Mode C uses the recorded ephemeral path and Mode B
+    # leaves the variable untouched.
+    local prev_home=""
+    if [ "$clear_mode" = "synthetic-home" ]; then
+        prev_home="${COPILOT_HOME:-}"
+    fi
     unset AI_CTX_PROFILES
     unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-    if [ "$clear_mode" != "global-user" ]; then
+    if [ "$clear_mode" = "synthetic-home" ] || [ "$clear_mode" = "ephemeral-clean" ]; then
         unset COPILOT_HOME
     fi
     # Only unset COPILOT_SKILLS_DIRS when ctx itself set it this session;
@@ -267,6 +293,17 @@ _ctx_clear() {
     if [ "$_ctx_skills_dirs_owned" -eq 1 ]; then
         unset COPILOT_SKILLS_DIRS
         _ctx_skills_dirs_owned=0
+    fi
+    # No matching activation record: report a present COPILOT_HOME as unknown
+    # rather than attributing it to a mode or guessing a deletion target. On
+    # the unknown path COPILOT_HOME is still set, so read it directly.
+    if [ -z "$clear_mode" ] && [ -n "${COPILOT_HOME+x}" ]; then
+        printf 'ctx: warning: no matching activation record; COPILOT_HOME is unowned (unknown), left as-is: %s\n' "${COPILOT_HOME:-}" >&2
+    fi
+    # The Mode C retained-path notice prints for BOTH plain clear and
+    # clear --all, before the active record is cleared.
+    if [ "$clear_mode" = "ephemeral-clean" ] && [ -n "$_ctx_active_home_value" ]; then
+        _ctx_report_retained_ephemeral_home "$_ctx_active_home_value"
     fi
 
     if [ "${1:-}" = "--all" ]; then
@@ -323,37 +360,37 @@ _ctx_clear() {
             fi
         fi
 
-        if [ "$clear_mode" = "ephemeral-clean" ]; then
-            if [ -n "$prev_home" ]; then
-                printf 'ctx: retained ephemeral COPILOT_HOME (not deleted): %s — may contain Copilot auth/session/cache data; remove manually when no longer needed\n' "$prev_home"
+        # Mode B never touches COPILOT_HOME and skips the synthetic-home
+        # deletion block entirely; Mode C never deletes the ephemeral home.
+        # Only Mode A's existing safety-validated deletion runs.
+        if [ "$clear_mode" = "synthetic-home" ] && [ -n "$prev_context" ]; then
+            local sanitized homes_root home_dir
+            if [ -n "$_ctx_auto_load_home_override" ]; then
+                home_dir="$_ctx_auto_load_home_override"
+            else
+                sanitized="$(_ctx_sanitize_context_name "$prev_context")"
+                homes_root="$(_ctx_copilot_home_root)"
+                home_dir="$homes_root/$sanitized"
             fi
-        elif [ "$clear_mode" != "global-user" ]; then
-            if [ -n "$prev_context" ]; then
-                local sanitized homes_root home_dir
-                if [ -n "$_ctx_auto_load_home_override" ]; then
-                    home_dir="$_ctx_auto_load_home_override"
+            if [ -z "$prev_home" ] || [ "$home_dir" != "$prev_home" ] || ! _ctx_validate_home_path "$home_dir" >/dev/null; then
+                printf 'ctx: error: refusing to remove unsafe or unselected home: %s\n' "$home_dir" >&2
+                cleanup_status=1
+            elif [ -d "$home_dir" ] && [ ! -L "$home_dir" ]; then
+                local remove_status=0
+                rm -rf -- "$home_dir" || remove_status=$?
+                if [ "$remove_status" -ne 0 ]; then
+                    printf 'ctx: error: failed to remove %s (status %s)\n' "$home_dir" "$remove_status" >&2
+                    cleanup_status="$remove_status"
                 else
-                    sanitized="$(_ctx_sanitize_context_name "$prev_context")"
-                    homes_root="$(_ctx_copilot_home_root)"
-                    home_dir="$homes_root/$sanitized"
-                fi
-                if [ -z "$prev_home" ] || [ "$home_dir" != "$prev_home" ] || ! _ctx_validate_home_path "$home_dir" >/dev/null; then
-                    printf 'ctx: error: refusing to remove unsafe or unselected home: %s\n' "$home_dir" >&2
-                    return 1
-                fi
-                if [ -d "$home_dir" ] && [ ! -L "$home_dir" ]; then
-                    local remove_status=0
-                    rm -rf -- "$home_dir" || remove_status=$?
-                    if [ "$remove_status" -ne 0 ]; then
-                        printf 'ctx: error: failed to remove %s (status %s)\n' "$home_dir" "$remove_status" >&2
-                        return "$remove_status"
-                    fi
                     printf 'ctx: removed %s\n' "$home_dir"
                 fi
             fi
         fi
     fi
 
+    # Never leave a stale active record for an already-cleared context, even
+    # when --all reported an unrelated artifact cleanup error above.
+    _ctx_reset_active_record
     export CTX_AUTO_LOAD_DIR=""
     _ctx_auto_load_dir=""
     _ctx_auto_load_home_override=""
@@ -442,17 +479,32 @@ ctx() {
     # COPILOT_SKILLS_DIRS is validated before any state change; a comma in
     # an included skills path rejects the whole activation.
     if ! skills_dirs_csv="$(_ctx_compute_skills_dirs_csv "${resolved_dirs_manual[@]}")"; then return 1; fi
-    AI_CTX_PROFILES="${context_names[*]}"; AI_CTX_PROFILES="${AI_CTX_PROFILES// /+}"
+    local new_context="${context_names[*]}"; new_context="${new_context// /+}"
+    local new_home="" old_ephemeral_home=""
+    if [ "$mode" = "ephemeral-clean" ]; then
+        # Mode C: preflight home creation before any state change so a
+        # failure leaves the previous context and all files untouched.
+        if ! new_home="$(_ctx_create_ephemeral_copilot_home)"; then return 1; fi
+    fi
+    if _ctx_active_record_matches && [ "$_ctx_active_mode" = "ephemeral-clean" ]; then
+        # Remember the replaced Mode C home so its retained-path notice can be
+        # printed only after the replacement below actually succeeds.
+        old_ephemeral_home="$_ctx_active_home_value"
+    fi
+    AI_CTX_PROFILES="$new_context"
     case "$mode" in
         global-user)
             # Mode B: never set up or touch COPILOT_HOME at all.
             _ctx_skills_dirs_owned=1
             ;;
         synthetic-home)
-            if ! _ctx_setup_copilot_home "$AI_CTX_PROFILES" "" "${resolved_dirs_manual[@]}"; then return 1; fi
+            if ! _ctx_setup_copilot_home "$new_context" "" "${resolved_dirs_manual[@]}"; then return 1; fi
             ;;
         ephemeral-clean)
-            if ! _ctx_setup_ephemeral_copilot_home; then return 1; fi
+            export COPILOT_HOME="$new_home"
+            # B/C: the freshly computed skills var (set or unset) is
+            # ctx-owned this session; set only after the activation succeeds.
+            _ctx_skills_dirs_owned=1
             ;;
     esac
     case "$mode" in
@@ -473,6 +525,11 @@ ctx() {
             ;;
     esac
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv" AI_CTX_PROFILES
+    # Publish the session record only after a fully successful activation.
+    _ctx_set_active_record "$mode"
+    if [ -n "$old_ephemeral_home" ]; then
+        _ctx_report_retained_ephemeral_home "$old_ephemeral_home"
+    fi
     _ctx_print_status "$AI_CTX_PROFILES" "" "$dirs_csv"
 }
 # --- Auto-loading via .ctx files ----------------------------------------
@@ -487,6 +544,69 @@ _ctx_auto_load_home_override=""
 # into Mode A so ctx only ever unsets a value it set this session, never a
 # user's own value; reset to 0 when the variable is unset.
 _ctx_skills_dirs_owned=0
+
+# Session-local activation record (no on-disk registry). Written only after
+# an activation has actually succeeded; reset on clear and never on a failed
+# activation. `ctx current`/`ctx check` report the mode and home of the
+# matching record, never the raw selector, so a stale
+# AI_CTX_PROFILES_COPILOT_MODE without a matching activation is not reported
+# as active.
+_ctx_active_mode=""
+_ctx_active_context=""
+_ctx_active_custom_dirs=""
+_ctx_active_home_was_set=0
+_ctx_active_home_value=""
+
+_ctx_active_record_matches() {
+    # Returns 0 when the session-local activation record matches the current
+    # activated context (AI_CTX_PROFILES and COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    # unchanged since the activation), 1 otherwise. A record whose context no
+    # longer matches is foreign/stale and must not be attributed.
+    [ -n "$_ctx_active_mode" ] || return 1
+    [ "$_ctx_active_context" = "${AI_CTX_PROFILES:-}" ] || return 1
+    [ "$_ctx_active_custom_dirs" = "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" ] || return 1
+    return 0
+}
+
+_ctx_set_active_record() {
+    # $1: the mode that actually activated. Must be called only after the
+    # activation succeeded and the environment is fully set up.
+    _ctx_active_mode="$1"
+    _ctx_active_context="${AI_CTX_PROFILES:-}"
+    _ctx_active_custom_dirs="${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}"
+    case "$1" in
+        global-user)
+            if [ -n "${COPILOT_HOME+x}" ]; then
+                _ctx_active_home_was_set=1
+                _ctx_active_home_value="$COPILOT_HOME"
+            else
+                _ctx_active_home_was_set=0
+                _ctx_active_home_value=""
+            fi
+            ;;
+        ephemeral-clean)
+            _ctx_active_home_was_set=1
+            _ctx_active_home_value="${COPILOT_HOME:-}"
+            ;;
+        *)
+            _ctx_active_home_was_set=0
+            _ctx_active_home_value=""
+            ;;
+    esac
+}
+
+_ctx_reset_active_record() {
+    _ctx_active_mode=""
+    _ctx_active_context=""
+    _ctx_active_custom_dirs=""
+    _ctx_active_home_was_set=0
+    _ctx_active_home_value=""
+}
+
+_ctx_report_retained_ephemeral_home() {
+    # $1: the retained ephemeral home path (never deleted by ctx).
+    printf 'ctx: retained ephemeral COPILOT_HOME (not deleted): %s — may contain Copilot auth/session/cache data; moving any needed data out is the user\x27s or workflow\x27s responsibility; it consumes disk until the directory is manually removed\n' "$1"
+}
 
 _ctx_ctx_file_has_noautoload() {
     # Returns 0 (true) when the given .ctx file contains a bare "noautoload"
@@ -711,12 +831,14 @@ _ctx_reconcile_symlink() {
     return 0
 }
 
-_ctx_setup_ephemeral_copilot_home() {
+_ctx_create_ephemeral_copilot_home() {
     # Mode C (ephemeral-clean): creates a brand-new, unique, empty
     # COPILOT_HOME on every call via mktemp -d. Never reused, never
     # looked up by name. No symlinks/copies to or from the real
-    # ~/.copilot, no reconciliation, no skills/ subfolder. Exports
-    # COPILOT_HOME only after successful creation.
+    # ~/.copilot, no reconciliation, no skills/ subfolder. Prints the
+    # created path and returns 0, or prints ctx: error to stderr and
+    # returns 1. Side-effect-free on the environment so callers can
+    # preflight Mode C home creation before any state change.
     local home_dir
     home_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-ephemeral.XXXXXXXXXX" 2>/dev/null)" || {
         printf 'ctx: error: could not create ephemeral COPILOT_HOME (mktemp failed)\n' >&2
@@ -726,7 +848,7 @@ _ctx_setup_ephemeral_copilot_home() {
         printf 'ctx: error: ephemeral COPILOT_HOME path is a symlink, refusing: %s\n' "$home_dir" >&2
         return 1
     fi
-    export COPILOT_HOME="$home_dir"
+    printf '%s\n' "$home_dir"
     return 0
 }
 
@@ -1015,6 +1137,18 @@ _ctx_load_ctx_file() {
     # COPILOT_SKILLS_DIRS is validated before any state change; a comma in
     # an included skills path rejects the whole activation.
     if ! skills_dirs_csv="$(_ctx_compute_skills_dirs_csv "${_ctx_parsed_dirs[@]}")"; then return 1; fi
+    local new_home="" old_ephemeral_home=""
+    if [ "$mode" = "ephemeral-clean" ]; then
+        # Mode C: preflight home creation before any state change (including
+        # the workspace-file write) so a failure leaves the previous context
+        # and all files untouched.
+        if ! new_home="$(_ctx_create_ephemeral_copilot_home)"; then return 1; fi
+    fi
+    if _ctx_active_record_matches && [ "$_ctx_active_mode" = "ephemeral-clean" ]; then
+        # Remember the replaced Mode C home so its retained-path notice can be
+        # printed only after the replacement below actually succeeds.
+        old_ephemeral_home="$_ctx_active_home_value"
+    fi
     _ctx_update_workspace_file "$_ctx_parsed_dir" "${_ctx_parsed_pairs[@]}"
     export AI_CTX_PROFILES="$_ctx_parsed_context" COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv"
     case "$mode" in
@@ -1026,7 +1160,10 @@ _ctx_load_ctx_file() {
             _ctx_setup_copilot_home "$_ctx_parsed_context" "$_ctx_parsed_home" "${_ctx_parsed_dirs[@]}" || return 1
             ;;
         ephemeral-clean)
-            _ctx_setup_ephemeral_copilot_home || return 1
+            export COPILOT_HOME="$new_home"
+            # B/C: the freshly computed skills var (set or unset) is
+            # ctx-owned this session; set only after the activation succeeds.
+            _ctx_skills_dirs_owned=1
             ;;
     esac
     case "$mode" in
@@ -1047,15 +1184,55 @@ _ctx_load_ctx_file() {
             ;;
     esac
     _ctx_auto_load_home_override="$_ctx_parsed_home"
+    # Publish the session record only after a fully successful activation.
+    _ctx_set_active_record "$mode"
+    if [ -n "$old_ephemeral_home" ]; then
+        _ctx_report_retained_ephemeral_home "$old_ephemeral_home"
+    fi
     if [ "$_ctx_parsed_context" = "$_ctx_parsed_first_name" ]; then shared_csv=""; else shared_csv="${_ctx_parsed_context#*+}"; shared_csv="${shared_csv//+/, }"; fi
     _ctx_print_status "$_ctx_parsed_first_name" "$shared_csv" "$dirs_csv"
 }
+_ctx_check_skip_links_and_skills() {
+    # Modes B/C and unattributable (no-record) state do not own the Mode-A
+    # synthetic-home shared-link or skill-symlink trees; those checks report
+    # CHECK SKIP rather than FAIL. $1 is unused (kept for parity with the
+    # Mode A check); remaining args are the resolved .ctx dirs used to list
+    # the desired skill names.
+    shift
+    local f
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        printf 'CHECK SKIP link:%s\n' "$f"
+    done <<EOF
+$(_ctx_copilot_home_shared_files)
+$(_ctx_copilot_home_shared_dirs)
+EOF
+    local -A desired=()
+    local -a desired_names=()
+    local rd skill_dir s sname
+    for rd in "$@"; do
+        skill_dir="$rd/.github/skills"
+        [ -d "$skill_dir" ] || continue
+        while IFS= read -r s; do
+            sname="$(basename "$s")"
+            [ -n "${desired[$sname]+set}" ] || desired_names+=("$sname")
+            desired["$sname"]="${s%/}"
+        done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
+    done
+    local sorted
+    sorted="$(printf '%s\n' "${desired_names[@]}" | sort)"
+    while IFS= read -r sname; do
+        [ -n "$sname" ] || continue
+        printf 'CHECK SKIP skill:%s\n' "$sname"
+    done <<< "$sorted"
+}
+
 _ctx_check() {
     local ctx_file dir_of_file line name entry_path resolved_path home_override=""
     local expected_context="" expected_dirs="" first=1 profile_lookup
     local -a names=() dirs=()
     local failures=0
-    local mode_expected="synthetic-home" mode_actual=""
+    local recorded_mode="" selector_mode=""
     local -A seen_labels=() seen_targets=()
 
     if ! ctx_file="$(_ctx_find_ctx_file)"; then
@@ -1070,58 +1247,120 @@ _ctx_check() {
     names=("${_ctx_parsed_names[@]}"); dirs=("${_ctx_parsed_dirs[@]}")
     expected_dirs="$(IFS=,; printf '%s' "${dirs[*]}")"
     if [ "${AI_CTX_PROFILES:-}" = "$expected_context" ]; then printf 'CHECK PASS AI_CTX_PROFILES\n'; else printf 'CHECK FAIL AI_CTX_PROFILES: expected %s, got %s\n' "$expected_context" "${AI_CTX_PROFILES:-<unset>}"; failures=$((failures+1)); fi
-    if ! mode_actual="$(_ctx_validate_copilot_mode)"; then mode_actual="${AI_CTX_PROFILES_COPILOT_MODE:-}"; fi
-    if [ "$mode_actual" = "$mode_expected" ]; then printf 'CHECK PASS COPILOT_MODE\n'; else printf 'CHECK FAIL COPILOT_MODE: expected %s, got %s\n' "$mode_expected" "$mode_actual"; failures=$((failures+1)); fi
+    # The active mode is the mode of the matching session-local activation
+    # record, never the raw selector. A record matches only while its context
+    # and custom-instructions directories match the parsed .ctx file; a stale
+    # or mismatched record is not guessed at.
+    if [ -n "$_ctx_active_mode" ] && [ "$_ctx_active_context" = "$expected_context" ] && [ "$_ctx_active_custom_dirs" = "$expected_dirs" ]; then
+        recorded_mode="$_ctx_active_mode"
+    fi
+    if [ -n "$recorded_mode" ]; then
+        if ! selector_mode="$(_ctx_validate_copilot_mode)"; then
+            printf 'CHECK FAIL COPILOT_MODE: invalid selector "%s" (allowed values: synthetic-home, global-user, ephemeral-clean), recorded active mode %s\n' "${AI_CTX_PROFILES_COPILOT_MODE:-}" "$recorded_mode"
+            failures=$((failures+1))
+        elif [ "$selector_mode" = "$recorded_mode" ]; then
+            printf 'CHECK PASS COPILOT_MODE: recorded %s matches selector\n' "$recorded_mode"
+        else
+            printf 'CHECK FAIL COPILOT_MODE: selector %s does not match recorded active mode %s\n' "$selector_mode" "$recorded_mode"
+            failures=$((failures+1))
+        fi
+    else
+        printf 'CHECK UNKNOWN COPILOT_MODE: no matching local activation record\n'
+    fi
     if [ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" = "$expected_dirs" ]; then printf 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n'; else printf 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected %s, got %s\n' "$expected_dirs" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-<unset>}"; failures=$((failures+1)); fi
 
     local expected_home
     if [ -n "$home_override" ]; then expected_home="$home_override"; else expected_home="$(_ctx_copilot_home_root)/$(_ctx_sanitize_context_name "$expected_context")"; fi
-    if [ "${COPILOT_HOME:-}" = "$expected_home" ] && [ -d "$expected_home" ]; then printf 'CHECK PASS COPILOT_HOME\n'; else printf 'CHECK FAIL COPILOT_HOME: expected %s, got %s\n' "$expected_home" "${COPILOT_HOME:-<unset>}"; failures=$((failures+1)); fi
 
-    local f target current
-    while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
-        if _ctx_link_matches "$expected_home/$f" "$target"; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected link to %s\n' "$f" "$target"; failures=$((failures+1)); fi
-    done <<EOF
+    case "$recorded_mode" in
+        global-user)
+            # Mode B: compare COPILOT_HOME only against the exact recorded
+            # activation-time value (including still-unset); never inspect the
+            # global ~/.copilot.
+            if [ "$_ctx_active_home_was_set" -eq 1 ]; then
+                if [ -n "${COPILOT_HOME+x}" ] && [ "$COPILOT_HOME" = "$_ctx_active_home_value" ]; then
+                    printf 'CHECK PASS COPILOT_HOME\n'
+                else
+                    printf 'CHECK FAIL COPILOT_HOME: recorded %s, got %s\n' "$_ctx_active_home_value" "${COPILOT_HOME:-<unset>}"
+                    failures=$((failures+1))
+                fi
+            elif [ -z "${COPILOT_HOME+x}" ]; then
+                printf 'CHECK PASS COPILOT_HOME\n'
+            else
+                printf 'CHECK FAIL COPILOT_HOME: recorded <unset>, got %s\n' "${COPILOT_HOME:-}"
+                failures=$((failures+1))
+            fi
+            _ctx_check_skip_links_and_skills "$expected_home" "${dirs[@]}"
+            ;;
+        ephemeral-clean)
+            # Mode C: the recorded ephemeral path must still exist as a real
+            # (non-symlink) directory; never inspect its contents.
+            if [ -n "$_ctx_active_home_value" ] && [ -d "$_ctx_active_home_value" ] && [ ! -L "$_ctx_active_home_value" ]; then
+                printf 'CHECK PASS COPILOT_HOME\n'
+            else
+                printf 'CHECK FAIL COPILOT_HOME: recorded ephemeral home %s is missing or not a real directory\n' "$_ctx_active_home_value"
+                failures=$((failures+1))
+            fi
+            _ctx_check_skip_links_and_skills "$expected_home" "${dirs[@]}"
+            ;;
+        synthetic-home)
+            # Mode A: existing COPILOT_HOME + shared-link + skill checks
+            # unchanged (only the mode line/report differs).
+            if [ "${COPILOT_HOME:-}" = "$expected_home" ] && [ -d "$expected_home" ]; then printf 'CHECK PASS COPILOT_HOME\n'; else printf 'CHECK FAIL COPILOT_HOME: expected %s, got %s\n' "$expected_home" "${COPILOT_HOME:-<unset>}"; failures=$((failures+1)); fi
+            local f target current
+            while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
+                if _ctx_link_matches "$expected_home/$f" "$target"; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected link to %s\n' "$f" "$target"; failures=$((failures+1)); fi
+            done <<EOF
 $(_ctx_copilot_home_shared_files)
 EOF
-    while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
-        if _ctx_link_matches "$expected_home/$f" "$target"; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected link to %s\n' "$f" "$target"; failures=$((failures+1)); fi
-    done <<EOF
+            while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                target="${CTX_COPILOT_DIR:-$HOME/.copilot}/$f"
+                if _ctx_link_matches "$expected_home/$f" "$target"; then printf 'CHECK PASS link:%s\n' "$f"; else printf 'CHECK FAIL link:%s: expected link to %s\n' "$f" "$target"; failures=$((failures+1)); fi
+            done <<EOF
 $(_ctx_copilot_home_shared_dirs)
 EOF
-
-    local -A desired=() actual=()
-    local -a desired_names=() actual_names=()
-    local rd skill_dir s skill_name
-    for rd in "${dirs[@]}"; do
-        skill_dir="$rd/.github/skills"
-        [ -d "$skill_dir" ] || continue
-        while IFS= read -r s; do
-            skill_name="$(basename "$s")"
-            [ -n "${desired[$skill_name]+set}" ] || desired_names+=("$skill_name")
-            desired["$skill_name"]="${s%/}"
-        done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
-    done
-    while IFS= read -r s; do
-        skill_name="$(basename "$s")"
-        actual_names+=("$skill_name")
-        actual["$skill_name"]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"
-    done < <(find "$expected_home/skills" -mindepth 1 -maxdepth 1 -print)
-    local sorted_skills
-    sorted_skills="$(printf '%s\n' "${desired_names[@]}" | sort)"
-    while IFS= read -r skill_name; do
-        [ -n "$skill_name" ] || continue
-        if [ "${actual[$skill_name]:-}" = "${desired[$skill_name]}" ]; then printf 'CHECK PASS skill:%s\n' "$skill_name"; else printf 'CHECK FAIL skill:%s: missing or wrong target\n' "$skill_name"; failures=$((failures+1)); fi
-    done <<< "$sorted_skills"
-    sorted_skills="$(printf '%s\n' "${actual_names[@]}" | sort)"
-    while IFS= read -r skill_name; do
-        [ -n "$skill_name" ] || continue
-        [ -n "${desired[$skill_name]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }
-    done <<< "$sorted_skills"
+            local -A desired=() actual=()
+            local -a desired_names=() actual_names=()
+            local rd skill_dir s skill_name
+            for rd in "${dirs[@]}"; do
+                skill_dir="$rd/.github/skills"
+                [ -d "$skill_dir" ] || continue
+                while IFS= read -r s; do
+                    skill_name="$(basename "$s")"
+                    [ -n "${desired[$skill_name]+set}" ] || desired_names+=("$skill_name")
+                    desired["$skill_name"]="${s%/}"
+                done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
+            done
+            while IFS= read -r s; do
+                skill_name="$(basename "$s")"
+                actual_names+=("$skill_name")
+                actual["$skill_name"]="$(readlink "$s" 2>/dev/null || printf '%s' plain)"
+            done < <(find "$expected_home/skills" -mindepth 1 -maxdepth 1 -print)
+            local sorted_skills
+            sorted_skills="$(printf '%s\n' "${desired_names[@]}" | sort)"
+            while IFS= read -r skill_name; do
+                [ -n "$skill_name" ] || continue
+                if [ "${actual[$skill_name]:-}" = "${desired[$skill_name]}" ]; then printf 'CHECK PASS skill:%s\n' "$skill_name"; else printf 'CHECK FAIL skill:%s: missing or wrong target\n' "$skill_name"; failures=$((failures+1)); fi
+            done <<< "$sorted_skills"
+            sorted_skills="$(printf '%s\n' "${actual_names[@]}" | sort)"
+            while IFS= read -r skill_name; do
+                [ -n "$skill_name" ] || continue
+                [ -n "${desired[$skill_name]:-}" ] || { printf 'CHECK FAIL skill:%s: unexpected skill\n' "$skill_name"; failures=$((failures+1)); }
+            done <<< "$sorted_skills"
+            ;;
+        *)
+            # No matching activation record: a present COPILOT_HOME or
+            # COPILOT_SKILLS_DIRS is unattributable, so report CHECK UNKNOWN
+            # rather than guessing. Unknown diagnostics are not applicable
+            # checks and do not increment the failure count.
+            if [ -n "${COPILOT_HOME+x}" ]; then printf 'CHECK UNKNOWN COPILOT_HOME: present with no matching local activation record\n'; fi
+            if [ -n "${COPILOT_SKILLS_DIRS+x}" ]; then printf 'CHECK UNKNOWN COPILOT_SKILLS_DIRS: present with no matching local activation record\n'; fi
+            _ctx_check_skip_links_and_skills "$expected_home" "${dirs[@]}"
+            ;;
+    esac
 
     # Strict check is read-only: do not invoke external copilot commands.
     # Even a seemingly informational probe may write caches/state.

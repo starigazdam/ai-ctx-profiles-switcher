@@ -40,14 +40,14 @@
 
 ## 5. Mode-Aware clear/current/check
 
-- [ ] 5.1 Update `_ctx_clear`/`_ctx_current`/`_ctx_check` in `ctx.sh` for per-mode behavior: `clear`/`clear --all` never touch `COPILOT_HOME` under Mode B and never delete the ephemeral home under Mode C while still running common workspace/settings cleanup, and unset a session-set `COPILOT_SKILLS_DIRS`; `current` prints the active mode and, in B/C, the active `COPILOT_SKILLS_DIRS`; `check` reports the active mode, flags selector/active-mode mismatch, compares Mode B `COPILOT_HOME` only against the recorded value (including still-unset), requires the Mode C recorded ephemeral path to still exist as a real non-symlink directory, reports `CHECK SKIP` for the Mode-A-only shared-link and skill-symlink checks in B/C, and reports foreign env state as unknown. Verify: `bats tests/ctx.bats` passes with the new clear/current/check cases.
-- [ ] 5.2 Mirror 5.1 in `ctx.ps1` (`Clear-CtxContext`/`Show-CtxCurrent`/`Test-CtxActivation`). Verify: `Invoke-Pester tests/ctx.Tests.ps1` passes with the new clear/current/check cases.
-- [ ] 5.3 Add bats case: `ctx clear`/`ctx clear --all` per mode — Mode B leaves `COPILOT_HOME` untouched, Mode C unsets but never deletes, and common workspace/settings cleanup still runs. Verify: `bats tests/ctx.bats`.
-- [ ] 5.4 Add bats case: selector-changed-but-active-mode-unchanged reporting — `ctx current` reports the actually-active mode, not the stale selector, and `ctx check` flags the mismatch. Verify: `bats tests/ctx.bats`.
-- [ ] 5.5 Add bats case: `ctx check` per mode including the no-`.ctx` successful no-op, Mode B recorded-`COPILOT_HOME` comparison, Mode C recorded-path-exists check, `CHECK SKIP` for Mode-A-only checks in B/C, and foreign env state reported unknown. Verify: `bats tests/ctx.bats`.
-- [ ] 5.6 Mirror 5.3 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
-- [ ] 5.7 Mirror 5.4 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
-- [ ] 5.8 Mirror 5.5 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 5.1 Update `_ctx_clear`/`_ctx_current`/`_ctx_check` in `ctx.sh` for per-mode behavior: `clear`/`clear --all` never touch `COPILOT_HOME` under Mode B and never delete the ephemeral home under Mode C while still running common workspace/settings cleanup, and unset a session-set `COPILOT_SKILLS_DIRS`; `current` prints the active mode and, in B/C, the active `COPILOT_SKILLS_DIRS`; `check` reports the active mode, flags selector/active-mode mismatch, compares Mode B `COPILOT_HOME` only against the recorded value (including still-unset), requires the Mode C recorded ephemeral path to still exist as a real non-symlink directory, reports `CHECK SKIP` for the Mode-A-only shared-link and skill-symlink checks in B/C, and reports foreign env state as unknown. Verify: `bats tests/ctx.bats` passes with the new clear/current/check cases.
+- [x] 5.2 Mirror 5.1 in `ctx.ps1` (`Clear-CtxContext`/`Show-CtxCurrent`/`Test-CtxActivation`). Verify: `Invoke-Pester tests/ctx.Tests.ps1` passes with the new clear/current/check cases.
+- [x] 5.3 Add bats case: `ctx clear`/`ctx clear --all` per mode — Mode B leaves `COPILOT_HOME` untouched, Mode C unsets but never deletes, and common workspace/settings cleanup still runs. Verify: `bats tests/ctx.bats`.
+- [x] 5.4 Add bats case: selector-changed-but-active-mode-unchanged reporting — `ctx current` reports the actually-active mode, not the stale selector, and `ctx check` flags the mismatch. Verify: `bats tests/ctx.bats`.
+- [x] 5.5 Add bats case: `ctx check` per mode including the no-`.ctx` successful no-op, Mode B recorded-`COPILOT_HOME` comparison, Mode C recorded-path-exists check, `CHECK SKIP` for Mode-A-only checks in B/C, and foreign env state reported unknown. Verify: `bats tests/ctx.bats`.
+- [x] 5.6 Mirror 5.3 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 5.7 Mirror 5.4 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
+- [x] 5.8 Mirror 5.5 in Pester. Verify: `Invoke-Pester tests/ctx.Tests.ps1`.
 
 ## 6. README Updates
 
