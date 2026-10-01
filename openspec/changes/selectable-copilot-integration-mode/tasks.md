@@ -59,4 +59,4 @@
 - [ ] 7.1 Confirm green CI on both suites at the implementation PR — bats on `tests/ctx.bats` and Pester on `tests/ctx.Tests.ps1` including the real `windows-latest` Pester job. Verify: GitHub Actions checks pass on that PR.
 - [ ] 7.2 Obtain independent cross-provider review at the final implementation PR's exact head SHA. Verify: review approval recorded against that exact head.
 - [ ] 7.3 Obtain explicit human merge approval for the implementation PR. Verify: maintainer approval/merge record.
-- [ ] 7.4 State plainly in the implementation PR description that none of the gates in 7.1–7.3 are satisfied by this planning PR, which adds no CI workflow and triggers none. Verify: manual review of the PR description text.
+- [x] 7.4 State plainly in the implementation PR description that none of the gates in 7.1–7.3 are satisfied by this planning PR, which adds no CI workflow and triggers none. Verify: manual review of the PR description text.
