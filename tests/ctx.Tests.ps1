@@ -1742,4 +1742,234 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_SKILLS_DIRS'
     }
 
+    # --- Issue #40: Mode A skill-name collision reconciliation ---------------
+    # Skill names are compared case-insensitively (COPILOT_HOME targets are
+    # case-insensitive on Windows), so two source dirs contributing "foo" and
+    # "Foo" collide; the whole colliding group is skipped and the collision is
+    # diagnosed on activation and reported as CHECK FAIL by ctx check.
+
+    It 'Issue40: exact-name skill collision is diagnosed, skipped, and check fails' {
+        $proj = Join-Path $Script:TestTmp 'project-issue40-exact'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'shared-skill'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'shared-skill'
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir`nsecurity:$securityDir"
+        Set-Location $proj
+
+        $activation = @(& { Import-CtxFile -CtxFile $ctxFile } 3>&1 6>&1)
+        ($activation -join "`n") | Should -Match 'collision'
+        ($activation -join "`n") | Should -Match 'shared-skill'
+        ($activation -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($activation -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/shared-skill') | Should -BeFalse
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/review-skill') | Should -BeTrue
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/security-skill') | Should -BeTrue
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL skill:shared-skill'
+        ($check -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($check -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        (ctx check) | Should -BeFalse
+    }
+
+    It 'Issue40: case-only skill collision is diagnosed, skipped, and check fails' {
+        $proj = Join-Path $Script:TestTmp 'project-issue40-case'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'shared-skill'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'Shared-Skill'
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir`nsecurity:$securityDir"
+        Set-Location $proj
+
+        $activation = @(& { Import-CtxFile -CtxFile $ctxFile } 3>&1 6>&1)
+        ($activation -join "`n") | Should -Match 'collision'
+        ($activation -join "`n") | Should -Match 'shared-skill'
+        ($activation -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($activation -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/shared-skill') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/Shared-Skill') | Should -BeFalse
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/review-skill') | Should -BeTrue
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/security-skill') | Should -BeTrue
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL skill:shared-skill'
+        ($check -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($check -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        (ctx check) | Should -BeFalse
+    }
+
+    It 'Issue40: non-ASCII case-fold collision (ZÄHLER vs zähler) is diagnosed, skipped, and check fails' {
+        $proj = Join-Path $Script:TestTmp 'project-issue40-unicode'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'ZÄHLER'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'zähler'
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir`nsecurity:$securityDir"
+        Set-Location $proj
+
+        $activation = @(& { Import-CtxFile -CtxFile $ctxFile } 3>&1 6>&1)
+        ($activation -join "`n") | Should -Match 'collision'
+        ($activation -join "`n") | Should -Match 'zähler'
+        ($activation -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($activation -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/ZÄHLER') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/zähler') | Should -BeFalse
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/review-skill') | Should -BeTrue
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/security-skill') | Should -BeTrue
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL skill:zähler'
+        ($check -join "`n") | Should -Match 'collision'
+        ($check -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($check -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        (ctx check) | Should -BeFalse
+    }
+
+    It 'Issue40: stale case-only sibling is detected by check and removed on reactivation' {
+        # Only meaningful on a case-sensitive filesystem, where two spellings
+        # of the same canonical name can coexist.
+        $probe = Join-Path $Script:TestTmp 'caseprobe'
+        Set-Content -LiteralPath $probe -Value 'x'
+        if (Test-Path -LiteralPath (Join-Path $Script:TestTmp 'CASEPROBE')) {
+            Set-ItResult -Skipped -Because 'filesystem is case-insensitive'
+            return
+        }
+
+        $proj = Join-Path $Script:TestTmp 'project-issue40-stale-case'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'foo-skill'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Set-Location $proj
+
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $fooLink = Join-Path $env:COPILOT_HOME 'skills/foo-skill'
+        $fooLinkAlt = Join-Path $env:COPILOT_HOME 'skills/Foo-Skill'
+        Test-CtxIsLink -Path $fooLink | Should -BeTrue
+
+        # Simulate a stale same-case sibling on a case-sensitive filesystem.
+        New-Item -ItemType SymbolicLink -Path $fooLinkAlt -Target (Join-Path $reviewDir '.github/skills/foo-skill') | Out-Null
+        Test-CtxIsLink -Path $fooLinkAlt | Should -BeTrue
+
+        # Read-only check must detect the duplicate canonical name and fail.
+        $checkFail = @(& { ctx check } 3>&1 6>&1)
+        ($checkFail -join "`n") | Should -Match 'CHECK FAIL skill:foo-skill'
+        ($checkFail -join "`n") | Should -Match 'duplicate'
+        (ctx check) | Should -BeFalse
+
+        # Reactivation reconciles to exactly one on-disk spelling.
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        Test-CtxIsLink -Path $fooLink | Should -BeTrue
+        Test-Path -LiteralPath $fooLinkAlt | Should -BeFalse
+
+        (ctx check) | Should -BeTrue
+    }
+
+    It 'Issue40: Greek final-sigma invariant lowercase collision (ΟΣ vs οσ) is diagnosed, skipped, and check fails' {
+        $proj = Join-Path $Script:TestTmp 'project-issue40-greek'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'ΟΣ'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'οσ'
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir`nsecurity:$securityDir"
+        Set-Location $proj
+
+        $activation = @(& { Import-CtxFile -CtxFile $ctxFile } 3>&1 6>&1)
+        ($activation -join "`n") | Should -Match 'collision'
+        ($activation -join "`n") | Should -Match 'οσ'
+        ($activation -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($activation -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/ΟΣ') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/οσ') | Should -BeFalse
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/review-skill') | Should -BeTrue
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/security-skill') | Should -BeTrue
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL skill:οσ'
+        ($check -join "`n") | Should -Match 'collision'
+        ($check -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($check -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        (ctx check) | Should -BeFalse
+    }
+
+    It 'Issue40: Turkish dotted İ and i are distinct under invariant lowercase (no collision)' {
+        # Only meaningful on a case-sensitive filesystem, where two spellings
+        # of the same canonical name can coexist; on case-insensitive
+        # filesystems the on-disk links themselves would alias.
+        $probe = Join-Path $Script:TestTmp 'caseprobe'
+        Set-Content -LiteralPath $probe -Value 'x'
+        if (Test-Path -LiteralPath (Join-Path $Script:TestTmp 'CASEPROBE')) {
+            Set-ItResult -Skipped -Because 'filesystem is case-insensitive'
+            return
+        }
+
+        $proj = Join-Path $Script:TestTmp 'project-issue40-turkish'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'İstanbul'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'istanbul'
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir`nsecurity:$securityDir"
+        Set-Location $proj
+
+        $activation = @(& { Import-CtxFile -CtxFile $ctxFile } 3>&1 6>&1)
+        ($activation -join "`n") | Should -Not -Match 'collision'
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/İstanbul') | Should -BeTrue
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/istanbul') | Should -BeTrue
+
+        (ctx check) | Should -BeTrue
+    }
+
+    It 'Issue40: desired spelling is recreated when only a differently-cased link exists' {
+        # Runs on every platform, including Windows: a correctly-targeted link
+        # seeded under the OLD casing must not satisfy the exact-case link
+        # check through case-insensitive path aliasing, so activation leaves
+        # the desired on-disk spelling behind as a correct link.
+        $proj = Join-Path $Script:TestTmp 'project-issue40-spelling'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'foo-skill'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Set-Location $proj
+
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $fooLink = Join-Path $env:COPILOT_HOME 'skills/foo-skill'
+        $fooLinkOld = Join-Path $env:COPILOT_HOME 'skills/Foo-Skill'
+        Test-CtxIsLink -Path $fooLink | Should -BeTrue
+
+        # Seed a correctly-targeted link under the OLD casing, removing the
+        # desired-casing entry so activation must recreate the desired
+        # spelling.
+        Remove-Item -LiteralPath $fooLink -Force
+        New-CtxLink -LinkPath $fooLinkOld -RealTarget (Join-Path $reviewDir '.github/skills/foo-skill') -Kind 'dir' | Out-Null
+        Test-CtxIsLink -Path $fooLinkOld | Should -BeTrue
+
+        # Activate with the desired spelling; the exact on-disk spelling must
+        # exist as a correct link afterwards.
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        Test-CtxIsLink -Path $fooLink | Should -BeTrue
+        (Get-CtxLinkTarget -Path $fooLink).TrimEnd('\','/') | Should -Be (Join-Path $reviewDir '.github/skills/foo-skill').TrimEnd('\','/')
+
+        # Because Test-Path aliases Foo-Skill and foo-skill on Windows, check
+        # the on-disk spelling by enumeration: exactly one entry named
+        # foo-skill and no entry named Foo-Skill after activation.
+        $skillNames = @(Get-ChildItem -LiteralPath (Join-Path $env:COPILOT_HOME 'skills') -Force | Select-Object -ExpandProperty Name)
+        @($skillNames | Where-Object { $_ -ceq 'foo-skill' }).Count | Should -Be 1
+        @($skillNames | Where-Object { $_ -ceq 'Foo-Skill' }).Count | Should -Be 0
+
+        (ctx check) | Should -BeTrue
+    }
+
 }
