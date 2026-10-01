@@ -2052,3 +2052,72 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"CHECK FAIL COPILOT_SKILLS_DIRS"* ]]
 }
+
+# --- Issue #40: Mode A skill-name collision reconciliation ------------------
+# Skill names are compared case-insensitively (COPILOT_HOME targets are
+# case-insensitive on Windows), so two source dirs contributing "foo" and
+# "Foo" collide; the whole colliding group is skipped and the collision is
+# diagnosed on activation and reported as CHECK FAIL by ctx check.
+
+@test "Issue40: exact-name skill collision is diagnosed, skipped, and check fails" {
+    local proj="$TEST_TMP/project-issue40-exact"
+    local review_dir security_dir
+    _make_profile review shared-skill
+    _make_profile review review-skill
+    _make_profile security shared-skill
+    _make_profile security security-skill
+    review_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    security_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/security"
+    mkdir -p "$proj"
+    printf 'review:%s\nsecurity:%s\n' "$review_dir" "$security_dir" > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/issue40-exact.out" 2>&1
+    local act_out
+    act_out="$(<"$TEST_TMP/issue40-exact.out")"
+    [[ "$act_out" == *"collision"* ]]
+    [[ "$act_out" == *"shared-skill"* ]]
+    [[ "$act_out" == *"$review_dir"* ]]
+    [[ "$act_out" == *"$security_dir"* ]]
+    [ ! -e "$COPILOT_HOME/skills/shared-skill" ]
+    [ -L "$COPILOT_HOME/skills/review-skill" ]
+    [ -L "$COPILOT_HOME/skills/security-skill" ]
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL skill:shared-skill"* ]]
+    [[ "$output" == *"$review_dir"* ]]
+    [[ "$output" == *"$security_dir"* ]]
+}
+
+@test "Issue40: case-only skill collision is diagnosed, skipped, and check fails" {
+    local proj="$TEST_TMP/project-issue40-case"
+    local review_dir security_dir
+    _make_profile review shared-skill
+    _make_profile review review-skill
+    _make_profile security Shared-Skill
+    _make_profile security security-skill
+    review_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    security_dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/security"
+    mkdir -p "$proj"
+    printf 'review:%s\nsecurity:%s\n' "$review_dir" "$security_dir" > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/issue40-case.out" 2>&1
+    local act_out
+    act_out="$(<"$TEST_TMP/issue40-case.out")"
+    [[ "$act_out" == *"collision"* ]]
+    [[ "$act_out" == *"shared-skill"* ]]
+    [[ "$act_out" == *"$review_dir"* ]]
+    [[ "$act_out" == *"$security_dir"* ]]
+    [ ! -e "$COPILOT_HOME/skills/shared-skill" ]
+    [ ! -e "$COPILOT_HOME/skills/Shared-Skill" ]
+    [ -L "$COPILOT_HOME/skills/review-skill" ]
+    [ -L "$COPILOT_HOME/skills/security-skill" ]
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL skill:shared-skill"* ]]
+    [[ "$output" == *"$review_dir"* ]]
+    [[ "$output" == *"$security_dir"* ]]
+}

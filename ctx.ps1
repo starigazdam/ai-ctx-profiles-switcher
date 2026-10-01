@@ -1041,35 +1041,58 @@ function Set-CtxCopilotHome {
     }
 
     # Reconcile skills/: desired (name -> target) pairs come from each
-    # resolved dir's .github\skills subfolder, if present.
+    # resolved dir's .github\skills subfolder, if present. Skill names are
+    # compared case-insensitively (COPILOT_HOME targets are case-insensitive
+    # on Windows), so two source dirs contributing "foo" and "Foo" collide
+    # and the whole colliding group is skipped (issue #40).
     $desiredSkills = @{}
+    $desiredOnDisk = @{}
+    $collidedSkills = @{}
+    $collidedContribs = @{}
     foreach ($rd in $ResolvedDirs) {
         $skillDir = Join-Path $rd '.github\skills'
         if (Test-Path -LiteralPath $skillDir -PathType Container) {
-            Get-ChildItem -LiteralPath $skillDir -Directory | ForEach-Object {
-                $desiredSkills[$_.Name] = $_.FullName
+            foreach ($s in (Get-ChildItem -LiteralPath $skillDir -Directory)) {
+                $key = $s.Name.ToLowerInvariant()
+                if ($collidedSkills.ContainsKey($key)) {
+                    $collidedContribs[$key] = $collidedContribs[$key] + ', ' + $rd
+                } elseif ($desiredSkills.ContainsKey($key)) {
+                    $collidedSkills[$key] = $true
+                    $collidedContribs[$key] = $collidedContribs[$key] + ', ' + $rd
+                    $desiredSkills.Remove($key)
+                } else {
+                    $desiredSkills[$key] = $s.FullName
+                    $desiredOnDisk[$key] = $s.Name
+                    $collidedContribs[$key] = $rd
+                }
             }
         }
+    }
+    foreach ($key in ($collidedSkills.Keys | Sort-Object)) {
+        Write-Warning "ctx: warning: skill name collision `"$key`" from: $($collidedContribs[$key]); skipping all of them"
     }
 
     $skillsHome = Join-Path $homeDir 'skills'
     if (Test-Path -LiteralPath $skillsHome -PathType Container) {
         Get-ChildItem -LiteralPath $skillsHome -Force | ForEach-Object {
-            if (-not $desiredSkills.ContainsKey($_.Name)) {
+            if (-not $desiredSkills.ContainsKey($_.Name.ToLowerInvariant())) {
                 Remove-Item -LiteralPath $_.FullName -Recurse -Force
             }
         }
     }
 
-    foreach ($name in $desiredSkills.Keys) {
-        $target = $desiredSkills[$name]
-        $link = Join-Path $skillsHome $name
+    foreach ($key in ($desiredSkills.Keys | Sort-Object)) {
+        $target = $desiredSkills[$key]
+        $onDiskName = $desiredOnDisk[$key]
+        $link = Join-Path $skillsHome $onDiskName
         $needsCreate = $true
-        if (Test-Path -LiteralPath $link) {
-            if ((Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target) -eq $target)) {
-                $needsCreate = $false
-            } else {
-                Remove-Item -LiteralPath $link -Recurse -Force
+        if ((Test-Path -LiteralPath $link) -and (Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target) -eq $target)) {
+            $needsCreate = $false
+        } else {
+            Get-ChildItem -LiteralPath $skillsHome -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.Name.ToLowerInvariant() -eq $key) {
+                    Remove-Item -LiteralPath $_.FullName -Recurse -Force
+                }
             }
         }
         if ($needsCreate) {
@@ -1443,11 +1466,34 @@ function Test-CtxActivation {
                 $link = Join-Path $expectedHome $f; $target = Join-Path (Get-CtxCopilotDir) $f
                 if ((Test-CtxIsLink -Path $link -Target $target) -and ((Get-CtxLinkTarget -Path $link -Target $target).TrimEnd('\','/') -eq $target.TrimEnd('\','/'))) { Write-Host "CHECK PASS link:$f" } else { Write-Host "CHECK FAIL link:${f}: expected link to $target"; $failures++ }
             }
-            $desired = @{}
-            foreach ($rd in $dirs) { $skillDir = Join-Path $rd '.github\skills'; if (Test-Path -LiteralPath $skillDir -PathType Container) { foreach ($s in Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name) { $desired[$s.Name] = $s.FullName } } }
-            foreach ($name in ($desired.Keys | Sort-Object)) {
-                $link = Join-Path $expectedHome "skills\$name"
-                if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $desired[$name])) { Write-Host "CHECK PASS skill:$name" } else { Write-Host "CHECK FAIL skill:${name}: missing or wrong target"; $failures++ }
+            $counts = @{}
+            $firstTarget = @{}
+            $contributors = @{}
+            foreach ($rd in $dirs) {
+                $skillDir = Join-Path $rd '.github\skills'
+                if (Test-Path -LiteralPath $skillDir -PathType Container) {
+                    foreach ($s in (Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name)) {
+                        $key = $s.Name.ToLowerInvariant()
+                        if (-not $counts.ContainsKey($key)) {
+                            $counts[$key] = 1
+                            $firstTarget[$key] = $s.FullName
+                            $contributors[$key] = $rd
+                        } else {
+                            $counts[$key] = $counts[$key] + 1
+                            $contributors[$key] = $contributors[$key] + ', ' + $rd
+                        }
+                    }
+                }
+            }
+            foreach ($key in ($counts.Keys | Sort-Object)) {
+                if ($counts[$key] -ge 2) {
+                    Write-Host "CHECK FAIL skill:${key}: name collision between $($contributors[$key])"
+                    $failures++
+                } else {
+                    $skillName = Split-Path -Leaf $firstTarget[$key]
+                    $link = Join-Path $expectedHome "skills\$skillName"
+                    if ((Test-CtxIsLink -Path $link) -and ((Get-CtxLinkTarget -Path $link) -eq $firstTarget[$key])) { Write-Host "CHECK PASS skill:$skillName" } else { Write-Host "CHECK FAIL skill:${skillName}: missing or wrong target"; $failures++ }
+                }
             }
             $actualSkillNames = @()
             $skillsHome = Join-Path $expectedHome 'skills'
@@ -1455,7 +1501,7 @@ function Test-CtxActivation {
                 $actualSkillNames = @(Get-ChildItem -LiteralPath $skillsHome -Force | Sort-Object Name | Select-Object -ExpandProperty Name)
             }
             foreach ($actualName in $actualSkillNames) {
-                if (-not $desired.ContainsKey($actualName)) {
+                if (-not $counts.ContainsKey($actualName.ToLowerInvariant())) {
                     Write-Host "CHECK FAIL skill:${actualName}: unexpected skill"
                     $failures++
                 }

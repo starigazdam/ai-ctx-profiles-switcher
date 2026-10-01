@@ -1742,4 +1742,65 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_SKILLS_DIRS'
     }
 
+    # --- Issue #40: Mode A skill-name collision reconciliation ---------------
+    # Skill names are compared case-insensitively (COPILOT_HOME targets are
+    # case-insensitive on Windows), so two source dirs contributing "foo" and
+    # "Foo" collide; the whole colliding group is skipped and the collision is
+    # diagnosed on activation and reported as CHECK FAIL by ctx check.
+
+    It 'Issue40: exact-name skill collision is diagnosed, skipped, and check fails' {
+        $proj = Join-Path $Script:TestTmp 'project-issue40-exact'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'shared-skill'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'shared-skill'
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir`nsecurity:$securityDir"
+        Set-Location $proj
+
+        $activation = @(& { Import-CtxFile -CtxFile $ctxFile } 3>&1 6>&1)
+        ($activation -join "`n") | Should -Match 'collision'
+        ($activation -join "`n") | Should -Match 'shared-skill'
+        ($activation -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($activation -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/shared-skill') | Should -BeFalse
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/review-skill') | Should -BeTrue
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/security-skill') | Should -BeTrue
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL skill:shared-skill'
+        ($check -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($check -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        (ctx check) | Should -BeFalse
+    }
+
+    It 'Issue40: case-only skill collision is diagnosed, skipped, and check fails' {
+        $proj = Join-Path $Script:TestTmp 'project-issue40-case'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'shared-skill'
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'Shared-Skill'
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir`nsecurity:$securityDir"
+        Set-Location $proj
+
+        $activation = @(& { Import-CtxFile -CtxFile $ctxFile } 3>&1 6>&1)
+        ($activation -join "`n") | Should -Match 'collision'
+        ($activation -join "`n") | Should -Match 'shared-skill'
+        ($activation -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($activation -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/shared-skill') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/Shared-Skill') | Should -BeFalse
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/review-skill') | Should -BeTrue
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/security-skill') | Should -BeTrue
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL skill:shared-skill'
+        ($check -join "`n") | Should -Match ([regex]::Escape($reviewDir))
+        ($check -join "`n") | Should -Match ([regex]::Escape($securityDir))
+        (ctx check) | Should -BeFalse
+    }
+
 }
