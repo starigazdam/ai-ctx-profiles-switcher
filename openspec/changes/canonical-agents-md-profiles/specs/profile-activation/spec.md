@@ -53,7 +53,7 @@ Canonical profiles SHALL discover skills only from `.agents/skills/<name>` direc
 
 Before projecting, both `COPILOT_HOME/instructions/` and `COPILOT_HOME/instructions/ctx-profiles/` SHALL be real directories, not symlinks, junctions, or other reparse points. If either component exists as a link or non-directory, activation SHALL fail before writing or removing projections and SHALL NOT read or mutate anything through that component or outside the selected synthetic home.
 
-A `.ctx-managed` manifest SHALL contain one projection basename per line. Each basename SHALL use the generated filename grammar: at least four ASCII decimal digits, a hyphen, a label containing only ASCII letters, digits, `+`, `.`, `_`, or `-`, and the literal suffix `.instructions.md`. A missing manifest SHALL be treated as empty. Any nonconforming line SHALL make an existing manifest malformed; activation SHALL fail before modifying projections, and no invalid line SHALL be used as a path or as grounds to delete files. If an existing manifest is a link, unreadable, or otherwise cannot be safely read, activation SHALL fail without modifying projection files. On successful reactivation, only prior manifest-listed projections absent from the desired set SHALL be removed; unmanaged files SHALL be preserved. If no canonical profiles remain, managed projections and the manifest SHALL be removed, and empty projection directories MAY be removed only when they are real directories and contain no unmanaged files. `ctx clear` SHALL preserve the cached home; `ctx clear --all` SHALL remove only the selected synthetic home under existing safety rules.
+A `.ctx-managed` manifest SHALL contain one projection basename per line. Each basename SHALL use the generated filename grammar: at least four ASCII decimal digits, a hyphen, a label containing only ASCII letters, digits, `+`, `.`, `_`, or `-`, and the literal suffix `.instructions.md`. A missing manifest SHALL be treated as empty. Any nonconforming line SHALL make an existing manifest malformed; activation SHALL fail before modifying projections, and no invalid line SHALL be used as a path or as grounds to delete files. If an existing manifest is a link, unreadable, or otherwise cannot be safely read, activation SHALL fail without modifying projection files. If a desired projection path already exists but is not listed in the valid manifest, activation SHALL fail without replacing or removing that unmanaged file. On successful reactivation, only prior manifest-listed projections absent from the desired set SHALL be removed; unmanaged files SHALL be preserved. If no canonical profiles remain, managed projections and the manifest SHALL be removed, and empty projection directories MAY be removed only when they are real directories and contain no unmanaged files. `ctx clear` SHALL preserve the cached home; `ctx clear --all` SHALL remove only the selected synthetic home under existing safety rules.
 
 #### Scenario: Root AGENTS.md selects canonical profile mode
 
@@ -89,6 +89,11 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 
 - **WHEN** `instructions/` or `instructions/ctx-profiles/` is a symlink, junction, or non-directory
 - **THEN** activation fails before projection writes or removals and does not write outside the selected synthetic home
+
+#### Scenario: Unmanifested desired projection is preserved
+
+- **WHEN** a desired projection path already contains a file that is not listed in the valid manifest
+- **THEN** activation fails without replacing or removing the file, and `ctx check` reports `CHECK FAIL instruction:<file>` without modifying it
 
 #### Scenario: Stale managed instruction projections are removed
 
