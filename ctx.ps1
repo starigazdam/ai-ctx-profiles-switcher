@@ -432,8 +432,12 @@ function ctx {
             $loadDir = Split-Path -Parent $loadFile
             if (Import-CtxFile -CtxFile $loadFile) {
                 $Script:CtxAutoLoadDir = $loadDir
+                if ((Get-CtxActiveRecordMode) -ceq 'synthetic-home') {
+                    return $true
+                }
+                return
             }
-            return
+            return $false
         }
     }
 
@@ -523,7 +527,11 @@ function ctx {
     }
 
     Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv -DirsCsv $dirsCsv
-    return $true
+    if ($mode -ceq 'synthetic-home') {
+        # Only Mode A reports the documented Boolean success value for manual
+        # activation; Modes B/C keep their old no-pipeline-output behavior.
+        return $true
+    }
 }
 
 # --- Auto-loading via .ctx files ------------------------------------------
@@ -1616,6 +1624,8 @@ function Invoke-CtxAutoLoad {
         if ($Script:CtxAutoLoadDir -ne $dirOfFile) {
             if (Import-CtxFile -CtxFile $ctxFile) {
                 $Script:CtxAutoLoadDir = $dirOfFile
+            } else {
+                return $false
             }
         }
     } else {
@@ -1642,7 +1652,7 @@ if (-not $Script:CtxOriginalPrompt) {
 }
 
 function prompt {
-    Invoke-CtxChpwdHook
+    Invoke-CtxChpwdHook | Out-Null
     if ($Script:CtxOriginalPrompt) {
         & $Script:CtxOriginalPrompt
     } else {
@@ -1652,7 +1662,7 @@ function prompt {
 
 # Run once for the shell's starting directory.
 $Script:CtxLastPwd = (Get-Location).Path
-Invoke-CtxAutoLoad
+Invoke-CtxAutoLoad | Out-Null
 
 # --- Tab completion --------------------------------------------------------
 

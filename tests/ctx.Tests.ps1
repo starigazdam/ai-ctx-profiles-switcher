@@ -394,6 +394,101 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $wsAfter | Should -Be $wsBefore
     }
 
+    It 'Invoke-CtxAutoLoad propagates $false and preserves state when link reconciliation fails' {
+        $projA = Join-Path $env:HOME 'project-hook-fail-a'
+        New-Item -ItemType Directory -Path $projA -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $testDir = New-CtxTestProfile -Name 'test' -Skill 'test-skill'
+        Set-Content -LiteralPath (Join-Path $projA '.ctx') -Value "review:$reviewDir"
+
+        Set-Location $projA
+        Invoke-CtxAutoLoad
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $Script:CtxAutoLoadDir | Should -Be $projA
+
+        $workspaceA = Join-Path $projA 'project-hook-fail-a.code-workspace'
+        $wsBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspaceA))
+
+        $prevProfiles = $env:AI_CTX_PROFILES
+        $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $prevHome = $env:COPILOT_HOME
+        $prevMode = $Script:CtxActiveMode
+        $prevContext = $Script:CtxActiveContext
+        $prevCustomDirs = $Script:CtxActiveCustomDirs
+        $prevHomeWasSet = $Script:CtxActiveHomeWasSet
+        $prevHomeValue = $Script:CtxActiveHomeValue
+
+        # A different directory's .ctx load fails; the hook must surface it as
+        # exactly $false while leaving the prior activation untouched.
+        $projB = Join-Path $env:HOME 'project-hook-fail-b'
+        New-Item -ItemType Directory -Path $projB -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $projB '.ctx') -Value "test:$testDir"
+        Set-Location $projB
+
+        $script:linkWarnings = @()
+        Mock Resolve-CtxLink { return $false }
+        Mock Write-Warning { $script:linkWarnings += $Message }
+
+        $result = Invoke-CtxAutoLoad
+
+        $result | Should -BeExactly $false
+        $script:linkWarnings -join "`n" | Should -Match 'warning'
+        $Script:CtxAutoLoadDir | Should -Be $projA
+        $env:AI_CTX_PROFILES | Should -Be $prevProfiles
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        $env:COPILOT_HOME | Should -Be $prevHome
+        $Script:CtxActiveMode | Should -Be $prevMode
+        $Script:CtxActiveContext | Should -Be $prevContext
+        $Script:CtxActiveCustomDirs | Should -Be $prevCustomDirs
+        $Script:CtxActiveHomeWasSet | Should -Be $prevHomeWasSet
+        $Script:CtxActiveHomeValue | Should -Be $prevHomeValue
+        $wsAfter = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspaceA))
+        $wsAfter | Should -Be $wsBefore
+        Test-Path -LiteralPath (Join-Path $projB 'project-hook-fail-b.code-workspace') | Should -BeFalse
+    }
+
+    It 'ctx load propagates $false and preserves state when import fails' {
+        $proj = Join-Path $env:HOME 'project-ctx-load-fail'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $testDir = New-CtxTestProfile -Name 'test' -Skill 'test-skill'
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+
+        $workspace = Join-Path $proj 'project-ctx-load-fail.code-workspace'
+        $wsBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspace))
+
+        $prevProfiles = $env:AI_CTX_PROFILES
+        $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+        $prevHome = $env:COPILOT_HOME
+        $prevMode = $Script:CtxActiveMode
+        $prevContext = $Script:CtxActiveContext
+        $prevCustomDirs = $Script:CtxActiveCustomDirs
+        $prevHomeWasSet = $Script:CtxActiveHomeWasSet
+        $prevHomeValue = $Script:CtxActiveHomeValue
+
+        Set-Content -LiteralPath $ctxFile -Value "test:$testDir"
+        $script:linkWarnings = @()
+        Mock Resolve-CtxLink { return $false }
+        Mock Write-Warning { $script:linkWarnings += $Message }
+
+        $result = ctx load $ctxFile
+
+        $result | Should -BeExactly $false
+        $script:linkWarnings -join "`n" | Should -Match 'warning'
+        $env:AI_CTX_PROFILES | Should -Be $prevProfiles
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        $env:COPILOT_HOME | Should -Be $prevHome
+        $Script:CtxActiveMode | Should -Be $prevMode
+        $Script:CtxActiveContext | Should -Be $prevContext
+        $Script:CtxActiveCustomDirs | Should -Be $prevCustomDirs
+        $Script:CtxActiveHomeWasSet | Should -Be $prevHomeWasSet
+        $Script:CtxActiveHomeValue | Should -Be $prevHomeValue
+        $wsAfter = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspace))
+        $wsAfter | Should -Be $wsBefore
+    }
+
     It 'Test 11: test-profile-skill SKILL.md has well-formed frontmatter' {
         $repoRoot = Split-Path -Parent $Script:CtxSrc
         $skillMd = Join-Path $repoRoot 'examples/ai-profiles/test/.github/skills/test-profile-skill/SKILL.md'
@@ -1115,6 +1210,52 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $Script:CtxAutoLoadDir | Should -Be $proj
     }
 
+    It "ctx load in Mode B returns no Boolean pipeline value on success" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $proj = Join-Path $env:HOME 'project-ctx-load-mode-b'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        $result = @(ctx load (Join-Path $proj '.ctx'))
+
+        @($result | Where-Object { $_ -is [bool] }).Count | Should -Be 0
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $env:COPILOT_HOME | Should -BeNullOrEmpty
+        $Script:CtxAutoLoadDir | Should -Be $proj
+    }
+
+    It "ctx load in Mode C returns no Boolean pipeline value on success" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        $proj = Join-Path $env:HOME 'project-ctx-load-mode-c'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        $result = @(ctx load (Join-Path $proj '.ctx'))
+
+        @($result | Where-Object { $_ -is [bool] }).Count | Should -Be 0
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $Script:CtxAutoLoadDir | Should -Be $proj
+    }
+
+    It "ctx load in Mode A returns the documented $true on success" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        $proj = Join-Path $env:HOME 'project-ctx-load-mode-a'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        $result = ctx load (Join-Path $proj '.ctx')
+
+        $result | Should -BeExactly $true
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $Script:CtxAutoLoadDir | Should -Be $proj
+    }
+
     It "ctx load: loads a noautoload .ctx file that the hook would skip" {
         New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
         $proj = Join-Path $env:HOME 'project-ctx-load-noautoload'
@@ -1267,6 +1408,28 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:AI_CTX_PROFILES | Should -Be 'previous'
         $env:COPILOT_HOME | Should -Be 'previous-home'
         $env:COPILOT_SKILLS_DIRS | Should -Be 'previous-skills'
+    }
+
+    It 'Mode B/C manual activation keeps its old no-Boolean-pipeline-output behavior; Mode A returns $true' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        New-CtxTestProfile -Name 'test' -Skill 'test-skill' | Out-Null
+
+        # Mode B (global-user): a successful manual activation must not emit
+        # any Boolean pipeline value (old behavior retained).
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $resultB = @(ctx review)
+        @($resultB | Where-Object { $_ -is [bool] }).Count | Should -Be 0
+
+        # Mode C (ephemeral-clean): same no-Boolean-pipeline-output guarantee.
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        $resultC = @(ctx test)
+        @($resultC | Where-Object { $_ -is [bool] }).Count | Should -Be 0
+
+        # Mode A (synthetic-home): the documented $true success value is
+        # retained for a successful manual activation.
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        $resultA = ctx review
+        $resultA | Should -BeExactly $true
     }
 
     It 'Mode B/C -> Mode A unsets a session-set COPILOT_SKILLS_DIRS but never a user value' {

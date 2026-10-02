@@ -580,9 +580,15 @@ only the first context name plus a `(+2)` suffix for the rest (e.g.
   shared-link reconciliation — is equally atomic: the previous context,
   `COPILOT_HOME`, and (for `.ctx` auto-load) the `.code-workspace` file are
   left untouched, and the command/function reports the failure: a non-zero
-  exit status from `ctx.sh`, and a Boolean from `ctx.ps1` (`$false` on
-  failure, `$true` on success) for both manual `ctx <profile>...` and `.ctx`
-  auto-load activation.
+  exit status from `ctx.sh` on any failed activation (manual
+  `ctx <profile>...`, explicit `ctx load`, or `.ctx` auto-load), and a
+  Boolean from `ctx.ps1` — `$false` on a failed Mode A manual activation,
+  failed explicit `ctx load`, or failed `.ctx` auto-load; `$true` only on a
+  successful Mode A manual activation and a successful Mode A explicit
+  `ctx load`. Successful Modes B/C manual activation and `ctx load` keep
+  their old behavior of emitting no Boolean pipeline value, and the
+  `ctx.ps1` startup/prompt hooks suppress the auto-load's return value so no
+  stray `True`/`False` text appears at the shell prompt.
 - `COPILOT_HOME` is managed automatically by `ctx` whenever a context is
   active (see [Skill discovery](#skill-discovery)); it is exported/unset
   alongside `AI_CTX_PROFILES` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and shown

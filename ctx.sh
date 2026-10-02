@@ -779,6 +779,13 @@ _ctx_auto_load_hook() {
         if [ "$_ctx_auto_load_dir" != "$dir_of_file" ]; then
             if _ctx_load_ctx_file "$ctx_file"; then
                 _ctx_auto_load_dir="$dir_of_file"
+            else
+                # Propagate the loader's failure so direct hook callers (and
+                # tests) can observe that the auto-load did not succeed. The
+                # status reaches the invoking shell hook and can become the
+                # shell prompt-command status, so callers that must not
+                # surface it should discard it explicitly.
+                return $?
             fi
         fi
     else
