@@ -333,20 +333,205 @@ EOF
 
 @test "ctx warns and does not crash when symlink creation fails" {
     _make_profile "review" "review-skill"
+    _make_profile "test" "test-skill"
+    ctx review >/dev/null 2>&1
+
+    local prev_profiles="$AI_CTX_PROFILES"
+    local prev_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    local prev_home="$COPILOT_HOME"
+    local prev_mode="$_ctx_active_mode"
+    local prev_context="$_ctx_active_context"
+    local prev_custom_dirs="$_ctx_active_custom_dirs"
+    local prev_home_was_set="$_ctx_active_home_was_set"
+    local prev_home_value="$_ctx_active_home_value"
 
     ln() { return 1; }
     export -f ln
 
-    run ctx review
+    local status=0
+    ctx test >"$TEST_TMP/link-fail-manual.out" 2>&1 || status=$?
 
-    # Don't assert `$status -eq 0`: ctx() currently ignores
-    # _ctx_setup_copilot_home's return value, but if error propagation is
-    # ever added that assertion would break for the wrong reason. What
-    # actually matters here is the observable fallback behavior: a warning
-    # is surfaced and COPILOT_HOME is left unset rather than pointing at a
+    # A warning is surfaced, and the failure is atomic: the existing
+    # activation's context, custom-instructions dirs, COPILOT_HOME, and
+    # session record are all left byte-identical rather than pointing at a
     # half-built home dir.
-    [[ "$output" == *"warning"* ]]
-    [ -z "${COPILOT_HOME:-}" ]
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/link-fail-manual.out")" == *"warning"* ]]
+    [ "$AI_CTX_PROFILES" = "$prev_profiles" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$prev_dirs" ]
+    [ "$COPILOT_HOME" = "$prev_home" ]
+    [ "$_ctx_active_mode" = "$prev_mode" ]
+    [ "$_ctx_active_context" = "$prev_context" ]
+    [ "$_ctx_active_custom_dirs" = "$prev_custom_dirs" ]
+    [ "$_ctx_active_home_was_set" = "$prev_home_was_set" ]
+    [ "$_ctx_active_home_value" = "$prev_home_value" ]
+}
+
+@test ".ctx auto-load leaves state and workspace untouched when symlink creation fails" {
+    _make_profile "review" "review-skill"
+    _make_profile "test" "test-skill"
+
+    local proj="$TEST_TMP/project-link-fail"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null 2>&1
+
+    local workspace_file="$proj/project-link-fail.code-workspace"
+    [ -f "$workspace_file" ]
+    cp "$workspace_file" "$TEST_TMP/workspace-link-fail.before"
+
+    local prev_profiles="$AI_CTX_PROFILES"
+    local prev_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    local prev_home="$COPILOT_HOME"
+    local prev_mode="$_ctx_active_mode"
+    local prev_context="$_ctx_active_context"
+    local prev_custom_dirs="$_ctx_active_custom_dirs"
+    local prev_home_was_set="$_ctx_active_home_was_set"
+    local prev_home_value="$_ctx_active_home_value"
+
+    printf 'test:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/test" > "$proj/.ctx"
+    ln() { return 1; }
+    export -f ln
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/link-fail-autoload.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/link-fail-autoload.out")" == *"warning"* ]]
+    [ "$AI_CTX_PROFILES" = "$prev_profiles" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$prev_dirs" ]
+    [ "$COPILOT_HOME" = "$prev_home" ]
+    [ "$_ctx_active_mode" = "$prev_mode" ]
+    [ "$_ctx_active_context" = "$prev_context" ]
+    [ "$_ctx_active_custom_dirs" = "$prev_custom_dirs" ]
+    [ "$_ctx_active_home_was_set" = "$prev_home_was_set" ]
+    [ "$_ctx_active_home_value" = "$prev_home_value" ]
+    cmp -s "$workspace_file" "$TEST_TMP/workspace-link-fail.before"
+}
+
+@test "manual ctx activation leaves state untouched when COPILOT_HOME creation fails" {
+    _make_profile "review" "review-skill"
+    _make_profile "test" "test-skill"
+    ctx review >/dev/null 2>&1
+
+    local prev_profiles="$AI_CTX_PROFILES"
+    local prev_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    local prev_home="$COPILOT_HOME"
+    local prev_mode="$_ctx_active_mode"
+    local prev_context="$_ctx_active_context"
+    local prev_custom_dirs="$_ctx_active_custom_dirs"
+    local prev_home_was_set="$_ctx_active_home_was_set"
+    local prev_home_value="$_ctx_active_home_value"
+
+    mkdir() { return 1; }
+    export -f mkdir
+
+    local status=0
+    ctx test >"$TEST_TMP/mkdir-fail-manual.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/mkdir-fail-manual.out")" == *"warning"* ]]
+    [ "$AI_CTX_PROFILES" = "$prev_profiles" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$prev_dirs" ]
+    [ "$COPILOT_HOME" = "$prev_home" ]
+    [ "$_ctx_active_mode" = "$prev_mode" ]
+    [ "$_ctx_active_context" = "$prev_context" ]
+    [ "$_ctx_active_custom_dirs" = "$prev_custom_dirs" ]
+    [ "$_ctx_active_home_was_set" = "$prev_home_was_set" ]
+    [ "$_ctx_active_home_value" = "$prev_home_value" ]
+}
+
+@test ".ctx auto-load leaves state and workspace untouched when COPILOT_HOME creation fails" {
+    _make_profile "review" "review-skill"
+    _make_profile "test" "test-skill"
+
+    local proj="$TEST_TMP/project-mkdir-fail"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null 2>&1
+
+    local workspace_file="$proj/project-mkdir-fail.code-workspace"
+    [ -f "$workspace_file" ]
+    cp "$workspace_file" "$TEST_TMP/workspace-mkdir-fail.before"
+
+    local prev_profiles="$AI_CTX_PROFILES"
+    local prev_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    local prev_home="$COPILOT_HOME"
+    local prev_mode="$_ctx_active_mode"
+    local prev_context="$_ctx_active_context"
+    local prev_custom_dirs="$_ctx_active_custom_dirs"
+    local prev_home_was_set="$_ctx_active_home_was_set"
+    local prev_home_value="$_ctx_active_home_value"
+
+    printf 'test:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/test" > "$proj/.ctx"
+    mkdir() { return 1; }
+    export -f mkdir
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/mkdir-fail-autoload.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/mkdir-fail-autoload.out")" == *"warning"* ]]
+    [ "$AI_CTX_PROFILES" = "$prev_profiles" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$prev_dirs" ]
+    [ "$COPILOT_HOME" = "$prev_home" ]
+    [ "$_ctx_active_mode" = "$prev_mode" ]
+    [ "$_ctx_active_context" = "$prev_context" ]
+    [ "$_ctx_active_custom_dirs" = "$prev_custom_dirs" ]
+    [ "$_ctx_active_home_was_set" = "$prev_home_was_set" ]
+    [ "$_ctx_active_home_value" = "$prev_home_value" ]
+    cmp -s "$workspace_file" "$TEST_TMP/workspace-mkdir-fail.before"
+}
+
+@test ".ctx auto-load hook returns non-zero and leaves state/workspace intact when symlink creation fails" {
+    _make_profile "review" "review-skill"
+    _make_profile "test" "test-skill"
+
+    local proj_a="$TEST_TMP/project-hook-link-fail-a"
+    mkdir -p "$proj_a"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj_a/.ctx"
+    cd "$proj_a"
+    _ctx_auto_load_hook
+
+    local workspace_a="$proj_a/project-hook-link-fail-a.code-workspace"
+    [ -f "$workspace_a" ]
+    cp "$workspace_a" "$TEST_TMP/workspace-hook-link-fail.before"
+
+    local prev_profiles="$AI_CTX_PROFILES"
+    local prev_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    local prev_home="$COPILOT_HOME"
+    local prev_mode="$_ctx_active_mode"
+    local prev_context="$_ctx_active_context"
+    local prev_custom_dirs="$_ctx_active_custom_dirs"
+    local prev_home_was_set="$_ctx_active_home_was_set"
+    local prev_home_value="$_ctx_active_home_value"
+
+    local proj_b="$TEST_TMP/project-hook-link-fail-b"
+    mkdir -p "$proj_b"
+    printf 'test:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/test" > "$proj_b/.ctx"
+    cd "$proj_b"
+    ln() { return 1; }
+    export -f ln
+
+    local status=0
+    _ctx_auto_load_hook >"$TEST_TMP/hook-link-fail.out" 2>&1 || status=$?
+
+    # The hook propagates the failed load as a non-zero status, and the
+    # failure is atomic: the prior activation's context, custom-instructions
+    # dirs, COPILOT_HOME, session record, and workspace are all left
+    # byte-identical, and the failing directory's workspace is never written.
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/hook-link-fail.out")" == *"warning"* ]]
+    [ "$AI_CTX_PROFILES" = "$prev_profiles" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$prev_dirs" ]
+    [ "$COPILOT_HOME" = "$prev_home" ]
+    [ "$_ctx_active_mode" = "$prev_mode" ]
+    [ "$_ctx_active_context" = "$prev_context" ]
+    [ "$_ctx_active_custom_dirs" = "$prev_custom_dirs" ]
+    [ "$_ctx_active_home_was_set" = "$prev_home_was_set" ]
+    [ "$_ctx_active_home_value" = "$prev_home_value" ]
+    cmp -s "$workspace_a" "$TEST_TMP/workspace-hook-link-fail.before"
+    [ ! -e "$proj_b/project-hook-link-fail-b.code-workspace" ]
 }
 
 # --- Test 11: fixture regression test (frontmatter parse) -------------------
