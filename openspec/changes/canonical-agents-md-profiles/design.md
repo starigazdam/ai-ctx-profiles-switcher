@@ -2,76 +2,71 @@
 
 ## Context
 
-See `proposal.md` for motivation. Today, `ctx` supports three Copilot integration modes (`synthetic-home`, `global-user`, `ephemeral-clean`). Under Mode A (`synthetic-home`), `ctx` reconciles shared files and symlinks skills from `.github/skills/` into a synthetic `COPILOT_HOME`. Under Modes B and C, `ctx` exports `COPILOT_SKILLS_DIRS` pointing at `.github/skills` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` pointing at profile roots.
+See `proposal.md` for motivation. The current CLI has Mode A (`synthetic-home`), Mode B (`global-user`), and Mode C (`ephemeral-clean`). Mode A reconciles skills into a synthetic `COPILOT_HOME`; Modes B/C export `COPILOT_SKILLS_DIRS` from `.github/skills`. Both `ctx.sh` (bash/zsh) and `ctx.ps1` (Windows PowerShell 5.1+/pwsh) must remain behaviorally aligned.
 
-The canonical profile contract (introduced for cross-tool alignment with `ai-task-scaffold`) specifies:
-1. Root `AGENTS.md` selects canonical mode.
-2. Canonical skills live under `.agents/skills/<name>` and must contain `SKILL.md`. Co-located `.github/skills` is ignored.
-3. Copilot CLI loads instructions from `COPILOT_HOME/instructions/**/*.instructions.md` with frontmatter `applyTo: "**"`.
-
-Because Modes B and C do not construct a synthetic `COPILOT_HOME`, canonical instructions cannot be projected there. Furthermore, `COPILOT_SKILLS_DIRS` discovery currently only points to `.github/skills`. Therefore, selecting a canonical profile under Mode B or C is functionally unsupported and must be rejected fail-closed before any mutation.
-
-Cross-cutting constraints:
-- Parity between `ctx.sh` (bash/zsh) and `ctx.ps1` (PowerShell 5.1+ and pwsh).
-- Zero C-style `for ((i=0; ...))` loops in `ctx.sh`: zsh arrays are 1-indexed by default, so indexed loops break unless `KSH_ARRAYS` is set. Use array streaming / list iteration patterns established by PR #47.
-- Offline tests only; never touch real user credentials or real `~/.copilot`.
+The canonical contract classifies a profile by root `AGENTS.md`; its skills live under `.agents/skills/<name>/SKILL.md`. The provided raw patch was generated before the mode dispatch and PR #47 collision handling. The implementation must be re-derived against current `develop`, not applied verbatim.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Detect canonical profiles by checking for root `AGENTS.md`.
-- Under Mode A, project canonical instructions into `COPILOT_HOME/instructions/ctx-profiles/<order>-<label>.instructions.md` with `applyTo: "**"` frontmatter.
-- Under Mode A, discover canonical skills from `.agents/skills/<name>` (requiring `SKILL.md`).
-- Exclude canonical profile roots from `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`.
-- Hard-fail activations combining canonical profiles with Mode B or C before any state change.
-- In `ctx check`, validate instruction projections under Mode A and emit `CHECK SKIP` under Modes B and C.
-- Maintain full parity across Bash, zsh, and PowerShell.
+- Project canonical instructions and skills in Mode A and preserve mixed-profile order.
+- Exclude canonical roots from Mode A `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`; keep empty string semantics for all-canonical selections.
+- Reject canonical profiles in Modes B/C before any environment or workspace mutation.
+- Preserve PR #47 collision behavior and zsh compatibility.
+- Make `ctx check` read-only and base Mode A/B/C checks on the matching session-local activation record.
 
 **Non-Goals:**
-- Extending Copilot CLI's Mode B/C environment discovery to canonical `.agents/skills` (Copilot CLI does not document env-based `.agents/skills` discovery).
-- Expanding relative `@file` imports in canonical `AGENTS.md` (instructions are copied as self-contained files).
-- Changing the `.ctx` file line grammar (no new directive needed; standard `<label>:<path>` entries resolve canonical directories naturally).
+- Extending Mode B/C discovery to `.agents/skills` or claiming that Copilot's built-in discovery loads root `AGENTS.md` in these modes.
+- Expanding relative `@file` imports or interpreting source frontmatter; source bytes are copied as body after the projection header.
+- Changing `.ctx` grammar or adding profile mode metadata.
 
 ## Decisions
 
-### Decision 1: Mode B/C preflight hard-fail on canonical profile selection
+### Decision 1: Reject canonical profile selection in Modes B/C
 
-**Decision:** If `AI_CTX_PROFILES_COPILOT_MODE` is `global-user` or `ephemeral-clean`, and any resolved directory in the activation contains a root `AGENTS.md`, `ctx` immediately errors before modifying environment variables, writing workspace files, or creating ephemeral directories.
+**Decision:** Detect root `AGENTS.md` after resolving each manual profile or `.ctx` entry and validate the selected mode before exports, workspace-file updates, or home setup/creation. If Mode B or C is selected and any entry is canonical, report the affected label(s) and require `synthetic-home`.
 
-**Rationale:** Mode B does not manage `COPILOT_HOME`, and Mode C creates an empty ephemeral home without reconciling instructions. If canonical profiles were accepted under B or C, their instructions would be omitted from `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` and never projected to `COPILOT_HOME`, resulting in a silent no-op. Failing fast follows the established fail-closed pattern in `ctx` (e.g. comma-in-skills-path rejection).
+**Rationale:** Mode B does not reconcile a synthetic instruction home, and its skill environment wiring targets `.github/skills`; Mode C creates an empty home without reconciliation. The canonical projection contract is therefore not provided by either mode. A fail-closed error is clearer than partial support or relying on undocumented Copilot discovery.
 
-**Alternatives considered:**
-- *Documented limitation (silent skip)*: Rejected because the user selected a profile expecting its instructions to apply; silent omission leads to subtle agent drift.
-- *Fall back to adding canonical roots to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`*: Rejected because `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` expects Copilot-style instructions or directories, not raw root `AGENTS.md` files without the synthetic projection structure.
+### Decision 2: Keep custom-instruction directory semantics explicit
 
-### Decision 2: Reuse PR #47 warn-and-skip skill collision policy
+**Decision:** Mode A includes only legacy roots in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, preserving their selection order. If every selected profile is canonical, export an empty string. Mode B/C selections are legacy-only because canonical selections are rejected; their existing directory and `.github/skills` wiring remains unchanged.
 
-**Decision:** Skill collisions across profiles (legacy or canonical) will reuse PR #47's merged behavior. In `ctx.sh`, reuse `_ctx_skill_canonical_name` for the existing canonical key and feed canonical skill directories into the existing Mode A collision reconciliation; in PowerShell, extend its matching reconciliation path. Warn and skip every colliding group during Mode A activation, and report `CHECK FAIL skill:<name>: name collision` in `ctx check`. Do not create a second preflight duplicate-name checker.
+**Rationale:** This resolves the current manual-activation and integration-mode requirements without weakening them for existing legacy profiles. The empty-string case follows the supplied patch's behavior and is tested explicitly.
 
-**Rationale:** The raw patch in issue #48 attempted a preflight abort on any duplicate skill name. However, PR #47 deliberately established the warn-and-skip policy for Mode A to prevent a single third-party profile collision from completely breaking activation. Reusing PR #47 keeps the codebase consistent, avoids maintaining two parallel collision checkers, and respects the normative spec clause.
+### Decision 3: Reuse PR #47 collision reconciliation
 
-### Decision 3: Managed instruction projection manifest and naming
+**Decision:** Extend source enumeration to feed canonical and legacy skill candidates into the existing Mode A reconciliation and use `_ctx_skill_canonical_name` for canonical comparison keys. Keep warn-and-skip for every colliding group and the existing `ctx check` collision failure. Do not introduce a separate duplicate-name preflight.
 
-**Decision:** Canonical instruction files are named `<04d-order>-<sanitized-label>.instructions.md` inside `COPILOT_HOME/instructions/ctx-profiles/`. A `.ctx-managed` text file tracks active projection filenames. On reactivation, any file recorded in `.ctx-managed` that is not in the current desired set is deleted. If no canonical profiles remain, the directory and empty parent instructions directories are cleaned up.
+**Rationale:** PR #47 already established the policy and helper in the touched reconciliation path. Reuse avoids divergent behavior and honors the issue's requirement.
 
-**Rationale:** The 4-digit order prefix ensures stable lexical ordering in Copilot CLI. The `.ctx-managed` manifest distinguishes ctx-generated projections from any user-placed files.
+### Decision 4: Define portable projection names and bytes
 
-### Decision 4: `ctx check` reporting semantics
+**Decision:** The filename is `<order>-<label>.instructions.md`: one-based order padded to at least four decimal digits; the label source is the manual profile identifier or `.ctx` entry label and uses the existing sanitizer, retaining ASCII letters/digits/`+._-` and replacing every other character with `_`. The exact prefix is UTF-8/LF bytes `---\napplyTo: "**"\n---\n\n`, followed by the source `AGENTS.md` bytes unchanged. Preserve source CRLF/LF, optional BOM, and trailing-newline state; do not parse a source YAML-like header.
 
-**Decision:**
-- Under Mode A: For each canonical profile in the active context, `ctx check` verifies that `<order>-<label>.instructions.md` exists with exact header and content matches (`CHECK PASS instruction:<file>` or `CHECK FAIL`). Stale entries in `.ctx-managed` trigger `CHECK FAIL instruction:<file>: stale projection`.
-- Under Modes B and C: `instruction:<file>` checks report `CHECK SKIP`, exactly as shared links and skill symlinks do.
+**Rationale:** A single shared rule lets both shells derive the same path and bytes. Reusing the sanitizer avoids a parallel name policy; order prefixes keep distinct selected entries' filenames unique.
 
-**Rationale:** In Modes B and C, `COPILOT_HOME` is either untouched (B) or unreconciled (C), so instructions cannot and should not be present in `COPILOT_HOME`. Reporting `CHECK SKIP` adheres to the principle that unmanaged subsystem state audits must skip, not fail.
+### Decision 5: Constrain projection directories and manifest
 
-### Decision 5: Zsh compatibility for loop iteration
+**Decision:** Before projection writes or removals, require `instructions/` and `instructions/ctx-profiles/` to be real directories, not symlinks, junctions, or reparse points. Never read or delete through an unsafe component. `.ctx-managed` is a UTF-8 newline-delimited list of generated basenames: at least four ASCII decimal digits, a hyphen, a label containing only ASCII letters, digits, `+`, `.`, `_`, or `-`, and the literal suffix `.instructions.md`. A missing manifest is empty during activation; any nonconforming line, link, or unreadable manifest fails closed before projection changes. Only validated manifest entries may identify stale files; preserve unmanaged files. `ctx check` reports unsafe/malformed state without modifying it.
 
-**Decision:** Avoid all C-style `for ((i = 0; ...))` loops in `ctx.sh`. Use list iteration (`for item in "${list[@]}"`) or `while [ "$#" -gt 0 ]` with counters.
+**Rationale:** `COPILOT_HOME` is user data. Treating parent paths and manifest contents as untrusted prevents writes or deletions through symlinks or path-like manifest entries.
 
-**Rationale:** In zsh, arrays are 1-indexed by default, making 0-indexed C loops error-prone or incompatible without special option flags. PR #47 explicitly removed all C-style loops from `ctx.sh` for this reason.
+### Decision 6: Attribute `ctx check` to the recorded activation
+
+**Decision:** If a matching record says Mode A, check Mode A instructions and canonical skill links even if the selector now requests B/C; report the selector mismatch separately. If a matching record says B/C, emit `CHECK SKIP instruction:<file>`. If no matching record exists, skip Mode-A-only projections rather than inferring from the selector or paths. Canonical skills without `SKILL.md` are not expected skills.
+
+**Rationale:** The current mode is the mode that actually activated, not the latest selector value. This prevents a stale selector from masking drift in a real Mode A context and avoids attributing foreign homes to `ctx`.
+
+### Decision 7: Keep zsh-safe iteration
+
+**Decision:** Do not introduce `for ((i=...))` loops in `ctx.sh`; use the non-indexed list/streaming patterns established by PR #47 and test under zsh defaults.
+
+**Rationale:** zsh's default array indexing differs from Bash. Existing shared iteration patterns avoid reintroducing the exact class of regression PR #47 just removed.
 
 ## Risks / Trade-offs
 
-- [Risk] User attempts to use canonical profiles in Mode B or Mode C → Mitigation: Clear error message explaining that canonical profiles require `synthetic-home` (Mode A) because they rely on instruction projection.
-- [Risk] Canonical `AGENTS.md` containing relative file paths or `@imports` → Mitigation: Document in README that projected instructions are copied as-is with `applyTo: "**"` frontmatter; instructions should be self-contained.
-- [Risk] Skill collision between a legacy `.github/skills/<name>` and canonical `.agents/skills/<name>` → Mitigation: Both feed into the unified collision detection mechanism from PR #47 and are skipped if names collide.
+- [Risk] Canonical profiles in Mode B/C cannot be projected → Mitigation: fail before mutation with a clear Mode A requirement.
+- [Risk] Instructions contain relative imports or source frontmatter → Mitigation: copy source bytes unchanged as body and document that canonical instructions must be self-contained.
+- [Risk] Unsafe or corrupt projection metadata → Mitigation: reject symlinked parent directories and malformed/unreadable manifests; keep `ctx check` read-only.
+- [Risk] Users may expect co-located `.github/skills` to be merged into canonical profiles → Mitigation: state clearly in README that canonical roots use `.agents/skills` only.
