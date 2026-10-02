@@ -577,18 +577,25 @@ only the first context name plus a `(+2)` suffix for the rest (e.g.
   directory exist before exporting anything, and leave any
   previously active context untouched if validation fails. A `COPILOT_HOME`
   setup failure during Mode A (synthetic-home) activation — home creation or
-  shared-link reconciliation — is equally atomic: the previous context,
-  `COPILOT_HOME`, and (for `.ctx` auto-load) the `.code-workspace` file are
-  left untouched, and the command/function reports the failure: a non-zero
-  exit status from `ctx.sh` on any failed activation (manual
-  `ctx <profile>...`, explicit `ctx load`, or `.ctx` auto-load), and a
-  Boolean from `ctx.ps1` — `$false` on a failed Mode A manual activation,
-  failed explicit `ctx load`, or failed `.ctx` auto-load; `$true` only on a
-  successful Mode A manual activation and a successful Mode A explicit
-  `ctx load`. Successful Modes B/C manual activation and `ctx load` keep
-  their old behavior of emitting no Boolean pipeline value, and the
-  `ctx.ps1` startup/prompt hooks suppress the auto-load's return value so no
-  stray `True`/`False` text appears at the shell prompt.
+  shared-link reconciliation — leaves the activation environment and
+  session-record state and (for `.ctx` auto-load) the `.code-workspace` file
+  unchanged, and the failure status is returned through the currently
+  documented Bash/PowerShell paths: a non-zero exit status from `ctx.sh` on
+  any failed activation (manual `ctx <profile>...`, explicit `ctx load`, or
+  `.ctx` auto-load), and a Boolean from `ctx.ps1` — `$false` on a failed
+  Mode A manual activation, failed explicit `ctx load`, or failed `.ctx`
+  auto-load; `$true` only on a successful Mode A manual activation and a
+  successful Mode A explicit `ctx load`. Successful Modes B/C manual
+  activation and `ctx load` keep their old behavior of emitting no Boolean
+  pipeline value, and the `ctx.ps1` startup/prompt hooks suppress the
+  auto-load's return value so no stray `True`/`False` text appears at the
+  shell prompt. This atomicity covers the activation environment and session
+  record, not the bytes of shared `~/.copilot` files: `_ctx_reconcile_symlink`
+  / `Resolve-CtxLink` may intentionally transfer an already-written regular
+  file/directory from the synthetic home into the shared target before a
+  later reconciliation step fails. Making shared-target data atomic across a
+  failed activation is tracked in
+  [issue #51](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/51).
 - `COPILOT_HOME` is managed automatically by `ctx` whenever a context is
   active (see [Skill discovery](#skill-discovery)); it is exported/unset
   alongside `AI_CTX_PROFILES` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and shown
