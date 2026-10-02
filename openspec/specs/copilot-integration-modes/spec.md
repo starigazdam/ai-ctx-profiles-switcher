@@ -59,6 +59,20 @@ The system SHALL implement Mode A (`synthetic-home`) exactly as the current sing
 - **WHEN** a context is active under Mode A and a user runs `ctx current` or `ctx check`
 - **THEN** the only new default-visible output is the report of the active mode, with every existing check and output unchanged
 
+### Requirement: Copilot skill-discovery scope
+
+Mode A SHALL project each context's `skills/` tree from the resolved entries' `.github/skills` directories into the synthetic home, exactly as documented, but this projection SHALL NOT be described or treated as complete or isolated skill discovery. Copilot CLI SHALL remain free to load skills from its other documented roots — personal `~/.copilot/skills` and `~/.agents/skills` (Copilot CLI does not treat `~/.claude/skills` as an official personal root), project `.github/skills`, `.agents/skills`, and `.claude/skills`, plus inherited and plugin/custom sources. Those documented roots may be additive and are not all always present or always loaded under a custom `COPILOT_HOME`; the only verified independence is that one ancestor `.agents/skills` source still loads when `COPILOT_HOME` points outside that ancestor tree, and `ctx` SHALL NOT remove, hide, or disable any of them. `ctx` SHALL provide no built-in or durable per-context skill exclusion in any mode: in Mode A a `copilot skill disable` writes through the shared `settings.json` symlink to the real `~/.copilot/settings.json` and so affects every Mode A context; in Mode B its effect follows whatever `COPILOT_HOME` value is already set — the normal user home, a stale Mode-A synthetic pointer, or another custom value — and may affect any sessions sharing that home; and in Mode C a user could manually disable a skill name inside a fresh activation's home but SHALL have to repeat it on every activation because `ctx` SHALL NOT automate or persist an exclusion policy. `ctx` activation SHALL NOT alter global skill enablement, though a user manually running the CLI's supported skill-name disable command can; the CLI SHALL provide no negative skill-root filter, and `ctx` SHALL provide no managed durable exclusion.
+
+#### Scenario: Mode A skill projection is additive, not exclusive
+
+- **WHEN** a context is active under Mode A and Copilot CLI resolves skills
+- **THEN** the synthetic home's `skills/` tree is included alongside Copilot's documented personal, project, inherited, and plugin/custom skill roots, `ctx` claims neither complete nor isolated discovery, and not every documented root is guaranteed to be present or loaded under a custom `COPILOT_HOME`
+
+#### Scenario: No built-in or durable per-context skill exclusion is provided under any mode
+
+- **WHEN** a user wants a context to exclude an inherited or other non-projected skill
+- **THEN** `ctx` provides no built-in or durable per-context exclusion in any mode: a `copilot skill disable` is global in Mode A via the shared `settings.json` symlink, its effect in Mode B follows the existing `COPILOT_HOME` value and may affect any sessions sharing it, a Mode C manual disable inside a fresh activation's home must be repeated on every activation because `ctx` neither automates nor persists an exclusion policy, and `ctx` activation does not alter global skill enablement
+
 ### Requirement: Mode B global-user COPILOT_HOME handling
 
 The system SHALL implement Mode B (`global-user`) by never touching `COPILOT_HOME`: at activation `ctx` SHALL not read, set, unset, create, or delete `COPILOT_HOME`, leaving whatever value it has — set by the user, left over from a prior Mode A or Mode C activation, or unset — exactly as-is. Switching directly from Mode A or Mode C into Mode B SHALL NOT restore or clear an old pointer; a user who wants Copilot's real default SHALL clear or unset `COPILOT_HOME` themselves first, and `ctx` SHALL not claim that Mode B restores anything.
