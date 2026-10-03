@@ -129,6 +129,8 @@ Usage:
   ctx <profile> [profile...]  Activate one or more profiles
   ctx current                   Show the currently active context
   ctx check                    Read-only audit against the nearest .ctx file
+  ctx skills                   Read-only potential-Copilot-skill discovery
+                               inventory (filesystem/configuration based)
   ctx clear                   Clear the currently active context
   ctx clear --all             Remove the current context home and generated
                                project artifacts next to the nearest .ctx file
@@ -170,7 +172,7 @@ function Write-CtxStatus {
         # record, never the raw selector: a stale/mismatched
         # AI_CTX_PROFILES_COPILOT_MODE without a matching activation is not
         # reported as active.
-        Write-Host "Mode: $($Script:CtxActiveMode)"
+        Write-Host "Mode: $(Get-CtxModeLabel -Mode $Script:CtxActiveMode)"
         if ($Script:CtxActiveMode -cne 'synthetic-home') {
             Write-Host "COPILOT_SKILLS_DIRS=$(if ($env:COPILOT_SKILLS_DIRS) { $env:COPILOT_SKILLS_DIRS } else { '<unset>' })"
         }
@@ -411,6 +413,10 @@ function ctx {
         'check' {
             return (Test-CtxActivation)
         }
+        'skills' {
+            Write-CtxSkillsInventory
+            return
+        }
         'clear' {
             $all = $Contexts.Count -gt 1 -and $Contexts[1] -eq '--all'
             return (Clear-CtxContext -All:$all)
@@ -522,6 +528,7 @@ function ctx {
 
     # Publish the session record only after a fully successful activation.
     Set-CtxActiveRecord -Mode $mode
+    Write-CtxGlobalUserHomeWarning -Mode $mode
     if ($oldEphemeralHome) {
         Write-CtxRetainedEphemeralHome -Path $oldEphemeralHome
     }
@@ -716,6 +723,33 @@ function Get-CtxValidatedCopilotMode {
         throw "invalid AI_CTX_PROFILES_COPILOT_MODE `"$mode`" (allowed values: synthetic-home, global-user, ephemeral-clean)"
     }
     return $mode
+}
+
+function Get-CtxModeLabel {
+    # Maps a mode selector value to its user-facing letter/name label used by
+    # ctx current and ctx check: A — synthetic-home, B — global-user,
+    # C — ephemeral-clean. Selector values themselves are unchanged. Returns
+    # $null for an unknown value.
+    param([string]$Mode)
+    switch ($Mode) {
+        'synthetic-home' { return 'A — synthetic-home' }
+        'global-user' { return 'B — global-user' }
+        'ephemeral-clean' { return 'C — ephemeral-clean' }
+    }
+    return $null
+}
+
+function Write-CtxGlobalUserHomeWarning {
+    # Mode B never sets, unsets, or otherwise changes COPILOT_HOME; it only
+    # reads the existing value (including empty) to warn that it is preserved.
+    # Emitted to stderr after a successful Mode B activation only - never in
+    # Modes A/C, on a failed activation, or from read-only commands. Uses
+    # [Console]::Error so the exact template line reaches stderr unadorned
+    # (Write-Warning would add a "WARNING:" stream decoration).
+    param([string]$Mode)
+    if (($Mode -ceq 'global-user') -and (Test-Path Env:\COPILOT_HOME)) {
+        [Console]::Error.WriteLine("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$env:COPILOT_HOME`". This may point to a synthetic home from a previous ctx activation.")
+    }
 }
 
 function Get-CtxSkillsDirsCsv {
@@ -1369,6 +1403,7 @@ function Import-CtxFile {
     $Script:CtxAutoLoadHomeOverride = $parsed.HomeOverride
     # Publish the session record only after a fully successful activation.
     Set-CtxActiveRecord -Mode $mode
+    Write-CtxGlobalUserHomeWarning -Mode $mode
     if ($oldEphemeralHome) {
         Write-CtxRetainedEphemeralHome -Path $oldEphemeralHome
     }
@@ -1448,12 +1483,12 @@ function Test-CtxActivation {
         $selectorMode = $null
         try { $selectorMode = Get-CtxValidatedCopilotMode } catch { $selectorMode = $null }
         if (-not $selectorMode) {
-            Write-Host "CHECK FAIL COPILOT_MODE: invalid selector `"$(if($env:AI_CTX_PROFILES_COPILOT_MODE){$env:AI_CTX_PROFILES_COPILOT_MODE}else{'<unset>'})`" (allowed values: synthetic-home, global-user, ephemeral-clean), recorded active mode $recordedMode"
+            Write-Host "CHECK FAIL COPILOT_MODE: invalid selector `"$(if($env:AI_CTX_PROFILES_COPILOT_MODE){$env:AI_CTX_PROFILES_COPILOT_MODE}else{'<unset>'})`" (allowed values: synthetic-home, global-user, ephemeral-clean), recorded active mode $(Get-CtxModeLabel -Mode $recordedMode)"
             $failures++
         } elseif ($selectorMode -ceq $recordedMode) {
-            Write-Host "CHECK PASS COPILOT_MODE: recorded $recordedMode matches selector"
+            Write-Host "CHECK PASS COPILOT_MODE: recorded $(Get-CtxModeLabel -Mode $recordedMode) matches selector"
         } else {
-            Write-Host "CHECK FAIL COPILOT_MODE: selector $selectorMode does not match recorded active mode $recordedMode"
+            Write-Host "CHECK FAIL COPILOT_MODE: selector $selectorMode does not match recorded active mode $(Get-CtxModeLabel -Mode $recordedMode)"
             $failures++
         }
     } else {
@@ -1588,6 +1623,202 @@ function Test-CtxActivation {
     Write-Host "ctx check: FAIL ($failures)"; return $false
 }
 
+# --- ctx skills: read-only skill-discovery inventory ----------------------
+# `ctx skills` is a filesystem/configuration-based, strictly read-only
+# inventory of the skill directories Copilot might discover. It is explicitly
+# an inventory of *potential* discovery locations - it never claims a skill is
+# loaded or invoked, and it never modifies settings, files, or the
+# environment. Each candidate path is reported with a single classification
+# (precedence: ctx-profile > expected-home > external) while all origins are
+# retained. No Copilot CLI probe is performed.
+
+function Get-CtxSkillPathNormalized {
+    # Canonicalizes a candidate path for deduplication using platform-
+    # appropriate normalization that does not require the path to exist.
+    # Returns $null when the path cannot be normalized.
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try { return [System.IO.Path]::GetFullPath($Path) } catch { return $null }
+}
+
+function Get-CtxPluginSkillDirs {
+    # Returns existing skill-directory paths under an installed-plugins root:
+    # <root>\*\skills and <root>\*\.github\skills. Only actual, observable
+    # directories are returned; the plugins root itself is never reported as
+    # a skill directory.
+    param([string]$Root)
+    $result = @()
+    if (Test-Path -LiteralPath $Root -PathType Container) {
+        foreach ($plugin in (Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($rel in @('skills', '.github\skills')) {
+                $candidate = Join-Path $plugin.FullName $rel
+                if (Test-Path -LiteralPath $candidate -PathType Container) { $result += $candidate }
+            }
+        }
+    }
+    return $result
+}
+
+function Read-CtxSettingsSkillDirectories {
+    # Returns the non-empty string entries of a settings file's
+    # "skillDirectories" array. Read-only: never returns other settings
+    # content or secrets. Returns an empty array on missing/unparseable
+    # content so the inventory never fails on a bad settings file.
+    param([string]$SettingsFile)
+    if (-not (Test-Path -LiteralPath $SettingsFile -PathType Leaf)) { return @() }
+    try {
+        $data = Get-Content -LiteralPath $SettingsFile -Raw | ConvertFrom-Json
+        $dirs = @()
+        foreach ($entry in @($data.skillDirectories)) {
+            if ($entry -is [string] -and -not [string]::IsNullOrWhiteSpace($entry)) {
+                $dirs += $entry
+            }
+        }
+        return $dirs
+    } catch {
+        return @()
+    }
+}
+
+function Get-CtxPathComparer {
+    # Platform-aware path-key comparison for the ctx skills inventory maps:
+    # case-insensitive on Windows (where filesystem paths are
+    # case-insensitive), ordinal/case-sensitive elsewhere (Linux/macOS). Path
+    # keys are normalized strings, so this comparer decides whether case-only
+    # variants collapse into one row or stay distinct. Works on Windows
+    # PowerShell 5.1 and PowerShell 7+.
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        return [System.StringComparer]::OrdinalIgnoreCase
+    }
+    return [System.StringComparer]::Ordinal
+}
+
+function Write-CtxSkillsInventory {
+    # Read-only, filesystem/config-based inventory of potential Copilot skill
+    # discovery locations. Does not modify settings, files, or the
+    # environment, and never invokes the Copilot CLI.
+    Write-Host '[ctx skills] potential Copilot skill discovery — inventory only; ctx does not claim these skills are loaded or invoked'
+
+    # @{} would compare path keys case-insensitively on every platform; build
+    # the maps with a platform-appropriate comparer so case-only variants stay
+    # distinct on case-sensitive filesystems and dedup on Windows.
+    $pathComparer = Get-CtxPathComparer
+    $origins = [hashtable]::new($pathComparer)
+    $reportable = [hashtable]::new($pathComparer)
+
+    # Active context/profile skill dirs are ctx-owned and attributable only
+    # while the session activation record still matches the current
+    # environment; otherwise attribution is unknown and ctx-owned paths are
+    # not guessed.
+    if (Test-CtxActiveRecordMatches) {
+        foreach ($d in (@($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -split ',') | Where-Object { $_ })) {
+            Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'ctx-profile' -RawPath (Join-Path $d '.github\skills')
+        }
+    } else {
+        Write-Host '[ctx skills] unknown: no matching ctx session activation record; ctx-owned paths are not guessed'
+    }
+
+    # Expected <COPILOT_HOME>/skills (configured/expected; reportable missing).
+    if ((Test-Path Env:\COPILOT_HOME) -and $env:COPILOT_HOME) {
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'expected-home' -RawPath (Join-Path $env:COPILOT_HOME 'skills') -Configured
+    }
+
+    # Personal discovery locations (default, not configured).
+    Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path (Get-CtxCopilotDir) 'skills')
+    Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path $HOME '.agents\skills')
+
+    # Repository discovery locations in the current directory and applicable
+    # ancestors.
+    $dir = (Get-Location).Path
+    while ($dir) {
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path $dir '.github\skills')
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path $dir '.agents\skills')
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path $dir '.claude\skills')
+        $parent = Split-Path -Parent $dir
+        if (-not $parent -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+
+    # COPILOT_SKILLS_DIRS entries (configured; reportable missing).
+    foreach ($entry in (@($env:COPILOT_SKILLS_DIRS -split ',') | Where-Object { $_ })) {
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath $entry -Configured
+    }
+
+    # Configured "skillDirectories" in relevant Copilot settings files
+    # (configured; reportable missing). Read-only.
+    $settingsFiles = @((Join-Path (Get-CtxCopilotDir) 'settings.json'))
+    if ((Test-Path Env:\COPILOT_HOME) -and $env:COPILOT_HOME) { $settingsFiles += (Join-Path $env:COPILOT_HOME 'settings.json') }
+    $settingsFiles += (Join-Path $HOME '.github\copilot\settings.json')
+    $dir = (Get-Location).Path
+    while ($dir) {
+        $settingsFiles += (Join-Path $dir '.github\copilot\settings.json')
+        $parent = Split-Path -Parent $dir
+        if (-not $parent -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+    foreach ($settingsFile in ($settingsFiles | Select-Object -Unique)) {
+        foreach ($entry in (Read-CtxSettingsSkillDirectories -SettingsFile $settingsFile)) {
+            Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath $entry -Configured
+        }
+    }
+
+    # Detectable additional-directory mechanisms and installed-plugin skill
+    # paths: only actual, observable skill directories under installed
+    # plugins are reported (a plugins root itself is never a skill
+    # directory).
+    $pluginRoots = @((Join-Path (Get-CtxCopilotDir) 'installed-plugins'))
+    if ((Test-Path Env:\COPILOT_HOME) -and $env:COPILOT_HOME) { $pluginRoots += (Join-Path $env:COPILOT_HOME 'installed-plugins') }
+    foreach ($pluginRoot in $pluginRoots) {
+        foreach ($pluginSkill in (Get-CtxPluginSkillDirs -Root $pluginRoot)) {
+            Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath $pluginSkill
+        }
+    }
+
+    # Report candidates (existing paths) first, then configured-but-missing
+    # paths, both in sorted order. Do not fail on missing/inaccessible paths.
+    $sortedPaths = @($origins.Keys | Sort-Object)
+    if ($sortedPaths.Count -eq 0) {
+        Write-Host '[ctx skills] (no candidate skill directories found)'
+    }
+    foreach ($path in $sortedPaths) {
+        $originList = @($origins[$path] -split ',' | Sort-Object -Unique)
+        $originsCsv = $originList -join ','
+        $classification = $originList[0]
+        if (Test-Path -LiteralPath $path) {
+            Write-Host "[ctx skills] candidate: $path (classification: $classification, origins: $originsCsv)"
+        } elseif ($reportable.ContainsKey($path)) {
+            Write-Host "[ctx skills] missing: $path (classification: $classification, origins: $originsCsv)"
+        }
+    }
+
+    Write-Host '[ctx skills] not observable: command-line arguments of another Copilot process'
+    Write-Host '[ctx skills] not observable: skill locations inside installed Copilot plugins beyond their detectable skills/ and .github/skills subdirectories'
+    Write-Host '[ctx skills] not observable: which skills Copilot actually loads or invokes (no Copilot CLI probe performed)'
+}
+
+function Add-CtxSkillOrigin {
+    # Records a candidate path (normalized) with its origin. $Configured marks
+    # configured/expected paths so a missing one is reported instead of being
+    # silently absent. Mutates the caller's hashtables (reference types).
+    param(
+        [hashtable]$Origins,
+        [hashtable]$Reportable,
+        [string]$Origin,
+        [string]$RawPath,
+        [switch]$Configured
+    )
+    $key = Get-CtxSkillPathNormalized -Path $RawPath
+    if (-not $key) { return }
+    if ($Origins.ContainsKey($key)) {
+        if ($Origins[$key] -notmatch ("(^|,)" + [regex]::Escape($Origin) + "(,|$)")) {
+            $Origins[$key] = $Origins[$key] + ',' + $Origin
+        }
+    } else {
+        $Origins[$key] = $Origin
+    }
+    if ($Configured) { $Reportable[$key] = $true }
+}
+
 function Test-CtxFileHasNoAutoLoad {
     # Returns $true when the given .ctx file contains a bare "noautoload"
     # directive (case-insensitive). Deliberately independent of
@@ -1682,7 +1913,7 @@ Register-ArgumentCompleter -CommandName ctx -ScriptBlock {
     $argIndex = $elements.Count - 1
 
     if ($argIndex -le 1) {
-        $candidates = @('current', 'clear', 'load') + (Get-CtxSubdirName (Join-Path $root 'profiles'))
+        $candidates = @('current', 'clear', 'skills', 'load') + (Get-CtxSubdirName (Join-Path $root 'profiles'))
     } elseif ($argIndex -eq 2 -and $elements[1].Extent.Text -eq 'clear') {
         $candidates = @('--all')
     } elseif ($argIndex -ge 2 -and $elements[1].Extent.Text -eq 'load') {

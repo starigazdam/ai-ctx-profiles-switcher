@@ -42,7 +42,7 @@ The system SHALL select the Copilot integration mode for an activation from the 
 
 ### Requirement: Mode A synthetic-home behavior
 
-The system SHALL implement Mode A (`synthetic-home`) exactly as the current single synthetic-home behavior: an explicit `synthetic-home` value SHALL be byte-identical to the selector being unset. All current `COPILOT_HOME` symlink reconciliation, `skills/` directory population, and cleanup rules SHALL remain exactly as documented. The rename-through-symlink hazard and the concurrent last-writer-wins race SHALL remain documented, not fixed, and not hidden. The only default-visible addition to Mode A SHALL be that `ctx current` and `ctx check` also report the active mode. Mode A SHALL NOT be altered to resolve unrelated issues such as the skill-name-collision bug.
+The system SHALL implement Mode A (`synthetic-home`) exactly as the current single synthetic-home behavior: an explicit `synthetic-home` value SHALL be byte-identical to the selector being unset. All current `COPILOT_HOME` symlink reconciliation, `skills/` directory population, and cleanup rules SHALL remain exactly as documented. The rename-through-symlink hazard and the concurrent last-writer-wins race SHALL remain documented, not fixed, and not hidden. The only default-visible addition to Mode A SHALL be that `ctx current` and `ctx check` also report the active mode. Mode A SHALL NOT be altered to resolve unrelated issues such as the skill-name-collision bug. Mode A's `skills/` population SHALL be understood as projecting only the selected profiles' `.github/skills` into the synthetic `COPILOT_HOME` view; it SHALL NOT be represented as a complete skill-discovery mechanism or a security sandbox, because other built-in or configured discovery locations (e.g. personal `~/.agents/skills`, repository `.github/skills`/`.claude/skills`, `COPILOT_SKILLS_DIRS`, or configured `skillDirectories`) MAY remain discoverable by Copilot and SHALL NOT be blocked by Mode A.
 
 #### Scenario: Explicit synthetic-home is byte-identical to unset
 
@@ -54,6 +54,11 @@ The system SHALL implement Mode A (`synthetic-home`) exactly as the current sing
 - **WHEN** a context is active under Mode A
 - **THEN** the synthetic `COPILOT_HOME` is reconciled with the same symlink, skill-directory, and cleanup rules documented today, and the rename-through-symlink hazard and concurrent race remain documented rather than fixed
 
+#### Scenario: Mode A projects profile skills but is not a discovery or security sandbox
+
+- **WHEN** a context is active under Mode A and other built-in or configured skill discovery locations exist
+- **THEN** the synthetic `COPILOT_HOME` view contains only the selected profiles' `.github/skills` projection, those other locations may still be discovered by Copilot, and `ctx` SHALL NOT claim that Mode A blocks them
+
 #### Scenario: Mode A default-visible addition is mode reporting only
 
 - **WHEN** a context is active under Mode A and a user runs `ctx current` or `ctx check`
@@ -61,17 +66,22 @@ The system SHALL implement Mode A (`synthetic-home`) exactly as the current sing
 
 ### Requirement: Mode B global-user COPILOT_HOME handling
 
-The system SHALL implement Mode B (`global-user`) by never touching `COPILOT_HOME`: at activation `ctx` SHALL not read, set, unset, create, or delete `COPILOT_HOME`, leaving whatever value it has — set by the user, left over from a prior Mode A or Mode C activation, or unset — exactly as-is. Switching directly from Mode A or Mode C into Mode B SHALL NOT restore or clear an old pointer; a user who wants Copilot's real default SHALL clear or unset `COPILOT_HOME` themselves first, and `ctx` SHALL not claim that Mode B restores anything.
+The system SHALL implement Mode B (`global-user`) by never writing `COPILOT_HOME`: at activation `ctx` SHALL not set, unset, create, or delete `COPILOT_HOME`, leaving whatever value it has — set by the user, left over from a prior Mode A or Mode C activation, or unset — exactly as-is. Mode B MAY read `COPILOT_HOME` for status reporting and for the preserved-value warning below; reading SHALL never change it. Switching directly from Mode A or Mode C into Mode B SHALL NOT restore or clear an old pointer; a user who wants Copilot's real default SHALL clear or unset `COPILOT_HOME` themselves first, and `ctx` SHALL not claim that Mode B restores anything.
 
 #### Scenario: Mode B leaves a set COPILOT_HOME exactly as-is
 
 - **WHEN** a user activates a context under Mode B and `COPILOT_HOME` holds a custom value
-- **THEN** the value is left exactly as-is: `ctx` does not read, set, unset, create, or delete it
+- **THEN** the value is left exactly as-is: `ctx` does not set, unset, create, or delete it, and reading it for status/warning never modifies it
 
 #### Scenario: Mode B leaves COPILOT_HOME unset when it is unset
 
 - **WHEN** a user activates a context under Mode B and `COPILOT_HOME` is unset
 - **THEN** `COPILOT_HOME` remains unset after activation
+
+#### Scenario: Mode B warns that a present COPILOT_HOME is preserved
+
+- **WHEN** a user successfully activates a context under Mode B and `COPILOT_HOME` is present in the environment (including empty)
+- **THEN** `ctx` emits to stderr the exact template `ctx: warning: global-user mode preserves the existing COPILOT_HOME: "<path>". This may point to a synthetic home from a previous ctx activation.` with the exact value, never modifies it, and emits nothing when the variable is absent, in Modes A/C, on a failed activation, or from read-only commands
 
 #### Scenario: Switching from A or C into Mode B does not restore or clear an old pointer
 
@@ -172,7 +182,7 @@ The system SHALL never delete the Mode C ephemeral directory. `ctx clear` and `c
 
 ### Requirement: Mode reporting
 
-The system SHALL record, session-locally and without any new on-disk registry, which mode actually activated and, for Modes B and C, the home value the activation is responsible for checking. `ctx current` SHALL print the active mode — the mode of the matching activation, not merely the requested selector, so a stale or mismatched `AI_CTX_PROFILES_COPILOT_MODE` sitting in the environment without a matching activation is not reported as active — and, in Modes B and C, the active `COPILOT_SKILLS_DIRS`. A `COPILOT_HOME` or `COPILOT_SKILLS_DIRS` that exists in the environment with no matching local activation record cannot be attributed to a mode; the system SHALL report such state as unknown rather than guessing from its path or deleting it. The read-only audit behavior of `ctx check` under each mode is specified by the `.ctx loading` capability.
+The system SHALL record, session-locally and without any new on-disk registry, which mode actually activated and, for Modes B and C, the home value the activation is responsible for checking. `ctx current` SHALL print the active mode — the mode of the matching activation, not merely the requested selector, so a stale or mismatched `AI_CTX_PROFILES_COPILOT_MODE` sitting in the environment without a matching activation is not reported as active — and, in Modes B and C, the active `COPILOT_SKILLS_DIRS`. The active-mode labels SHALL be exactly consistent across `ctx current` and `ctx check` status: `A — synthetic-home`, `B — global-user`, `C — ephemeral-clean`; the selector values themselves SHALL remain unchanged. A `COPILOT_HOME` or `COPILOT_SKILLS_DIRS` that exists in the environment with no matching local activation record cannot be attributed to a mode; the system SHALL report such state as unknown rather than guessing from its path or deleting it. The read-only audit behavior of `ctx check` under each mode is specified by the `.ctx loading` capability.
 
 #### Scenario: A successful activation records its mode session-locally
 
@@ -193,3 +203,27 @@ The system SHALL record, session-locally and without any new on-disk registry, w
 
 - **WHEN** a `COPILOT_HOME` or `COPILOT_SKILLS_DIRS` exists in the environment with no matching local activation record
 - **THEN** the system reports it as unknown rather than attributing it to a mode by guessing from its path or deleting it
+
+### Requirement: ctx skills read-only skill-discovery inventory
+
+The system SHALL provide `ctx skills` as a filesystem/configuration-based, strictly read-only inventory of the skill directories Copilot might discover, explicitly headed as **potential Copilot skill discovery** and explicitly not claiming skills are loaded or invoked. It SHALL report candidate skill directories with all of their origins and a single classification chosen by precedence `ctx-profile > expected-home > external` (all origins retained), SHALL normalize and deduplicate paths using platform-appropriate rules, SHALL show configured-but-missing or inaccessible paths cleanly without failing, and SHALL NOT emit unrelated settings or secrets. It SHALL inventory the observable/applicable sources: active context/profile `.github/skills` dirs; the expected `<COPILOT_HOME>/skills`; personal `~/.copilot/skills` and `~/.agents/skills`; repository `.github/skills`, `.agents/skills`, and `.claude/skills` in the current directory and applicable ancestors; `COPILOT_SKILLS_DIRS`; configured `skillDirectories` in relevant Copilot settings; and detectable additional-directory/installed-plugin skill paths (an installed-plugins root itself SHALL NOT be reported as a skill directory; only observable `skills`/`.github/skills` subdirectories under plugins may be, and the boundary SHALL be disclosed). If the active context provenance does not match its session record, `ctx skills` SHALL say attribution is unknown and SHALL NOT guess ctx-owned paths. It SHALL clearly disclose categories a filesystem/config diagnostic cannot observe (notably another Copilot process's command-line arguments), SHALL NOT invoke the Copilot CLI, and SHALL NOT modify settings, files, or the environment. `ctx check` SHALL remain strictly read-only and continue to skip the external Copilot probe.
+
+#### Scenario: ctx skills reports potential candidates with classification and origins
+
+- **WHEN** a user runs `ctx skills` and candidate skill directories are discoverable from multiple sources
+- **THEN** each normalized, deduplicated candidate is reported once with its classification by precedence and all of its origins
+
+#### Scenario: ctx skills shows configured-but-missing paths without failing
+
+- **WHEN** a configured path (e.g. a `COPILOT_SKILLS_DIRS` entry or a settings `skillDirectories` entry) does not exist and a user runs `ctx skills`
+- **THEN** the path is reported as missing/inaccessible and the command exits successfully
+
+#### Scenario: ctx skills reports unknown provenance without guessing ctx-owned paths
+
+- **WHEN** the active context provenance does not match its session record and a user runs `ctx skills`
+- **THEN** the inventory states that attribution is unknown and does not guess ctx-owned paths
+
+#### Scenario: ctx skills is read-only and discloses what it cannot observe
+
+- **WHEN** a user runs `ctx skills`
+- **THEN** no settings, files, or environment are modified, no Copilot CLI probe is performed, and categories that cannot be observed (notably another Copilot process's command-line arguments) are disclosed

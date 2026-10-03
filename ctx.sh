@@ -176,6 +176,8 @@ Usage:
   ctx <profile> [profile...]  Activate one or more profiles
   ctx current                   Show the currently active context
   ctx check                    Read-only audit against the nearest .ctx file
+  ctx skills                   Read-only potential-Copilot-skill discovery
+                               inventory (filesystem/configuration based)
   ctx clear                   Clear the currently active context
   ctx clear --all             Remove the current context home and generated
                                project artifacts next to the nearest .ctx file
@@ -212,7 +214,7 @@ _ctx_print_status() {
         # record, never the raw selector: a stale/mismatched
         # AI_CTX_PROFILES_COPILOT_MODE without a matching activation is not
         # reported as active.
-        printf 'Mode: %s\n' "$_ctx_active_mode"
+        printf 'Mode: %s\n' "$(_ctx_mode_label "$_ctx_active_mode")"
         if [ "$_ctx_active_mode" != "synthetic-home" ]; then
             printf 'COPILOT_SKILLS_DIRS=%s\n' "${COPILOT_SKILLS_DIRS:-<unset>}"
         fi
@@ -491,6 +493,7 @@ ctx() {
         -h|--help) _ctx_usage; return 0 ;;
         current) _ctx_current; return 0 ;;
         check) _ctx_check; return $? ;;
+        skills) _ctx_skills; return 0 ;;
         clear) _ctx_clear "$2"; return $? ;;
         load)
             if [ -z "${2:-}" ]; then
@@ -595,6 +598,7 @@ ctx() {
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$dirs_csv" AI_CTX_PROFILES
     # Publish the session record only after a fully successful activation.
     _ctx_set_active_record "$mode"
+    _ctx_warn_global_user_copilot_home "$mode"
     if [ -n "$old_ephemeral_home" ]; then
         _ctx_report_retained_ephemeral_home "$old_ephemeral_home"
     fi
@@ -851,6 +855,29 @@ _ctx_validate_copilot_mode() {
             return 1 ;;
     esac
     printf '%s\n' "$mode"
+}
+
+_ctx_mode_label() {
+    # Maps a mode selector value to its user-facing letter/name label used by
+    # ctx current and ctx check: A — synthetic-home, B — global-user,
+    # C — ephemeral-clean. Selector values themselves are unchanged.
+    case "$1" in
+        synthetic-home) printf 'A — synthetic-home\n' ;;
+        global-user) printf 'B — global-user\n' ;;
+        ephemeral-clean) printf 'C — ephemeral-clean\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+_ctx_warn_global_user_copilot_home() {
+    # Mode B never sets, unsets, or otherwise changes COPILOT_HOME; it only
+    # reads the existing value (including empty) to warn that it is preserved.
+    # Emitted to stderr after a successful Mode B activation only — never in
+    # Modes A/C, on a failed activation, or from read-only commands.
+    # $1: the mode that actually activated.
+    if [ "$1" = "global-user" ] && [ -n "${COPILOT_HOME+x}" ]; then
+        printf 'ctx: warning: global-user mode preserves the existing COPILOT_HOME: "%s". This may point to a synthetic home from a previous ctx activation.\n' "$COPILOT_HOME" >&2
+    fi
 }
 
 _ctx_compute_skills_dirs_csv() {
@@ -1369,6 +1396,7 @@ _ctx_load_ctx_file() {
     _ctx_auto_load_home_override="$_ctx_parsed_home"
     # Publish the session record only after a fully successful activation.
     _ctx_set_active_record "$mode"
+    _ctx_warn_global_user_copilot_home "$mode"
     if [ -n "$old_ephemeral_home" ]; then
         _ctx_report_retained_ephemeral_home "$old_ephemeral_home"
     fi
@@ -1468,12 +1496,12 @@ _ctx_check() {
     fi
     if [ -n "$recorded_mode" ]; then
         if ! selector_mode="$(_ctx_validate_copilot_mode)"; then
-            printf 'CHECK FAIL COPILOT_MODE: invalid selector "%s" (allowed values: synthetic-home, global-user, ephemeral-clean), recorded active mode %s\n' "${AI_CTX_PROFILES_COPILOT_MODE:-}" "$recorded_mode"
+            printf 'CHECK FAIL COPILOT_MODE: invalid selector "%s" (allowed values: synthetic-home, global-user, ephemeral-clean), recorded active mode %s\n' "${AI_CTX_PROFILES_COPILOT_MODE:-}" "$(_ctx_mode_label "$recorded_mode")"
             failures=$((failures+1))
         elif [ "$selector_mode" = "$recorded_mode" ]; then
-            printf 'CHECK PASS COPILOT_MODE: recorded %s matches selector\n' "$recorded_mode"
+            printf 'CHECK PASS COPILOT_MODE: recorded %s matches selector\n' "$(_ctx_mode_label "$recorded_mode")"
         else
-            printf 'CHECK FAIL COPILOT_MODE: selector %s does not match recorded active mode %s\n' "$selector_mode" "$recorded_mode"
+            printf 'CHECK FAIL COPILOT_MODE: selector %s does not match recorded active mode %s\n' "$selector_mode" "$(_ctx_mode_label "$recorded_mode")"
             failures=$((failures+1))
         fi
     else
@@ -1659,6 +1687,228 @@ PYEOF
     printf 'ctx check: FAIL (%s)\n' "$failures"; return 1
 }
 
+# --- ctx skills: read-only skill-discovery inventory ----------------------
+# `ctx skills` is a filesystem/configuration-based, strictly read-only
+# inventory of the skill directories Copilot might discover. It is explicitly
+# an inventory of *potential* discovery locations — it never claims a skill is
+# loaded or invoked, and it never modifies settings, files, or the
+# environment. Each candidate path is reported with a single classification
+# (precedence: ctx-profile > expected-home > external) while all origins are
+# retained. No Copilot CLI probe is performed.
+
+_ctx_skills_normalize() {
+    # Canonicalizes a candidate path for deduplication using platform-
+    # appropriate rules without requiring the path to exist. Prefers GNU
+    # realpath -m when available; otherwise falls back to the python3/python
+    # stdlib (os.path.abspath + os.path.normpath), matching the repo's other
+    # python-based helpers, so macOS/BSD and minimal systems that lack GNU
+    # realpath are covered without a hard dependency. Prints the normalized
+    # path, or nothing + 1 when it cannot be normalized.
+    local path="$1" normalized="" python_bin=""
+    [ -n "$path" ] || return 1
+    if command -v realpath >/dev/null 2>&1; then
+        normalized="$(realpath -m -- "$path" 2>/dev/null)" || normalized=""
+        [ -n "$normalized" ] && { printf '%s\n' "$normalized"; return 0; }
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python_bin="python3"
+    elif command -v python >/dev/null 2>&1; then
+        python_bin="python"
+    fi
+    if [ -n "$python_bin" ]; then
+        normalized="$(printf '%s\n' "$path" | "$python_bin" -c 'import os,sys; sys.stdout.write(os.path.abspath(os.path.normpath(sys.stdin.read().strip())))')" || return 1
+        [ -n "$normalized" ] || return 1
+        printf '%s\n' "$normalized"
+        return 0
+    fi
+    return 1
+}
+
+_ctx_skills_plugin_skill_dirs() {
+    # Prints existing skill-directory paths under an installed-plugins root:
+    # <root>/*/skills and <root>/*/.github/skills, one per line. Only actual,
+    # observable directories are printed; the plugins root itself is never
+    # reported as a skill directory.
+    local root="$1" plugin
+    [ -d "$root" ] || return 0
+    while IFS= read -r plugin; do
+        [ -n "$plugin" ] || continue
+        [ -d "$plugin/skills" ] && printf '%s\n' "$plugin/skills"
+        [ -d "$plugin/.github/skills" ] && printf '%s\n' "$plugin/.github/skills"
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
+}
+
+_ctx_skills_add() {
+    # $1: origin (ctx-profile | expected-home | external)
+    # $2: raw path
+    # $3: "configured" flag — when 1 the path is reportable as missing when
+    #     it does not exist (configured/expected locations); default discovery
+    #     locations that do not exist are simply absent from the inventory.
+    local origin="$1" raw="$2" configured="${3:-0}" key
+    [ -n "$raw" ] || return 0
+    key="$(_ctx_skills_normalize "$raw")" || return 0
+    if [ -n "${_CTX_SKILLS_ORIGINS[$key]+set}" ]; then
+        case ",${_CTX_SKILLS_ORIGINS[$key]}," in
+            *",$origin,"*) : ;;
+            *) _CTX_SKILLS_ORIGINS[$key]="${_CTX_SKILLS_ORIGINS[$key]},$origin" ;;
+        esac
+    else
+        _CTX_SKILLS_ORIGINS[$key]="$origin"
+        _CTX_SKILLS_PATHS+=("$key")
+    fi
+    if [ "$configured" = "1" ]; then
+        _CTX_SKILLS_REPORT[$key]=1
+    fi
+}
+
+_ctx_skills_origins_csv() {
+    # Prints the deduplicated, alphabetically-sorted origins of a path as a
+    # comma-joined CSV. Alphabetical order of the three origin tokens equals
+    # the precedence order (ctx-profile > expected-home > external), so the
+    # first token is the classification.
+    local path="$1"
+    printf '%s\n' "${_CTX_SKILLS_ORIGINS[$path]}" | tr ',' '\n' | sort -u | paste -sd, -
+}
+
+_ctx_skills_read_skill_directories() {
+    # Prints each non-empty string entry of a settings file's
+    # "skillDirectories" array, one per line. Read-only: never prints other
+    # settings content or secrets. Returns 0 even on missing/unparseable
+    # content so the inventory never fails on a bad settings file.
+    local settings_file="$1" python_bin=""
+    [ -f "$settings_file" ] || return 0
+    if command -v python3 >/dev/null 2>&1; then
+        python_bin="python3"
+    elif command -v python >/dev/null 2>&1; then
+        python_bin="python"
+    else
+        return 0
+    fi
+    "$python_bin" - "$settings_file" <<'PYEOF'
+import json
+import sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    dirs = data.get("skillDirectories") if isinstance(data, dict) else None
+    if isinstance(dirs, list):
+        for d in dirs:
+            if isinstance(d, str) and d.strip():
+                print(d)
+except Exception:
+    pass
+PYEOF
+}
+
+_ctx_skills() {
+    # Bookkeeping is local to this function so the read-only diagnostic can
+    # never overwrite a caller's _CTX_SKILLS_* variables (bash and zsh both
+    # provide dynamic scoping, so the helpers below can read these locals).
+    local -A _CTX_SKILLS_ORIGINS
+    local -a _CTX_SKILLS_PATHS
+    local -A _CTX_SKILLS_REPORT
+
+    printf '[ctx skills] potential Copilot skill discovery — inventory only; ctx does not claim these skills are loaded or invoked\n'
+
+    # Active context/profile skill dirs are ctx-owned and attributable only
+    # while the session activation record still matches the current
+    # environment; otherwise attribution is unknown and ctx-owned paths are
+    # not guessed.
+    if _ctx_active_record_matches; then
+        local d
+        while IFS= read -r d || [ -n "$d" ]; do
+            [ -n "$d" ] && _ctx_skills_add ctx-profile "$d/.github/skills" 0
+        done < <(printf '%s' "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" | tr ',' '\n')
+    else
+        printf '[ctx skills] unknown: no matching ctx session activation record; ctx-owned paths are not guessed\n'
+    fi
+
+    # Expected <COPILOT_HOME>/skills (configured/expected; reportable missing).
+    if [ -n "${COPILOT_HOME+x}" ] && [ -n "$COPILOT_HOME" ]; then
+        _ctx_skills_add expected-home "$COPILOT_HOME/skills" 1
+    fi
+
+    # Personal discovery locations (default, not configured).
+    _ctx_skills_add external "${CTX_COPILOT_DIR:-$HOME/.copilot}/skills" 0
+    _ctx_skills_add external "$HOME/.agents/skills" 0
+
+    # Repository discovery locations in the current directory and applicable
+    # ancestors.
+    local dir="$PWD"
+    while : ; do
+        _ctx_skills_add external "$dir/.github/skills" 0
+        _ctx_skills_add external "$dir/.agents/skills" 0
+        _ctx_skills_add external "$dir/.claude/skills" 0
+        [ "$dir" = "/" ] && break
+        dir="$(dirname "$dir")"
+    done
+
+    # COPILOT_SKILLS_DIRS entries (configured; reportable missing).
+    if [ -n "${COPILOT_SKILLS_DIRS+x}" ] && [ -n "$COPILOT_SKILLS_DIRS" ]; then
+        local d2
+        while IFS= read -r d2 || [ -n "$d2" ]; do
+            [ -n "$d2" ] && _ctx_skills_add external "$d2" 1
+        done < <(printf '%s' "$COPILOT_SKILLS_DIRS" | tr ',' '\n')
+    fi
+
+    # Configured "skillDirectories" in relevant Copilot settings files
+    # (configured; reportable missing). Read-only.
+    local sfd settings_file
+    for settings_file in "${CTX_COPILOT_DIR:-$HOME/.copilot}/settings.json" \
+                         "${COPILOT_HOME:+$COPILOT_HOME/settings.json}" \
+                         "$HOME/.github/copilot/settings.json"; do
+        [ -n "$settings_file" ] || continue
+        while IFS= read -r sfd || [ -n "$sfd" ]; do
+            [ -n "$sfd" ] && _ctx_skills_add external "$sfd" 1
+        done < <(_ctx_skills_read_skill_directories "$settings_file")
+    done
+    dir="$PWD"
+    while : ; do
+        while IFS= read -r sfd || [ -n "$sfd" ]; do
+            [ -n "$sfd" ] && _ctx_skills_add external "$sfd" 1
+        done < <(_ctx_skills_read_skill_directories "$dir/.github/copilot/settings.json")
+        [ "$dir" = "/" ] && break
+        dir="$(dirname "$dir")"
+    done
+
+    # Detectable additional-directory mechanisms and installed-plugin skill
+    # paths: only actual, observable skill directories under installed
+    # plugins are reported (a plugins root itself is never a skill
+    # directory).
+    local plugin_root plugin_skill
+    for plugin_root in "${CTX_COPILOT_DIR:-$HOME/.copilot}/installed-plugins" \
+                       "${COPILOT_HOME:+$COPILOT_HOME/installed-plugins}"; do
+        [ -n "$plugin_root" ] || continue
+        while IFS= read -r plugin_skill || [ -n "$plugin_skill" ]; do
+            [ -n "$plugin_skill" ] && _ctx_skills_add external "$plugin_skill" 0
+        done < <(_ctx_skills_plugin_skill_dirs "$plugin_root")
+    done
+
+    # Report candidates (existing paths) first, then configured-but-missing
+    # paths, both in sorted order. Do not fail on missing/inaccessible paths.
+    local sorted path origins_csv classification
+    sorted="$(printf '%s\n' "${_CTX_SKILLS_PATHS[@]}" | sort -u)"
+    if [ -n "$sorted" ]; then
+        while IFS= read -r path || [ -n "$path" ]; do
+            [ -n "$path" ] || continue
+            origins_csv="$(_ctx_skills_origins_csv "$path")"
+            [ -n "$origins_csv" ] || continue
+            classification="${origins_csv%%,*}"
+            if [ -d "$path" ]; then
+                printf '[ctx skills] candidate: %s (classification: %s, origins: %s)\n' "$path" "$classification" "$origins_csv"
+            elif [ -n "${_CTX_SKILLS_REPORT[$path]+set}" ]; then
+                printf '[ctx skills] missing: %s (classification: %s, origins: %s)\n' "$path" "$classification" "$origins_csv"
+            fi
+        done <<< "$sorted"
+    else
+        printf '[ctx skills] (no candidate skill directories found)\n'
+    fi
+
+    printf '[ctx skills] not observable: command-line arguments of another Copilot process\n'
+    printf '[ctx skills] not observable: skill locations inside installed Copilot plugins beyond their detectable skills/ and .github/skills subdirectories\n'
+    printf '[ctx skills] not observable: which skills Copilot actually loads or invokes (no Copilot CLI probe performed)\n'
+}
+
 # --- Shell integration (completion + chdir hooks) -----------------------
 
 _ctx_list_subdirs() {
@@ -1680,7 +1930,7 @@ if [ -n "${ZSH_VERSION:-}" ]; then
         elif [ "${#words_arr[@]}" -le 2 ]; then
             local -a profiles
             profiles=("${(f)$(_ctx_list_subdirs "$root/profiles")}")
-            compadd current clear load -- "${profiles[@]}"
+            compadd current clear skills load -- "${profiles[@]}"
         else
             local -a shared
             shared=("${(f)$(_ctx_list_subdirs "$root/profiles")}")
@@ -1704,7 +1954,7 @@ elif [ -n "${BASH_VERSION:-}" ]; then
         cur="${COMP_WORDS[COMP_CWORD]}"
 
         if [ "$COMP_CWORD" -eq 1 ]; then
-            mapfile -t COMPREPLY < <(compgen -W "current clear load $(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
+            mapfile -t COMPREPLY < <(compgen -W "current clear skills load $(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
         elif [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "clear" ]; then
             mapfile -t COMPREPLY < <(compgen -W "--all" -- "$cur")
         elif [ "$COMP_CWORD" -ge 2 ] && [ "${COMP_WORDS[1]}" = "load" ]; then

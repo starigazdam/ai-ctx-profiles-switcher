@@ -132,6 +132,7 @@ ctx coding azure                # "coding" profile + "azure" profile
 ctx review dotnet security      # profile + multiple profiles
 ctx current                   # show the active profile/profiles/env vars
 ctx check                     # read-only audit against the nearest .ctx file
+ctx skills                    # read-only potential-Copilot-skill discovery inventory
 ctx clear                     # unset AI_CTX_PROFILES / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
 ctx clear --all                 # remove the current context home and generated artifacts
 ctx load /path/to/.ctx          # explicitly load any .ctx file (bypasses noautoload)
@@ -147,7 +148,7 @@ Profile : review
 Profiles: dotnet, security
 
 AI_CTX_PROFILES=review+dotnet+security
-Mode: synthetic-home
+Mode: A — synthetic-home
 
 COPILOT_HOME=/home/user/.config/ctx/homes/review+dotnet+security
 
@@ -236,12 +237,45 @@ context.
 Setting `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` makes Copilot CLI load custom
 instructions from your `.ctx` entries, but it does **not** make it discover
 [agent skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
-stored in those directories on its own. `ctx` solves this with genuine
-per-folder, session-isolated skill discovery via the `COPILOT_HOME`
-environment variable, which Copilot CLI respects as a full replacement for
-`~/.copilot`. Mode A does this through the synthetic `COPILOT_HOME` tree
-below; Modes B/C instead export `COPILOT_SKILLS_DIRS` (see
-[Integration modes](#integration-modes)).
+stored in those directories on its own. Mode A projects the selected profiles'
+`.github/skills` directories into the synthetic `<COPILOT_HOME>/skills` tree so
+those skills are what Copilot CLI — which respects `COPILOT_HOME` as a full
+replacement for `~/.copilot` — sees under this context. That projection is not
+a complete skill-discovery or security sandbox: other built-in or configured
+discovery locations (personal `~/.agents/skills`, repository `.github/skills` /
+`.claude/skills`, `COPILOT_SKILLS_DIRS`, or configured `skillDirectories`) may
+still be discovered by Copilot and are not blocked. Modes B/C instead export
+`COPILOT_SKILLS_DIRS` (see [Integration modes](#integration-modes)).
+
+#### Inspecting potential skill discovery with `ctx skills`
+
+`ctx skills` is a strictly read-only, filesystem/configuration-based inventory
+of the skill directories Copilot *might* discover in the current shell and
+project. It never claims a skill is loaded or invoked — discovering a
+directory is not the same as Copilot loading it — and it never modifies
+settings, files, or the environment, and it never invokes the Copilot CLI
+(no probe is performed). Each candidate is reported with its normalized path,
+a single classification, and all of its origins:
+
+- **`ctx-profile`** — `.github/skills` of the active context/profile entries
+  (attributable only while the session activation record matches; otherwise
+  attribution is reported as unknown and ctx-owned paths are not guessed).
+- **`expected-home`** — the expected `<COPILOT_HOME>/skills` directory when
+  `COPILOT_HOME` is set.
+- **`external`** — everything else: personal `~/.copilot/skills` and
+  `~/.agents/skills`, repository `.github/skills` / `.agents/skills` /
+  `.claude/skills` in the current directory and ancestors, `COPILOT_SKILLS_DIRS`
+  entries, configured `skillDirectories` in relevant Copilot settings files,
+  and detectable `skills` / `.github/skills` directories under installed
+  Copilot plugins.
+
+A path found through several sources is reported once, classified by
+precedence `ctx-profile > expected-home > external`, while all origins are
+listed. Configured-but-missing or inaccessible paths are reported cleanly
+without failing. The inventory explicitly discloses what a filesystem/config
+diagnostic cannot observe (notably another Copilot process's command-line
+arguments and plugin-internal skill locations beyond detectable
+`skills`/`.github/skills` subdirectories).
 
 ### Integration modes
 
@@ -250,7 +284,10 @@ case-sensitive `AI_CTX_PROFILES_COPILOT_MODE` environment variable. There is
 no CLI flag and no `.ctx` mode line. The selector is read once per actual
 activation (manual `ctx <profile>...`, `ctx load`, or a real `.ctx`
 auto-load); an invalid non-empty value errors out before any state change.
-Unset or empty means Mode A — today's behavior:
+Unset or empty means Mode A — today's behavior. The selector values are
+unchanged; `ctx current` and `ctx check` report the active mode using the
+consistent letter/name labels `A — synthetic-home`, `B — global-user`, and
+`C — ephemeral-clean`:
 
 | Selector | Mode | `COPILOT_HOME` |
 |----------|------|----------------|
@@ -329,6 +366,20 @@ unset COPILOT_HOME            # bash/zsh
 Remove-Item Env:COPILOT_HOME  # PowerShell
 ```
 
+After each successful Mode B activation (manual `ctx <profile>...`, explicit
+`ctx load`, or a real `.ctx` auto-load), if `COPILOT_HOME` is present in the
+environment (including when it is empty), `ctx` prints a warning on stderr
+naming the preserved value — the value itself is never changed:
+
+```
+ctx: warning: global-user mode preserves the existing COPILOT_HOME: "/path/to/home". This may point to a synthetic home from a previous ctx activation.
+```
+
+The warning is informational only: Mode B reads `COPILOT_HOME` to report and
+warn about it, but never modifies it. No warning is emitted when the variable
+is absent, in Modes A/C, on a failed activation, or from read-only commands
+such as `ctx current` / `ctx check`.
+
 Mode B sets/replaces `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` and
 `COPILOT_SKILLS_DIRS` from the active resolved directories.
 `COPILOT_SKILLS_DIRS` lists existing `<entry>/.github/skills` paths only,
@@ -381,8 +432,11 @@ and exports `COPILOT_HOME` to point at it:
   settings, MCP servers, and session history all keep working identically
   to today, shared across every context.
 - **`skills/`** is context-local and populated only with symlinks to each
-  resolved directory's `.github/skills/*` subfolders — every context sees
-  exactly its own skills and nothing else. No bleed between projects.
+  resolved directory's `.github/skills/*` subfolders, so this context projects
+  exactly the selected profiles' skills. This controls the synthetic
+  `COPILOT_HOME` view only — it does not hide or block other built-in or
+  configured skill locations Copilot may discover, and it is not a security
+  sandbox.
 - Reactivating a context (re-`cd`-ing into a `.ctx` dir, or re-running
   `ctx <profile>`) is idempotent: unchanged symlinks are left alone, stale
   skill symlinks (from a profile's skill set that has since changed) are
