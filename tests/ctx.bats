@@ -1272,7 +1272,7 @@ EOF
     run ctx current
     [ "$status" -eq 0 ]
     local current_unset="$output"
-    [[ "$current_unset" == *"Mode: synthetic-home"* ]]
+    [[ "$current_unset" == *"Mode: A — synthetic-home"* ]]
 
     _ctx_clear >/dev/null
     export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
@@ -1280,7 +1280,7 @@ EOF
     run ctx current
     [ "$status" -eq 0 ]
     local current_explicit="$output"
-    [[ "$current_explicit" == *"Mode: synthetic-home"* ]]
+    [[ "$current_explicit" == *"Mode: A — synthetic-home"* ]]
     [ "$current_explicit" = "$current_unset" ]
 
     unset AI_CTX_PROFILES_COPILOT_MODE
@@ -1562,6 +1562,77 @@ EOF
     [ ! -e "$workspace" ]
 }
 
+@test "Mode B: preserved-COPILOT_HOME warning fires on success, never otherwise" {
+    _make_profile review review-skill
+    local warning="global-user mode preserves the existing COPILOT_HOME"
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    # (a) COPILOT_HOME unset -> no warning
+    unset COPILOT_HOME
+    ctx review >"$TEST_TMP/warn-unset.out" 2>"$TEST_TMP/warn-unset.err"
+    [ -z "${COPILOT_HOME:-}" ]
+    [[ "$(<"$TEST_TMP/warn-unset.err")" != *"$warning"* ]]
+
+    # (b) COPILOT_HOME present -> exact template on stderr, value untouched
+    export COPILOT_HOME="$TEST_TMP/custom-home"
+    ctx review >"$TEST_TMP/warn-set.out" 2>"$TEST_TMP/warn-set.err"
+    [ "$COPILOT_HOME" = "$TEST_TMP/custom-home" ]
+    [ "$(<"$TEST_TMP/warn-set.err")" = 'ctx: warning: global-user mode preserves the existing COPILOT_HOME: "'"$TEST_TMP/custom-home"'". This may point to a synthetic home from a previous ctx activation.' ]
+
+    # (c) COPILOT_HOME present but empty -> warning with empty quotes
+    export COPILOT_HOME=""
+    ctx review >"$TEST_TMP/warn-empty.out" 2>"$TEST_TMP/warn-empty.err"
+    [ "${COPILOT_HOME+x}" = "x" ]
+    [ "$(<"$TEST_TMP/warn-empty.err")" = 'ctx: warning: global-user mode preserves the existing COPILOT_HOME: "". This may point to a synthetic home from a previous ctx activation.' ]
+
+    # (d) Modes A and C -> no warning
+    export COPILOT_HOME="$TEST_TMP/still-set"
+    export AI_CTX_PROFILES_COPILOT_MODE=synthetic-home
+    ctx review >"$TEST_TMP/warn-a.out" 2>"$TEST_TMP/warn-a.err"
+    [[ "$(<"$TEST_TMP/warn-a.err")" != *"$warning"* ]]
+    export AI_CTX_PROFILES_COPILOT_MODE=ephemeral-clean
+    ctx review >"$TEST_TMP/warn-c.out" 2>"$TEST_TMP/warn-c.err"
+    [[ "$(<"$TEST_TMP/warn-c.err")" != *"$warning"* ]]
+
+    # (e) failed activation -> no warning
+    export AI_CTX_PROFILES_COPILOT_MODE=bogus
+    local status=0
+    ctx review >"$TEST_TMP/warn-fail.out" 2>"$TEST_TMP/warn-fail.err" || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/warn-fail.err")" != *"$warning"* ]]
+
+    # (f) explicit ctx load under Mode B with COPILOT_HOME present -> warning
+    local proj="$TEST_TMP/project-b-warn"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    export COPILOT_HOME="$TEST_TMP/load-home"
+    ctx load "$proj/.ctx" >"$TEST_TMP/warn-load.out" 2>"$TEST_TMP/warn-load.err"
+    [ "$COPILOT_HOME" = "$TEST_TMP/load-home" ]
+    [[ "$(<"$TEST_TMP/warn-load.err")" == *"global-user mode preserves the existing COPILOT_HOME: \"$TEST_TMP/load-home\""* ]]
+
+    # (g) read-only commands never warn: ctx current / ctx check emit no warning
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"$warning"* ]]
+    cd "$proj"
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"$warning"* ]]
+
+    # (h) .ctx auto-load under Mode B with COPILOT_HOME present -> warning
+    local proj_auto="$TEST_TMP/project-b-warn-auto"
+    mkdir -p "$proj_auto"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj_auto/.ctx"
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    export COPILOT_HOME="$TEST_TMP/auto-home"
+    _ctx_auto_load_dir=""
+    cd "$proj_auto"
+    _ctx_auto_load_hook >"$TEST_TMP/warn-auto.out" 2>"$TEST_TMP/warn-auto.err"
+    [ "$COPILOT_HOME" = "$TEST_TMP/auto-home" ]
+    [[ "$(<"$TEST_TMP/warn-auto.err")" == *"global-user mode preserves the existing COPILOT_HOME: \"$TEST_TMP/auto-home\""* ]]
+}
+
 @test "Mode B: COPILOT_SKILLS_DIRS is unset (not empty) when no skills dirs exist" {
     _make_profile review
     export AI_CTX_PROFILES_COPILOT_MODE=global-user
@@ -1771,13 +1842,13 @@ EOF
 
     run ctx current
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Mode: ephemeral-clean"* ]]
-    [[ "$output" != *"Mode: global-user"* ]]
+    [[ "$output" == *"Mode: C — ephemeral-clean"* ]]
+    [[ "$output" != *"Mode: B — global-user"* ]]
 
     run ctx check
     [ "$status" -ne 0 ]
     [[ "$output" == *"CHECK FAIL COPILOT_MODE"* ]]
-    [[ "$output" == *"does not match recorded active mode ephemeral-clean"* ]]
+    [[ "$output" == *"does not match recorded active mode C — ephemeral-clean"* ]]
 
     # clear uses the recorded Mode C: unsets COPILOT_HOME, retains the path
     ctx clear >"$TEST_TMP/clear-54.out" 2>&1
@@ -1797,8 +1868,8 @@ EOF
 
     run ctx current
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Mode: global-user"* ]]
-    [[ "$output" != *"Mode: ephemeral-clean"* ]]
+    [[ "$output" == *"Mode: B — global-user"* ]]
+    [[ "$output" != *"Mode: C — ephemeral-clean"* ]]
 
     run ctx check
     [ "$status" -ne 0 ]
@@ -2236,6 +2307,185 @@ EOF
     run ctx check
     [ "$status" -ne 0 ]
     [[ "$output" == *"CHECK FAIL COPILOT_SKILLS_DIRS"* ]]
+}
+
+# --- Group 7: ctx skills (read-only potential-skill-discovery inventory) ---
+# `ctx skills` inventories candidate skill directories from the filesystem and
+# configuration. It never claims skills are loaded/invoked, never invokes the
+# Copilot CLI, and never modifies settings, files, or the environment. Each
+# candidate carries one classification (precedence: ctx-profile >
+# expected-home > external) while all origins are retained.
+
+@test "ctx skills: read-only inventory of candidate skill dirs with origins, dedup, and missing paths" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-skills-inventory"
+    mkdir -p "$proj" "$proj/.github/copilot" "$proj/.agents/skills/custom" "$proj/.github/skills/repo-skill" "$proj/.claude/skills/claude-skill"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+
+    # Active Mode A context so ctx-owned provenance is attributable.
+    ctx load "$proj/.ctx" >/dev/null
+    local home_skills="$COPILOT_HOME/skills"
+    [ -d "$home_skills" ]
+
+    # Configured entries: COPILOT_SKILLS_DIRS (one existing, one missing) and
+    # skillDirectories in a repo settings file (one existing skill dir, one
+    # missing), plus an observable installed-plugin skills subdir. The
+    # existing COPILOT_SKILLS_DIRS entry is a dot-segment alias of the active
+    # profile skills dir so the row is deduplicated by normalization, not by
+    # string equality.
+    local profile_skills="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills"
+    # COPILOT_SKILLS_DIRS lists a dot-segment alias of the active profile
+    # skills dir, the repo .github/skills dir itself, and a missing dir, so
+    # one row must retain multiple distinct source origins (including two
+    # external-class origins).
+    export COPILOT_SKILLS_DIRS="${profile_skills%/skills}/./skills,$proj/.github/skills,$TEST_TMP/missing-skills-dir"
+    printf '{"skillDirectories":["%s/review-skill","%s/missing-from-settings"]}\n' "$profile_skills" "$TEST_TMP" > "$proj/.github/copilot/settings.json"
+    mkdir -p "$CTX_COPILOT_DIR/installed-plugins/my-plugin/skills/pskill" "$CTX_COPILOT_DIR/installed-plugins/no-skill"
+
+    local before_env
+    before_env="$(printf '%s|%s|%s|%s' "$AI_CTX_PROFILES" "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" "$COPILOT_HOME" "${COPILOT_SKILLS_DIRS:-}")"
+
+    run ctx skills
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[ctx skills] potential Copilot skill discovery"* ]]
+    [[ "$output" == *"ctx does not claim these skills are loaded or invoked"* ]]
+
+    # ctx-profile candidate from the active profile appears once, retaining
+    # the distinct external-class origin from COPILOT_SKILLS_DIRS (dedup via
+    # normalization of the dot-segment alias), with ctx-profile winning as the
+    # classification. Exactly one row is proven by counting the exact line,
+    # not merely by matching a row.
+    [[ "$output" == *"candidate: $profile_skills (classification: ctx-profile, origins: copilot-skill-dirs,ctx-profile)"* ]]
+    local profile_skills_row="[ctx skills] candidate: $profile_skills (classification: ctx-profile, origins: copilot-skill-dirs,ctx-profile)"
+    local profile_skills_count
+    profile_skills_count="$(grep -cxF -- "$profile_skills_row" <<<"$output")"
+    [ "$profile_skills_count" -eq 1 ]
+
+    # expected-home candidate (the active Mode A COPILOT_HOME/skills).
+    [[ "$output" == *"candidate: $home_skills (classification: expected-home, origins: expected-home)"* ]]
+
+    # external candidates: repo .github/skills (found by repository discovery
+    # AND COPILOT_SKILLS_DIRS -> two external-class origins), .agents/skills,
+    # and .claude/skills, plugin skill dir, configured skillDirectories entry
+    # that exists.
+    [[ "$output" == *"candidate: $proj/.github/skills (classification: external, origins: copilot-skill-dirs,repo-github-skills)"* ]]
+    [[ "$output" == *"candidate: $proj/.agents/skills (classification: external, origins: repo-agents-skills)"* ]]
+    [[ "$output" == *"candidate: $proj/.claude/skills (classification: external, origins: repo-claude-skills)"* ]]
+    [[ "$output" == *"candidate: $CTX_COPILOT_DIR/installed-plugins/my-plugin/skills (classification: external, origins: plugin-skills)"* ]]
+    [[ "$output" == *"candidate: $profile_skills/review-skill (classification: external, origins: settings-skill-dirs)"* ]]
+
+    # Configured-but-missing paths are reported, not failed, and the plugins
+    # root itself is never a candidate.
+    [[ "$output" == *"missing: $TEST_TMP/missing-skills-dir (classification: external, origins: copilot-skill-dirs)"* ]]
+    [[ "$output" == *"missing: $TEST_TMP/missing-from-settings (classification: external, origins: settings-skill-dirs)"* ]]
+    [[ "$output" != *"candidate: $CTX_COPILOT_DIR/installed-plugins ("* ]]
+    [[ "$output" != *"candidate: $CTX_COPILOT_DIR/installed-plugins/no-skill ("* ]]
+
+    # Boundary disclosures.
+    [[ "$output" == *"not observable: command-line arguments of another Copilot process"* ]]
+    [[ "$output" == *"not observable: skill locations inside installed Copilot plugins"* ]]
+    [[ "$output" == *"no Copilot CLI probe performed"* ]]
+
+    # Strictly read-only: environment and files are untouched.
+    local after_env
+    after_env="$(printf '%s|%s|%s|%s' "$AI_CTX_PROFILES" "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" "$COPILOT_HOME" "${COPILOT_SKILLS_DIRS:-}")"
+    [ "$after_env" = "$before_env" ]
+    [ -d "$home_skills" ]
+    [ -d "$proj/.github/skills" ]
+    [ -d "$proj/.agents/skills/custom" ]
+    [ -d "$proj/.claude/skills" ]
+    [ -f "$proj/.github/copilot/settings.json" ]
+}
+
+@test "ctx skills: unknown provenance does not guess ctx-owned paths" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-skills-unknown"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+
+    # A context that is set in the environment but has NO matching session
+    # activation record: ctx-owned paths must not be guessed.
+    export AI_CTX_PROFILES=review
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    _ctx_reset_active_record
+
+    run ctx skills
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[ctx skills] unknown: no matching ctx session activation record; ctx-owned paths are not guessed"* ]]
+    [[ "$output" != *"candidate: $AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills"* ]]
+    [[ "$output" != *"classification: ctx-profile"* ]]
+}
+
+@test "ctx skills: normalization works without GNU realpath (python fallback)" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-skills-norealpath"
+    mkdir -p "$proj" "$proj/.agents/skills/custom"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+    ctx load "$proj/.ctx" >/dev/null
+
+    # Shadow realpath so only the portable python fallback can normalize.
+    realpath() { return 1; }
+    export -f realpath
+    run ctx skills
+    unset -f realpath
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"candidate: $proj/.agents/skills (classification: external, origins: repo-agents-skills)"* ]]
+}
+
+@test "ctx skills: python fallback preserves paths with leading/trailing spaces" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-skills-spaces"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+
+    # A configured directory whose name has leading and trailing spaces. With
+    # realpath shadowed only the python fallback normalizes it, and the spaces
+    # must survive transport to python (passed as argv, never stripped).
+    local spaced="$TEST_TMP/ spaced-skill "
+    mkdir -p "$spaced"
+    export COPILOT_SKILLS_DIRS="$spaced"
+
+    realpath() { return 1; }
+    export -f realpath
+    run ctx skills
+    unset -f realpath
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"candidate: $spaced (classification: external, origins: copilot-skill-dirs)"* ]]
+}
+
+@test "ctx skills: caller bookkeeping variables are preserved (no global clobber)" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-skills-preserve"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+
+    # Simulate a caller that already owns these names with plain scalar values
+    # (ctx uses array/associative-array shapes internally). Neither re-sourcing
+    # ctx.sh nor running the read-only diagnostic may overwrite them.
+    _CTX_SKILLS_ORIGINS='caller-origins-sentinel'
+    _CTX_SKILLS_PATHS='caller-paths-sentinel'
+    _CTX_SKILLS_REPORT='caller-report-sentinel'
+    export _CTX_SKILLS_ORIGINS _CTX_SKILLS_PATHS _CTX_SKILLS_REPORT
+
+    # Re-sourcing must not clobber caller state (no top-level declarations).
+    . "$CTX_SRC" >/dev/null 2>&1
+    [ "$_CTX_SKILLS_ORIGINS" = 'caller-origins-sentinel' ]
+    [ "$_CTX_SKILLS_PATHS" = 'caller-paths-sentinel' ]
+    [ "$_CTX_SKILLS_REPORT" = 'caller-report-sentinel' ]
+
+    # Running the read-only diagnostic must not clobber caller state either.
+    local status=0
+    ctx skills >"$TEST_TMP/skills-preserve.out" 2>&1 || status=$?
+    [ "$status" -eq 0 ]
+    [ "$_CTX_SKILLS_ORIGINS" = 'caller-origins-sentinel' ]
+    [ "$_CTX_SKILLS_PATHS" = 'caller-paths-sentinel' ]
+    [ "$_CTX_SKILLS_REPORT" = 'caller-report-sentinel' ]
+    [[ "$(<"$TEST_TMP/skills-preserve.out")" == *"[ctx skills] potential Copilot skill discovery"* ]]
 }
 
 # --- Issue #40: Mode A skill-name collision reconciliation ------------------
