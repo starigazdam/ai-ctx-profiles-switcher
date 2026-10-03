@@ -38,8 +38,8 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 
 #### Scenario: All-canonical Mode A selection sets custom directories empty
 
-- **WHEN** a user activates only canonical profiles under Mode A on a supported runtime (Windows PowerShell 5.1+/pwsh, or Unix pwsh/.NET 9+)
-- **THEN** `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is set to the empty string; on Unix pwsh/.NET 8 and earlier the selection instead fails as specified by the `Unix pwsh all-canonical Mode A guard` requirement
+- **WHEN** a user activates only canonical profiles under Mode A on a supported runtime (Bash/zsh, PowerShell on Windows (Windows PowerShell 5.1 or pwsh), or Unix pwsh running .NET 9+)
+- **THEN** `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is set to the empty string; on Unix pwsh running .NET 8 and earlier the selection instead fails as specified by the `Unix pwsh all-canonical Mode A guard` requirement
 
 ## ADDED Requirements
 
@@ -57,8 +57,8 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 
 #### Scenario: Root AGENTS.md selects canonical profile mode
 
-- **WHEN** a selected profile has a root-level `AGENTS.md` and is activated in Mode A
-- **THEN** its source bytes are projected with the specified header and filename, and its root is omitted from `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+- **WHEN** a selected profile has a root-level `AGENTS.md`, is activated in Mode A, and the selection passes the `Unix pwsh all-canonical Mode A guard`
+- **THEN** its source bytes are projected with the specified header and filename, and its root is omitted from `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`; a canonical-only selection on Unix pwsh running .NET 8 and earlier instead fails before mutation
 
 #### Scenario: Projection label uses the safe context-name form
 
@@ -67,7 +67,7 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 
 #### Scenario: Projection bytes and line endings are stable across shells
 
-- **WHEN** Bash/zsh or PowerShell projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
+- **WHEN** Bash/zsh, PowerShell on Windows, or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
 - **THEN** the output bytes equal the fixed LF header followed by the source bytes unchanged
 
 #### Scenario: Canonical profiles discover only valid canonical skills
@@ -83,7 +83,7 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 #### Scenario: Canonical and legacy profiles can be mixed in order
 
 - **WHEN** a user activates canonical and legacy profiles together in Mode A
-- **THEN** each profile uses its own instruction and skill source, while the activation preserves the requested profile order
+- **THEN** each profile uses its own instruction and skill source, while the activation preserves the requested profile order; this includes mixed selections on Unix pwsh running .NET 8 and earlier, where the required custom-directories value is non-empty
 
 #### Scenario: Projection directory links fail without external writes
 
@@ -122,7 +122,7 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 
 ### Requirement: Unix pwsh all-canonical Mode A guard
 
-On Unix (Linux/macOS) PowerShell, all-canonical Mode A — a selection in which every selected profile is canonical and the required `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` value is empty — SHALL be supported only on pwsh running on .NET 9+ (pwsh 7.5+). On pwsh/.NET 8 and earlier, a canonical-only Mode A selection SHALL fail before any environment export, workspace-file write, Copilot-home setup or creation, or projection mutation, preserving the previously active context, with an error stating that all-canonical Mode A requires pwsh/.NET 9+ on Unix. This guard SHALL apply to manual profile activation, explicit `.ctx` loading, and `.ctx` auto-loading. Mixed canonical+legacy selections, whose `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` value is non-empty, SHALL retain their established behavior on Unix pwsh/.NET 8 and earlier, as SHALL legacy-only selections in all modes. This guard SHALL NOT alter the Modes B/C rejection of any canonical selection and SHALL NOT be worked around by a native `setenv` on Unix .NET 8 and earlier.
+On Unix (Linux/macOS) PowerShell, all-canonical Mode A — a selection in which every selected profile is canonical and the required `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` value is empty — SHALL be supported only on pwsh running on .NET 9+. On Unix pwsh running .NET 8 and earlier, a canonical-only Mode A selection SHALL fail before any environment export, workspace-file write, Copilot-home setup or creation, or projection mutation, preserving the previously active context, with an error stating that all-canonical Mode A requires pwsh/.NET 9+ on Unix. This guard SHALL apply to manual profile activation, explicit `.ctx` loading, and `.ctx` auto-loading. Mixed canonical+legacy selections, whose `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` value is non-empty, SHALL retain their established behavior on Unix pwsh/.NET 8 and earlier, as SHALL legacy-only selections in all modes. This guard SHALL NOT alter the Modes B/C rejection of any canonical selection and SHALL NOT be weakened on Unix pwsh/.NET 8 and earlier.
 
 #### Scenario: Unix pwsh/.NET 8 and earlier reject all-canonical Mode A before mutation
 
