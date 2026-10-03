@@ -1702,8 +1702,10 @@ _ctx_skills_normalize() {
     # realpath -m when available; otherwise falls back to the python3/python
     # stdlib (os.path.abspath + os.path.normpath), matching the repo's other
     # python-based helpers, so macOS/BSD and minimal systems that lack GNU
-    # realpath are covered without a hard dependency. Prints the normalized
-    # path, or nothing + 1 when it cannot be normalized.
+    # realpath are covered without a hard dependency. The path is passed to
+    # python as argv (never via stdin) so leading/trailing spaces in the path
+    # itself are preserved. Prints the normalized path, or nothing + 1 when it
+    # cannot be normalized.
     local path="$1" normalized="" python_bin=""
     [ -n "$path" ] || return 1
     if command -v realpath >/dev/null 2>&1; then
@@ -1716,7 +1718,7 @@ _ctx_skills_normalize() {
         python_bin="python"
     fi
     if [ -n "$python_bin" ]; then
-        normalized="$(printf '%s\n' "$path" | "$python_bin" -c 'import os,sys; sys.stdout.write(os.path.abspath(os.path.normpath(sys.stdin.read().strip())))')" || return 1
+        normalized="$("$python_bin" -c 'import os,sys; sys.stdout.write(os.path.abspath(os.path.normpath(sys.argv[1])))' "$path")" || return 1
         [ -n "$normalized" ] || return 1
         printf '%s\n' "$normalized"
         return 0
@@ -1739,7 +1741,10 @@ _ctx_skills_plugin_skill_dirs() {
 }
 
 _ctx_skills_add() {
-    # $1: origin (ctx-profile | expected-home | external)
+    # $1: origin label — a distinct source token such as ctx-profile,
+    #     expected-home, copilot-skill-dirs, settings-skill-dirs,
+    #     personal-copilot, personal-agents, repo-github-skills,
+    #     repo-agents-skills, repo-claude-skills, or plugin-skills.
     # $2: raw path
     # $3: "configured" flag — when 1 the path is reportable as missing when
     #     it does not exist (configured/expected locations); default discovery
@@ -1762,12 +1767,21 @@ _ctx_skills_add() {
 }
 
 _ctx_skills_origins_csv() {
-    # Prints the deduplicated, alphabetically-sorted origins of a path as a
-    # comma-joined CSV. Alphabetical order of the three origin tokens equals
-    # the precedence order (ctx-profile > expected-home > external), so the
-    # first token is the classification.
+    # Prints the deduplicated, alphabetically-sorted origin labels of a path
+    # as a comma-joined CSV. Classification is computed separately by
+    # _ctx_skills_classify (alphabetical order no longer equals precedence).
     local path="$1"
     printf '%s\n' "${_CTX_SKILLS_ORIGINS[$path]}" | tr ',' '\n' | sort -u | paste -sd, -
+}
+
+_ctx_skills_classify() {
+    # $1: comma-joined origin labels. Returns the single classification by
+    # precedence: ctx-profile > expected-home > external (every other source).
+    case ",$1," in
+        *,ctx-profile,*) printf 'ctx-profile\n' ;;
+        *,expected-home,*) printf 'expected-home\n' ;;
+        *) printf 'external\n' ;;
+    esac
 }
 
 _ctx_skills_read_skill_directories() {
@@ -1829,16 +1843,16 @@ _ctx_skills() {
     fi
 
     # Personal discovery locations (default, not configured).
-    _ctx_skills_add external "${CTX_COPILOT_DIR:-$HOME/.copilot}/skills" 0
-    _ctx_skills_add external "$HOME/.agents/skills" 0
+    _ctx_skills_add personal-copilot "${CTX_COPILOT_DIR:-$HOME/.copilot}/skills" 0
+    _ctx_skills_add personal-agents "$HOME/.agents/skills" 0
 
     # Repository discovery locations in the current directory and applicable
     # ancestors.
     local dir="$PWD"
     while : ; do
-        _ctx_skills_add external "$dir/.github/skills" 0
-        _ctx_skills_add external "$dir/.agents/skills" 0
-        _ctx_skills_add external "$dir/.claude/skills" 0
+        _ctx_skills_add repo-github-skills "$dir/.github/skills" 0
+        _ctx_skills_add repo-agents-skills "$dir/.agents/skills" 0
+        _ctx_skills_add repo-claude-skills "$dir/.claude/skills" 0
         [ "$dir" = "/" ] && break
         dir="$(dirname "$dir")"
     done
@@ -1847,7 +1861,7 @@ _ctx_skills() {
     if [ -n "${COPILOT_SKILLS_DIRS+x}" ] && [ -n "$COPILOT_SKILLS_DIRS" ]; then
         local d2
         while IFS= read -r d2 || [ -n "$d2" ]; do
-            [ -n "$d2" ] && _ctx_skills_add external "$d2" 1
+            [ -n "$d2" ] && _ctx_skills_add copilot-skill-dirs "$d2" 1
         done < <(printf '%s' "$COPILOT_SKILLS_DIRS" | tr ',' '\n')
     fi
 
@@ -1859,13 +1873,13 @@ _ctx_skills() {
                          "$HOME/.github/copilot/settings.json"; do
         [ -n "$settings_file" ] || continue
         while IFS= read -r sfd || [ -n "$sfd" ]; do
-            [ -n "$sfd" ] && _ctx_skills_add external "$sfd" 1
+            [ -n "$sfd" ] && _ctx_skills_add settings-skill-dirs "$sfd" 1
         done < <(_ctx_skills_read_skill_directories "$settings_file")
     done
     dir="$PWD"
     while : ; do
         while IFS= read -r sfd || [ -n "$sfd" ]; do
-            [ -n "$sfd" ] && _ctx_skills_add external "$sfd" 1
+            [ -n "$sfd" ] && _ctx_skills_add settings-skill-dirs "$sfd" 1
         done < <(_ctx_skills_read_skill_directories "$dir/.github/copilot/settings.json")
         [ "$dir" = "/" ] && break
         dir="$(dirname "$dir")"
@@ -1880,7 +1894,7 @@ _ctx_skills() {
                        "${COPILOT_HOME:+$COPILOT_HOME/installed-plugins}"; do
         [ -n "$plugin_root" ] || continue
         while IFS= read -r plugin_skill || [ -n "$plugin_skill" ]; do
-            [ -n "$plugin_skill" ] && _ctx_skills_add external "$plugin_skill" 0
+            [ -n "$plugin_skill" ] && _ctx_skills_add plugin-skills "$plugin_skill" 0
         done < <(_ctx_skills_plugin_skill_dirs "$plugin_root")
     done
 
@@ -1893,7 +1907,7 @@ _ctx_skills() {
             [ -n "$path" ] || continue
             origins_csv="$(_ctx_skills_origins_csv "$path")"
             [ -n "$origins_csv" ] || continue
-            classification="${origins_csv%%,*}"
+            classification="$(_ctx_skills_classify "${_CTX_SKILLS_ORIGINS[$path]}")"
             if [ -d "$path" ]; then
                 printf '[ctx skills] candidate: %s (classification: %s, origins: %s)\n' "$path" "$classification" "$origins_csv"
             elif [ -n "${_CTX_SKILLS_REPORT[$path]+set}" ]; then

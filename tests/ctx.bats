@@ -2335,7 +2335,11 @@ EOF
     # profile skills dir so the row is deduplicated by normalization, not by
     # string equality.
     local profile_skills="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills"
-    export COPILOT_SKILLS_DIRS="${profile_skills%/skills}/./skills,$TEST_TMP/missing-skills-dir"
+    # COPILOT_SKILLS_DIRS lists a dot-segment alias of the active profile
+    # skills dir, the repo .github/skills dir itself, and a missing dir, so
+    # one row must retain multiple distinct source origins (including two
+    # external-class origins).
+    export COPILOT_SKILLS_DIRS="${profile_skills%/skills}/./skills,$proj/.github/skills,$TEST_TMP/missing-skills-dir"
     printf '{"skillDirectories":["%s/review-skill","%s/missing-from-settings"]}\n' "$profile_skills" "$TEST_TMP" > "$proj/.github/copilot/settings.json"
     mkdir -p "$CTX_COPILOT_DIR/installed-plugins/my-plugin/skills/pskill" "$CTX_COPILOT_DIR/installed-plugins/no-skill"
 
@@ -2347,13 +2351,13 @@ EOF
     [[ "$output" == *"[ctx skills] potential Copilot skill discovery"* ]]
     [[ "$output" == *"ctx does not claim these skills are loaded or invoked"* ]]
 
-    # ctx-profile candidate from the active profile appears once with the
-    # external origin retained, even though COPILOT_SKILLS_DIRS lists a
-    # dot-segment alias that only normalizes to the same path (dedup), and
-    # ctx-profile wins as the classification. Exactly one row is proven by
-    # counting the exact line, not merely by matching a row.
-    [[ "$output" == *"candidate: $profile_skills (classification: ctx-profile, origins: ctx-profile,external)"* ]]
-    local profile_skills_row="[ctx skills] candidate: $profile_skills (classification: ctx-profile, origins: ctx-profile,external)"
+    # ctx-profile candidate from the active profile appears once, retaining
+    # the distinct external-class origin from COPILOT_SKILLS_DIRS (dedup via
+    # normalization of the dot-segment alias), with ctx-profile winning as the
+    # classification. Exactly one row is proven by counting the exact line,
+    # not merely by matching a row.
+    [[ "$output" == *"candidate: $profile_skills (classification: ctx-profile, origins: copilot-skill-dirs,ctx-profile)"* ]]
+    local profile_skills_row="[ctx skills] candidate: $profile_skills (classification: ctx-profile, origins: copilot-skill-dirs,ctx-profile)"
     local profile_skills_count
     profile_skills_count="$(grep -cxF -- "$profile_skills_row" <<<"$output")"
     [ "$profile_skills_count" -eq 1 ]
@@ -2361,19 +2365,20 @@ EOF
     # expected-home candidate (the active Mode A COPILOT_HOME/skills).
     [[ "$output" == *"candidate: $home_skills (classification: expected-home, origins: expected-home)"* ]]
 
-    # external candidates: repo .github/skills, .agents/skills, and
-    # .claude/skills, plugin skill dir, configured skillDirectories entry
+    # external candidates: repo .github/skills (found by repository discovery
+    # AND COPILOT_SKILLS_DIRS -> two external-class origins), .agents/skills,
+    # and .claude/skills, plugin skill dir, configured skillDirectories entry
     # that exists.
-    [[ "$output" == *"candidate: $proj/.github/skills (classification: external, origins: external)"* ]]
-    [[ "$output" == *"candidate: $proj/.agents/skills (classification: external, origins: external)"* ]]
-    [[ "$output" == *"candidate: $proj/.claude/skills (classification: external, origins: external)"* ]]
-    [[ "$output" == *"candidate: $CTX_COPILOT_DIR/installed-plugins/my-plugin/skills (classification: external, origins: external)"* ]]
-    [[ "$output" == *"candidate: $profile_skills/review-skill (classification: external, origins: external)"* ]]
+    [[ "$output" == *"candidate: $proj/.github/skills (classification: external, origins: copilot-skill-dirs,repo-github-skills)"* ]]
+    [[ "$output" == *"candidate: $proj/.agents/skills (classification: external, origins: repo-agents-skills)"* ]]
+    [[ "$output" == *"candidate: $proj/.claude/skills (classification: external, origins: repo-claude-skills)"* ]]
+    [[ "$output" == *"candidate: $CTX_COPILOT_DIR/installed-plugins/my-plugin/skills (classification: external, origins: plugin-skills)"* ]]
+    [[ "$output" == *"candidate: $profile_skills/review-skill (classification: external, origins: settings-skill-dirs)"* ]]
 
     # Configured-but-missing paths are reported, not failed, and the plugins
     # root itself is never a candidate.
-    [[ "$output" == *"missing: $TEST_TMP/missing-skills-dir (classification: external, origins: external)"* ]]
-    [[ "$output" == *"missing: $TEST_TMP/missing-from-settings (classification: external, origins: external)"* ]]
+    [[ "$output" == *"missing: $TEST_TMP/missing-skills-dir (classification: external, origins: copilot-skill-dirs)"* ]]
+    [[ "$output" == *"missing: $TEST_TMP/missing-from-settings (classification: external, origins: settings-skill-dirs)"* ]]
     [[ "$output" != *"candidate: $CTX_COPILOT_DIR/installed-plugins ("* ]]
     [[ "$output" != *"candidate: $CTX_COPILOT_DIR/installed-plugins/no-skill ("* ]]
 
@@ -2427,7 +2432,29 @@ EOF
     run ctx skills
     unset -f realpath
     [ "$status" -eq 0 ]
-    [[ "$output" == *"candidate: $proj/.agents/skills (classification: external, origins: external)"* ]]
+    [[ "$output" == *"candidate: $proj/.agents/skills (classification: external, origins: repo-agents-skills)"* ]]
+}
+
+@test "ctx skills: python fallback preserves paths with leading/trailing spaces" {
+    _make_profile review review-skill
+    local proj="$TEST_TMP/project-skills-spaces"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    cd "$proj"
+
+    # A configured directory whose name has leading and trailing spaces. With
+    # realpath shadowed only the python fallback normalizes it, and the spaces
+    # must survive transport to python (passed as argv, never stripped).
+    local spaced="$TEST_TMP/ spaced-skill "
+    mkdir -p "$spaced"
+    export COPILOT_SKILLS_DIRS="$spaced"
+
+    realpath() { return 1; }
+    export -f realpath
+    run ctx skills
+    unset -f realpath
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"candidate: $spaced (classification: external, origins: copilot-skill-dirs)"* ]]
 }
 
 @test "ctx skills: caller bookkeeping variables are preserved (no global clobber)" {

@@ -1635,10 +1635,21 @@ function Test-CtxActivation {
 function Get-CtxSkillPathNormalized {
     # Canonicalizes a candidate path for deduplication using platform-
     # appropriate normalization that does not require the path to exist.
-    # Returns $null when the path cannot be normalized.
+    # Strips trailing directory separators so equivalent paths like
+    # C:\skills and C:\skills\ share one key, while preserving filesystem
+    # roots (drive root, UNC share root, or /). Returns $null when the path
+    # cannot be normalized.
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
-    try { return [System.IO.Path]::GetFullPath($Path) } catch { return $null }
+    try { $full = [System.IO.Path]::GetFullPath($Path) } catch { return $null }
+    $root = [System.IO.Path]::GetPathRoot($full)
+    # A filesystem root (drive root like C:\, UNC share root, or /) must be
+    # preserved exactly; trimming it would yield a bare drive letter or an
+    # empty string. Check the full path against the root before trimming.
+    if ($full -ceq $root) { return $full }
+    $trimmed = $full.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    if ($trimmed.Length -eq 0) { return $full }
+    return $trimmed
 }
 
 function Get-CtxPluginSkillDirs {
@@ -1693,6 +1704,17 @@ function Get-CtxPathComparer {
     return [System.StringComparer]::Ordinal
 }
 
+function Get-CtxSkillClassification {
+    # Maps a path's comma-joined origin labels to its single classification by
+    # precedence: ctx-profile > expected-home > external (every other source).
+    # Kept separate from the origins list so multiple external-class origins
+    # are all retained while the classification stays a single token.
+    param([string]$Origins)
+    if ($Origins -match '(^|,)ctx-profile(,|$)') { return 'ctx-profile' }
+    if ($Origins -match '(^|,)expected-home(,|$)') { return 'expected-home' }
+    return 'external'
+}
+
 function Write-CtxSkillsInventory {
     # Read-only, filesystem/config-based inventory of potential Copilot skill
     # discovery locations. Does not modify settings, files, or the
@@ -1724,16 +1746,16 @@ function Write-CtxSkillsInventory {
     }
 
     # Personal discovery locations (default, not configured).
-    Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path (Get-CtxCopilotDir) 'skills')
-    Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path $HOME '.agents\skills')
+    Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'personal-copilot' -RawPath (Join-Path (Get-CtxCopilotDir) 'skills')
+    Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'personal-agents' -RawPath (Join-Path $HOME '.agents\skills')
 
     # Repository discovery locations in the current directory and applicable
     # ancestors.
     $dir = (Get-Location).Path
     while ($dir) {
-        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path $dir '.github\skills')
-        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path $dir '.agents\skills')
-        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath (Join-Path $dir '.claude\skills')
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'repo-github-skills' -RawPath (Join-Path $dir '.github\skills')
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'repo-agents-skills' -RawPath (Join-Path $dir '.agents\skills')
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'repo-claude-skills' -RawPath (Join-Path $dir '.claude\skills')
         $parent = Split-Path -Parent $dir
         if (-not $parent -or $parent -eq $dir) { break }
         $dir = $parent
@@ -1741,7 +1763,7 @@ function Write-CtxSkillsInventory {
 
     # COPILOT_SKILLS_DIRS entries (configured; reportable missing).
     foreach ($entry in (@($env:COPILOT_SKILLS_DIRS -split ',') | Where-Object { $_ })) {
-        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath $entry -Configured
+        Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'copilot-skill-dirs' -RawPath $entry -Configured
     }
 
     # Configured "skillDirectories" in relevant Copilot settings files
@@ -1758,7 +1780,7 @@ function Write-CtxSkillsInventory {
     }
     foreach ($settingsFile in ($settingsFiles | Select-Object -Unique)) {
         foreach ($entry in (Read-CtxSettingsSkillDirectories -SettingsFile $settingsFile)) {
-            Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath $entry -Configured
+            Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'settings-skill-dirs' -RawPath $entry -Configured
         }
     }
 
@@ -1770,7 +1792,7 @@ function Write-CtxSkillsInventory {
     if ((Test-Path Env:\COPILOT_HOME) -and $env:COPILOT_HOME) { $pluginRoots += (Join-Path $env:COPILOT_HOME 'installed-plugins') }
     foreach ($pluginRoot in $pluginRoots) {
         foreach ($pluginSkill in (Get-CtxPluginSkillDirs -Root $pluginRoot)) {
-            Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'external' -RawPath $pluginSkill
+            Add-CtxSkillOrigin -Origins $origins -Reportable $reportable -Origin 'plugin-skills' -RawPath $pluginSkill
         }
     }
 
@@ -1783,7 +1805,7 @@ function Write-CtxSkillsInventory {
     foreach ($path in $sortedPaths) {
         $originList = @($origins[$path] -split ',' | Sort-Object -Unique)
         $originsCsv = $originList -join ','
-        $classification = $originList[0]
+        $classification = Get-CtxSkillClassification -Origins $origins[$path]
         if (Test-Path -LiteralPath $path) {
             Write-Host "[ctx skills] candidate: $path (classification: $classification, origins: $originsCsv)"
         } elseif ($reportable.ContainsKey($path)) {

@@ -2169,15 +2169,16 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $homeSkills = Join-Path $env:COPILOT_HOME 'skills'
         Test-Path -LiteralPath $homeSkills -PathType Container | Should -BeTrue
 
-        # Configured entries: COPILOT_SKILLS_DIRS (one existing, one missing)
-        # and skillDirectories in a repo settings file (one existing skill dir,
-        # one missing), plus an observable installed-plugin skills subdir. The
-        # existing COPILOT_SKILLS_DIRS entry is a dot-segment alias of the
-        # active profile skills dir so the row is deduplicated by
-        # normalization, not by string equality.
+        # Configured entries: COPILOT_SKILLS_DIRS (an existing dot-segment alias of
+        # the active profile skills dir, the repo .github/skills dir itself,
+        # and a missing dir) and skillDirectories in a repo settings file (one
+        # existing skill dir, one missing), plus an observable installed-plugin
+        # skills subdir. One row must retain multiple distinct source origins,
+        # including two external-class origins.
         $profileSkills = Join-Path $reviewDir '.github\skills'
         $profileSkillsAlias = Join-Path $reviewDir '.github\.\skills'
-        $env:COPILOT_SKILLS_DIRS = "$profileSkillsAlias,$(Join-Path $Script:TestTmp 'missing-skills-dir')"
+        $repoGithubSkills = Join-Path $proj '.github\skills'
+        $env:COPILOT_SKILLS_DIRS = "$profileSkillsAlias,$repoGithubSkills,$(Join-Path $Script:TestTmp 'missing-skills-dir')"
         # Serialize via ConvertTo-Json so backslashes in Windows paths are
         # escaped correctly; hand-interpolated JSON would be invalid there and
         # silently drop skillDirectories.
@@ -2192,13 +2193,13 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         ($out -join "`n") | Should -Match 'ctx does not claim these skills are loaded or invoked'
 
         # ctx-profile candidate from the active profile is reported exactly
-        # once with the external origin retained, even though COPILOT_SKILLS_DIRS
-        # lists a dot-segment alias that only normalizes to the same path
-        # (dedup), and ctx-profile wins as the classification. Proven by
+        # once, retaining the distinct external-class origin from
+        # COPILOT_SKILLS_DIRS (dedup via normalization of the dot-segment
+        # alias), and ctx-profile wins as the classification. Proven by
         # case-sensitive ordinal counting, not -Match (which is
         # case-insensitive and would not prove "exactly one row").
         $text = $out -join "`n"
-        $profileSkillsRow = "candidate: $profileSkills (classification: ctx-profile, origins: ctx-profile,external)"
+        $profileSkillsRow = "candidate: $profileSkills (classification: ctx-profile, origins: copilot-skill-dirs,ctx-profile)"
         $text.IndexOf($profileSkillsRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
         $needle = "candidate: $profileSkills ("
         $count = 0
@@ -2212,19 +2213,20 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         # expected-home candidate (the active Mode A COPILOT_HOME/skills).
         ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $homeSkills (classification: expected-home, origins: expected-home)"))
 
-        # external candidates: repo .github/skills, .agents/skills, and
-        # .claude/skills, plugin skill dir, configured skillDirectories entry
-        # that exists.
-        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $proj '.github\skills') (classification: external, origins: external)"))
-        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $proj '.agents\skills') (classification: external, origins: external)"))
-        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $proj '.claude\skills') (classification: external, origins: external)"))
-        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\my-plugin\skills') (classification: external, origins: external)"))
-        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $profileSkills 'review-skill') (classification: external, origins: external)"))
+        # external candidates: repo .github/skills (found by repository
+        # discovery AND COPILOT_SKILLS_DIRS -> two external-class origins),
+        # .agents/skills, and .claude/skills, plugin skill dir, configured
+        # skillDirectories entry that exists.
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $repoGithubSkills (classification: external, origins: copilot-skill-dirs,repo-github-skills)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $proj '.agents\skills') (classification: external, origins: repo-agents-skills)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $proj '.claude\skills') (classification: external, origins: repo-claude-skills)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\my-plugin\skills') (classification: external, origins: plugin-skills)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $profileSkills 'review-skill') (classification: external, origins: settings-skill-dirs)"))
 
         # Configured-but-missing paths are reported, not failed, and the
         # plugins root itself is never a candidate.
-        ($out -join "`n") | Should -Match ([regex]::Escape("missing: $(Join-Path $Script:TestTmp 'missing-skills-dir') (classification: external, origins: external)"))
-        ($out -join "`n") | Should -Match ([regex]::Escape("missing: $(Join-Path $Script:TestTmp 'missing-from-settings') (classification: external, origins: external)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("missing: $(Join-Path $Script:TestTmp 'missing-skills-dir') (classification: external, origins: copilot-skill-dirs)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("missing: $(Join-Path $Script:TestTmp 'missing-from-settings') (classification: external, origins: settings-skill-dirs)"))
         ($out -join "`n") | Should -Not -Match ([regex]::Escape("candidate: $(Join-Path $env:CTX_COPILOT_DIR 'installed-plugins') ("))
         ($out -join "`n") | Should -Not -Match ([regex]::Escape("candidate: $(Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\no-skill') ("))
 
@@ -2267,8 +2269,8 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Test-Path -LiteralPath $lower -PathType Container | Should -BeTrue
         Test-Path -LiteralPath $upper -PathType Container | Should -BeTrue
 
-        $lowerRow = "candidate: $lower (classification: external, origins: external)"
-        $upperRow = "candidate: $upper (classification: external, origins: external)"
+        $lowerRow = "candidate: $lower (classification: external, origins: copilot-skill-dirs,repo-github-skills)"
+        $upperRow = "candidate: $upper (classification: external, origins: copilot-skill-dirs)"
 
         # -Match/-Not -Match are case-insensitive even on Windows, so they would
         # let the upper-case variant match a lower-case row. Use Ordinal
@@ -2293,6 +2295,62 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             $text.IndexOf($lowerRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
             $text.IndexOf($upperRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
         }
+    }
+
+    It 'ctx skills: path normalization strips trailing separators but preserves roots' {
+        # Filesystem roots (drive root, UNC share root, /) are never stripped
+        # down to a bare drive/empty string.
+        $root = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath())
+        Get-CtxSkillPathNormalized -Path $root | Should -BeExactly $root
+
+        # Windows drive root explicitly: C:\ must stay C:\ (never C:) whether
+        # spelled with a forward or backward slash.
+        if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+            Get-CtxSkillPathNormalized -Path 'C:\' | Should -BeExactly 'C:\'
+            Get-CtxSkillPathNormalized -Path 'C:/' | Should -BeExactly 'C:\'
+        }
+
+        # A non-root directory normalizes to itself whether or not it is
+        # spelled with a trailing separator.
+        $base = Join-Path $Script:TestTmp 'norm-trailing'
+        New-Item -ItemType Directory -Path $base -Force | Out-Null
+        Get-CtxSkillPathNormalized -Path $base | Should -BeExactly $base
+        Get-CtxSkillPathNormalized -Path ($base + [System.IO.Path]::DirectorySeparatorChar) | Should -BeExactly $base
+    }
+
+    It 'ctx skills: duplicate configured paths differing only by a trailing separator dedup to one row' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $proj = Join-Path $Script:TestTmp 'project-skills-trailing-sep'
+        New-Item -ItemType Directory -Path (Join-Path $proj '.github\skills') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+
+        # Same directory listed with and without a trailing separator.
+        $skillsDir = Join-Path $proj '.github\skills'
+        $env:COPILOT_SKILLS_DIRS = "$skillsDir,$skillsDir$([System.IO.Path]::DirectorySeparatorChar)"
+        $beforeEnv = @($env:AI_CTX_PROFILES, $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS, $env:COPILOT_HOME, $env:COPILOT_SKILLS_DIRS)
+
+        $out = @(& { ctx skills } 6>&1)
+        $text = $out -join "`n"
+
+        # Exactly one row, proven by case-sensitive ordinal counting; both
+        # external-class origins (repository discovery + COPILOT_SKILLS_DIRS)
+        # are retained.
+        $row = "candidate: $skillsDir (classification: external, origins: copilot-skill-dirs,repo-github-skills)"
+        $text.IndexOf($row, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+        $needle = "candidate: $skillsDir ("
+        $count = 0
+        $idx = 0
+        while (($idx = $text.IndexOf($needle, $idx, [System.StringComparison]::Ordinal)) -ge 0) {
+            $count++
+            $idx += $needle.Length
+        }
+        $count | Should -Be 1
+
+        # Strictly read-only: environment is untouched.
+        $afterEnv = @($env:AI_CTX_PROFILES, $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS, $env:COPILOT_HOME, $env:COPILOT_SKILLS_DIRS)
+        $afterEnv | Should -Be $beforeEnv
     }
 
     It 'ctx skills: unknown provenance does not guess ctx-owned paths' {

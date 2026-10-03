@@ -20,8 +20,10 @@ into the `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` environment variable for the
 current shell session, and exposes the active selection as `AI_CTX_PROFILES`
 (e.g. `review+dotnet+security`).
 
-Available for **bash**, **zsh**, and **PowerShell** (Windows PowerShell 5.1+
-and PowerShell 7+ / pwsh).
+Available for **bash 4+**, **zsh**, and **PowerShell** (Windows PowerShell
+5.1+ and PowerShell 7+ / pwsh). `ctx.sh` already relies on Bash 4+ features
+(`local -A` associative arrays, `mapfile`), so the stock macOS Bash 3.2 is
+not supported — use a newer bash, zsh, or pwsh.
 
 ## Requirements
 
@@ -254,24 +256,45 @@ of the skill directories Copilot *might* discover in the current shell and
 project. It never claims a skill is loaded or invoked — discovering a
 directory is not the same as Copilot loading it — and it never modifies
 settings, files, or the environment, and it never invokes the Copilot CLI
-(no probe is performed). Each candidate is reported with its normalized path,
-a single classification, and all of its origins:
+(no probe is performed). Each candidate is reported once with its normalized,
+deduplicated path, a single classification, and a deterministic,
+deduplicated, comma-joined list of the distinct sources ("origins") that
+yielded it:
+
+The **classification** is the single highest-precedence origin class, chosen
+by `ctx-profile > expected-home > external`:
 
 - **`ctx-profile`** — `.github/skills` of the active context/profile entries
   (attributable only while the session activation record matches; otherwise
   attribution is reported as unknown and ctx-owned paths are not guessed).
 - **`expected-home`** — the expected `<COPILOT_HOME>/skills` directory when
   `COPILOT_HOME` is set.
-- **`external`** — everything else: personal `~/.copilot/skills` and
-  `~/.agents/skills`, repository `.github/skills` / `.agents/skills` /
-  `.claude/skills` in the current directory and ancestors, `COPILOT_SKILLS_DIRS`
-  entries, configured `skillDirectories` in relevant Copilot settings files,
-  and detectable `skills` / `.github/skills` directories under installed
-  Copilot plugins.
+- **`external`** — every other source below.
 
-A path found through several sources is reported once, classified by
-precedence `ctx-profile > expected-home > external`, while all origins are
-listed. Configured-but-missing or inaccessible paths are reported cleanly
+The **origins** list keeps each source distinct (alphabetically sorted), so a
+path found via several sources reports them all rather than collapsing to one
+generic label:
+
+- **`ctx-profile`** — `.github/skills` of the active context/profile entries
+  (as above).
+- **`expected-home`** — the expected `<COPILOT_HOME>/skills` directory (as
+  above).
+- **`copilot-skill-dirs`** — a `COPILOT_SKILLS_DIRS` entry.
+- **`settings-skill-dirs`** — a configured `skillDirectories` entry in a
+  relevant Copilot settings file.
+- **`personal-copilot`** — the personal `~/.copilot/skills` (or
+  `$CTX_COPILOT_DIR/skills`).
+- **`personal-agents`** — the personal `~/.agents/skills`.
+- **`repo-github-skills`** — repository `.github/skills` in the current
+  directory or an ancestor.
+- **`repo-agents-skills`** — repository `.agents/skills` in the current
+  directory or an ancestor.
+- **`repo-claude-skills`** — repository `.claude/skills` in the current
+  directory or an ancestor.
+- **`plugin-skills`** — a detectable `skills` / `.github/skills` directory
+  under an installed Copilot plugin.
+
+Configured-but-missing or inaccessible paths are reported cleanly
 without failing. The inventory explicitly discloses what a filesystem/config
 diagnostic cannot observe (notably another Copilot process's command-line
 arguments and plugin-internal skill locations beyond detectable
@@ -634,10 +657,10 @@ only the first context name plus a `(+2)` suffix for the rest (e.g.
 
 ## Notes
 
-- `ctx.sh` targets bash and zsh; it uses POSIX-compatible constructs (`[ ]`,
-  `local`, `printf`) and passes `shellcheck` with default rules (two
-  intentional `shellcheck disable` comments are documented inline for
-  word-splitting that is required by design).
+- `ctx.sh` targets bash 4+ and zsh; it uses POSIX-compatible constructs (`[ ]`,
+  `local`, `printf`) alongside Bash 4+ features and passes `shellcheck` with
+  default rules (two intentional `shellcheck disable` comments are documented
+  inline for word-splitting that is required by design).
 - `ctx.ps1` passes `PSScriptAnalyzer` with default rules, aside from
   `PSAvoidUsingWriteHost`, which is intentional: `ctx` is an interactive
   status-display command, not a value-returning function meant for pipeline
