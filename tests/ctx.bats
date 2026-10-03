@@ -2350,8 +2350,13 @@ EOF
     # ctx-profile candidate from the active profile appears once with the
     # external origin retained, even though COPILOT_SKILLS_DIRS lists a
     # dot-segment alias that only normalizes to the same path (dedup), and
-    # ctx-profile wins as the classification.
+    # ctx-profile wins as the classification. Exactly one row is proven by
+    # counting the exact line, not merely by matching a row.
     [[ "$output" == *"candidate: $profile_skills (classification: ctx-profile, origins: ctx-profile,external)"* ]]
+    local profile_skills_row="[ctx skills] candidate: $profile_skills (classification: ctx-profile, origins: ctx-profile,external)"
+    local profile_skills_count
+    profile_skills_count="$(grep -cxF -- "$profile_skills_row" <<<"$output")"
+    [ "$profile_skills_count" -eq 1 ]
 
     # expected-home candidate (the active Mode A COPILOT_HOME/skills).
     [[ "$output" == *"candidate: $home_skills (classification: expected-home, origins: expected-home)"* ]]

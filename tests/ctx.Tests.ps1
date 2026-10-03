@@ -1400,7 +1400,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_HOME = $customHome
         $stderr = Invoke-CtxCapturedStderr { ctx review | Out-Null }
         $env:COPILOT_HOME | Should -Be $customHome
-        $stderr | Should -BeExactly "ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$customHome`". This may point to a synthetic home from a previous ctx activation.`n"
+        $stderr | Should -BeExactly ("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$customHome`". This may point to a synthetic home from a previous ctx activation." + [Environment]::NewLine)
 
         # (b2) COPILOT_HOME present-but-empty: where an empty env var is
         # representable (Windows) the exact template fires with empty quotes.
@@ -1409,7 +1409,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_HOME = ''
         $stderr = Invoke-CtxCapturedStderr { ctx review | Out-Null }
         if (Test-Path Env:\COPILOT_HOME) {
-            $stderr | Should -BeExactly "ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"`". This may point to a synthetic home from a previous ctx activation.`n"
+            $stderr | Should -BeExactly ("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"`". This may point to a synthetic home from a previous ctx activation." + [Environment]::NewLine)
         } else {
             $stderr | Should -Not -Match $warning
         }
@@ -1440,7 +1440,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_HOME = $loadHome
         $stderr = Invoke-CtxCapturedStderr { ctx load $ctxFile | Out-Null }
         $env:COPILOT_HOME | Should -Be $loadHome
-        $stderr | Should -BeExactly "ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$loadHome`". This may point to a synthetic home from a previous ctx activation.`n"
+        $stderr | Should -BeExactly ("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$loadHome`". This may point to a synthetic home from a previous ctx activation." + [Environment]::NewLine)
 
         # (f) read-only commands never warn: current and check emit nothing on stderr
         $stderr = Invoke-CtxCapturedStderr { Show-CtxCurrent | Out-Null }
@@ -1461,7 +1461,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Set-Location $projAuto
         $stderr = Invoke-CtxCapturedStderr { Invoke-CtxAutoLoad | Out-Null }
         $env:COPILOT_HOME | Should -Be $autoHome
-        $stderr | Should -BeExactly "ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$autoHome`". This may point to a synthetic home from a previous ctx activation.`n"
+        $stderr | Should -BeExactly ("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$autoHome`". This may point to a synthetic home from a previous ctx activation." + [Environment]::NewLine)
     }
 
     It 'Mode B: COPILOT_SKILLS_DIRS is unset (not empty) when no skills dirs exist' {
@@ -2178,7 +2178,11 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $profileSkills = Join-Path $reviewDir '.github\skills'
         $profileSkillsAlias = Join-Path $reviewDir '.github\.\skills'
         $env:COPILOT_SKILLS_DIRS = "$profileSkillsAlias,$(Join-Path $Script:TestTmp 'missing-skills-dir')"
-        Set-Content -LiteralPath (Join-Path $proj '.github\copilot\settings.json') -Value ('{"skillDirectories":["' + (Join-Path $profileSkills 'review-skill') + '","' + (Join-Path $Script:TestTmp 'missing-from-settings') + '"]}')
+        # Serialize via ConvertTo-Json so backslashes in Windows paths are
+        # escaped correctly; hand-interpolated JSON would be invalid there and
+        # silently drop skillDirectories.
+        $settings = @{ skillDirectories = @((Join-Path $profileSkills 'review-skill'), (Join-Path $Script:TestTmp 'missing-from-settings')) }
+        Set-Content -LiteralPath (Join-Path $proj '.github\copilot\settings.json') -Value ($settings | ConvertTo-Json -Compress)
         New-Item -ItemType Directory -Path (Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\my-plugin\skills\pskill'), (Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\no-skill') -Force | Out-Null
 
         $beforeEnv = @($env:AI_CTX_PROFILES, $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS, $env:COPILOT_HOME, $env:COPILOT_SKILLS_DIRS)
@@ -2187,11 +2191,23 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         ($out -join "`n") | Should -Match ([regex]::Escape('[ctx skills] potential Copilot skill discovery'))
         ($out -join "`n") | Should -Match 'ctx does not claim these skills are loaded or invoked'
 
-        # ctx-profile candidate from the active profile appears once with the
-        # external origin retained, even though COPILOT_SKILLS_DIRS lists a
-        # dot-segment alias that only normalizes to the same path (dedup), and
-        # ctx-profile wins as the classification.
-        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $profileSkills (classification: ctx-profile, origins: ctx-profile,external)"))
+        # ctx-profile candidate from the active profile is reported exactly
+        # once with the external origin retained, even though COPILOT_SKILLS_DIRS
+        # lists a dot-segment alias that only normalizes to the same path
+        # (dedup), and ctx-profile wins as the classification. Proven by
+        # case-sensitive ordinal counting, not -Match (which is
+        # case-insensitive and would not prove "exactly one row").
+        $text = $out -join "`n"
+        $profileSkillsRow = "candidate: $profileSkills (classification: ctx-profile, origins: ctx-profile,external)"
+        $text.IndexOf($profileSkillsRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+        $needle = "candidate: $profileSkills ("
+        $count = 0
+        $idx = 0
+        while (($idx = $text.IndexOf($needle, $idx, [System.StringComparison]::Ordinal)) -ge 0) {
+            $count++
+            $idx += $needle.Length
+        }
+        $count | Should -Be 1
 
         # expected-home candidate (the active Mode A COPILOT_HOME/skills).
         ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $homeSkills (classification: expected-home, origins: expected-home)"))
@@ -2251,16 +2267,31 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Test-Path -LiteralPath $lower -PathType Container | Should -BeTrue
         Test-Path -LiteralPath $upper -PathType Container | Should -BeTrue
 
+        $lowerRow = "candidate: $lower (classification: external, origins: external)"
+        $upperRow = "candidate: $upper (classification: external, origins: external)"
+
+        # -Match/-Not -Match are case-insensitive even on Windows, so they would
+        # let the upper-case variant match a lower-case row. Use Ordinal
+        # case-sensitive substring checks instead.
         if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
-            # Windows: case-insensitive path keys collapse to one deduped row,
-            # classification/origins retained.
-            ($text) | Should -Match ([regex]::Escape("candidate: $lower (classification: external, origins: external)"))
-            ($text) | Should -Not -Match ([regex]::Escape("candidate: $upper ("))
+            # Windows: case-insensitive path keys collapse to exactly one
+            # deduped row (the first-added lower-case key), classification/
+            # origins retained; the upper-case variant is not a distinct row.
+            $text.IndexOf($lowerRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+            $text.IndexOf($upperRow, [System.StringComparison]::Ordinal) | Should -Be -1
+            $needle = "candidate: $lower ("
+            $count = 0
+            $idx = 0
+            while (($idx = $text.IndexOf($needle, $idx, [System.StringComparison]::Ordinal)) -ge 0) {
+                $count++
+                $idx += $needle.Length
+            }
+            $count | Should -Be 1
         } else {
             # Linux/macOS: case-sensitive path keys keep two distinct rows,
             # each with its own classification/origins.
-            ($text) | Should -Match ([regex]::Escape("candidate: $lower (classification: external, origins: external)"))
-            ($text) | Should -Match ([regex]::Escape("candidate: $upper (classification: external, origins: external)"))
+            $text.IndexOf($lowerRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+            $text.IndexOf($upperRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
         }
     }
 
