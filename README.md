@@ -295,14 +295,26 @@ The existing default: `ctx` builds a synthetic per-context `COPILOT_HOME` at
 `~/.config/ctx/homes/<context>/`, symlinks the shared files/directories back
 to the real Copilot home so auth, settings, MCP servers, and session history
 keep working identically across contexts, and populates the per-context
-`skills/` tree from each resolved entry's `.github/skills`. Two risks are
-retained — this feature does not fix them:
+`skills/` tree from each resolved entry's `.github/skills`. Known risks remain;
+this feature does not fix them:
 
 - Copilot's atomic temp-file+rename writes can replace a symlinked file
   (empirically confirmed for `settings.json`), so that context can diverge
   from the real shared file until the next activation's reconciliation
   repairs it. See `docs/empirical-symlink-hazard.md`.
 - Concurrent contexts are last-reconciliation-wins.
+- **Local TOCTOU gap:** Mode A path checks, including rechecks before creating
+  the synthetic home and before `ctx clear --all` recursively deletes it, are
+  preflight validation only—not race protection. A different local user who
+  can modify an ancestor directory could replace a path component with a
+  symlink/junction after validation and redirect the later creation or
+  deletion. This is a conditional local risk, not a remote attack; same-user
+  and administrator attackers are out of scope. Until this gap is resolved,
+  avoid Mode A when its home path (including a `.ctx` `home:` override) is
+  beneath an ancestor writable by an untrusted user. Modes B/C avoid this
+  specific Mode A create/delete path but are not equivalent replacements: B
+  leaves `COPILOT_HOME` untouched; C uses a unique temporary home and retains
+  it after clear, and is not a security sandbox.
 
 #### Mode B — global-user
 
@@ -404,16 +416,18 @@ review:/home/user/work/ai-config/profiles/review
   the directory containing the `.ctx` file unless it's absolute. It does
   **not** need to already exist — `ctx` creates it on demand, exactly like
   the centralized default.
-- For deletion safety, the resolved `home:` path must be a non-root
+- To constrain deletion targets, the resolved `home:` path must be a non-root
   descendant of the user's home directory or `$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT`. Paths that
   are empty, escape with `..`, point outside those roots, or contain an
-  existing symlink/junction component are rejected before activation. This
-  intentionally means a project tree outside those roots cannot be selected
-  as a custom home; keep the project under `$HOME` if colocating is desired.
+  existing symlink/junction component are rejected during preflight
+  validation. See [Operational notes](#operational-notes) for its TOCTOU
+  limitation. This intentionally means a project tree outside those roots
+  cannot be selected as a custom home; keep the project under `$HOME` if
+  colocating is desired.
 - `ctx clear --all` deletes only the exact `COPILOT_HOME` selected for the
   active context, after repeating the same validation. It refuses empty,
-  root, unselected, or symlink/junction targets and never recursively
-  follows an unsafe path.
+  root, unselected, or symlink/junction targets. These checks are preflight,
+  not race protection; see [Operational notes](#operational-notes).
 - Add the custom directory to that project's `.gitignore` (e.g.
   `.copilot-ctx/`) so the synthetic home never gets committed.
 - This only applies to `.ctx`-file activation. Manually invoking
@@ -432,7 +446,8 @@ tree to repair (see [Integration modes](#integration-modes)).
 
 `ctx` reconciles the context home on every Mode A activation and repairs
 managed links that were replaced by the CLI, protecting shared configuration
-from the CLI's file-replacement behavior. Two Mode A hazards are retained and
+from the CLI's file-replacement behavior. The two reconciliation hazards
+below, as well as the local TOCTOU gap described in the Mode A summary above,
 are **not** fixed by the integration-modes feature:
 
 - Copilot's atomic temp-file+rename writes can replace a symlinked file
