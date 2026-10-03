@@ -929,13 +929,13 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
         Import-CtxFile -CtxFile $ctxFile | Out-Null
         $currentUnset = @(& { Show-CtxCurrent } 6>&1)
-        ($currentUnset -join "`n") | Should -Match 'Mode: synthetic-home'
+        ($currentUnset -join "`n") | Should -Match 'Mode: A — synthetic-home'
 
         Clear-CtxContext | Out-Null
         $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
         Import-CtxFile -CtxFile $ctxFile | Out-Null
         $currentExplicit = @(& { Show-CtxCurrent } 6>&1)
-        ($currentExplicit -join "`n") | Should -Match 'Mode: synthetic-home'
+        ($currentExplicit -join "`n") | Should -Match 'Mode: A — synthetic-home'
         ($currentExplicit -join "`n") | Should -Be ($currentUnset -join "`n")
 
         Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
@@ -1370,6 +1370,100 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Test-Path -LiteralPath $workspace | Should -BeFalse
     }
 
+    It 'Mode B: preserved-COPILOT_HOME warning goes to stderr on success, never otherwise' {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        function Invoke-CtxCapturedStderr {
+            param([scriptblock]$Action)
+            $origError = [Console]::Error
+            $writer = [System.IO.StringWriter]::new()
+            try {
+                [Console]::SetError($writer)
+                & $Action
+                return $writer.ToString()
+            } finally {
+                [Console]::SetError($origError)
+                $writer.Dispose()
+            }
+        }
+
+        $warning = 'ctx: warning: global-user mode preserves the existing COPILOT_HOME'
+
+        # (a) COPILOT_HOME unset -> no warning on stderr
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        $stderr = Invoke-CtxCapturedStderr { ctx review | Out-Null }
+        $stderr | Should -Not -Match $warning
+
+        # (b) COPILOT_HOME present -> exact template on stderr, value untouched
+        $customHome = Join-Path $Script:TestTmp 'custom-home'
+        $env:COPILOT_HOME = $customHome
+        $stderr = Invoke-CtxCapturedStderr { ctx review | Out-Null }
+        $env:COPILOT_HOME | Should -Be $customHome
+        $stderr | Should -BeExactly ("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$customHome`". This may point to a synthetic home from a previous ctx activation." + [Environment]::NewLine)
+
+        # (b2) COPILOT_HOME present-but-empty: where an empty env var is
+        # representable (Windows) the exact template fires with empty quotes.
+        # On Unix pwsh, assigning '' removes the variable, collapsing to the
+        # absent case (bats covers the empty-present template for bash).
+        $env:COPILOT_HOME = ''
+        $stderr = Invoke-CtxCapturedStderr { ctx review | Out-Null }
+        if (Test-Path Env:\COPILOT_HOME) {
+            $stderr | Should -BeExactly ("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"`". This may point to a synthetic home from a previous ctx activation." + [Environment]::NewLine)
+        } else {
+            $stderr | Should -Not -Match $warning
+        }
+
+        # (c) Modes A and C -> no warning on stderr
+        $env:COPILOT_HOME = $customHome
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        $stderr = Invoke-CtxCapturedStderr { ctx review | Out-Null }
+        $stderr | Should -Not -Match $warning
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
+        $stderr = Invoke-CtxCapturedStderr { ctx review | Out-Null }
+        $stderr | Should -Not -Match $warning
+
+        # (d) failed activation -> no warning on stderr
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'bogus'
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $stderr = Invoke-CtxCapturedStderr { ctx review | Out-Null } } finally { $ErrorActionPreference = $prevEap }
+        $stderr | Should -Not -Match $warning
+
+        # (e) explicit ctx load under Mode B with COPILOT_HOME present -> warning
+        $proj = Join-Path $Script:TestTmp 'project-b-warn'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $loadHome = Join-Path $Script:TestTmp 'load-home'
+        $env:COPILOT_HOME = $loadHome
+        $stderr = Invoke-CtxCapturedStderr { ctx load $ctxFile | Out-Null }
+        $env:COPILOT_HOME | Should -Be $loadHome
+        $stderr | Should -BeExactly ("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$loadHome`". This may point to a synthetic home from a previous ctx activation." + [Environment]::NewLine)
+
+        # (f) read-only commands never warn: current and check emit nothing on stderr
+        $stderr = Invoke-CtxCapturedStderr { Show-CtxCurrent | Out-Null }
+        $stderr | Should -Not -Match $warning
+        Set-Location $proj
+        $stderr = Invoke-CtxCapturedStderr { Test-CtxActivation | Out-Null }
+        $stderr | Should -Not -Match $warning
+
+        # (g) .ctx auto-load under Mode B with COPILOT_HOME present -> warning
+        $projAuto = Join-Path $Script:TestTmp 'project-b-warn-auto'
+        New-Item -ItemType Directory -Path $projAuto -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $projAuto '.ctx') -Value "review:$reviewDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+        $autoHome = Join-Path $Script:TestTmp 'auto-home'
+        $env:COPILOT_HOME = $autoHome
+        $Script:CtxAutoLoadDir = $null
+        Set-Location $projAuto
+        $stderr = Invoke-CtxCapturedStderr { Invoke-CtxAutoLoad | Out-Null }
+        $env:COPILOT_HOME | Should -Be $autoHome
+        $stderr | Should -BeExactly ("ctx: warning: global-user mode preserves the existing COPILOT_HOME: `"$autoHome`". This may point to a synthetic home from a previous ctx activation." + [Environment]::NewLine)
+    }
+
     It 'Mode B: COPILOT_SKILLS_DIRS is unset (not empty) when no skills dirs exist' {
         New-CtxTestProfile -Name 'review' | Out-Null
         $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
@@ -1591,12 +1685,12 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
 
         $current = @(& { Show-CtxCurrent } 6>&1)
-        ($current -join "`n") | Should -Match 'Mode: ephemeral-clean'
-        ($current -join "`n") | Should -Not -Match 'Mode: global-user'
+        ($current -join "`n") | Should -Match 'Mode: C — ephemeral-clean'
+        ($current -join "`n") | Should -Not -Match 'Mode: B — global-user'
 
         $check = @(& { Test-CtxActivation } 6>&1)
         ($check -join "`n") | Should -Match 'CHECK FAIL COPILOT_MODE'
-        ($check -join "`n") | Should -Match 'does not match recorded active mode ephemeral-clean'
+        ($check -join "`n") | Should -Match 'does not match recorded active mode C — ephemeral-clean'
 
         # clear uses the recorded Mode C: unsets COPILOT_HOME, retains the path
         ctx clear | Out-Null
@@ -1612,8 +1706,8 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:AI_CTX_PROFILES_COPILOT_MODE = 'ephemeral-clean'
 
         $current = @(& { Show-CtxCurrent } 6>&1)
-        ($current -join "`n") | Should -Match 'Mode: global-user'
-        ($current -join "`n") | Should -Not -Match 'Mode: ephemeral-clean'
+        ($current -join "`n") | Should -Match 'Mode: B — global-user'
+        ($current -join "`n") | Should -Not -Match 'Mode: C — ephemeral-clean'
 
         $check = @(& { Test-CtxActivation } 6>&1)
         ($check -join "`n") | Should -Match 'CHECK FAIL COPILOT_MODE'
@@ -2053,6 +2147,229 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_SKILLS_DIRS = 'unexpected-value'
         $fail = @(& { Test-CtxActivation } 6>&1)
         ($fail -join "`n") | Should -Match 'CHECK FAIL COPILOT_SKILLS_DIRS'
+    }
+
+    # --- Group 7: ctx skills (read-only potential-skill-discovery inventory) --
+    # `ctx skills` inventories candidate skill directories from the filesystem
+    # and configuration. It never claims skills are loaded/invoked, never
+    # invokes the Copilot CLI, and never modifies settings, files, or the
+    # environment. Each candidate carries one classification (precedence:
+    # ctx-profile > expected-home > external) while all origins are retained.
+
+    It 'ctx skills: read-only inventory of candidate skill dirs with origins, dedup, and missing paths' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $proj = Join-Path $Script:TestTmp 'project-skills-inventory'
+        New-Item -ItemType Directory -Path (Join-Path $proj '.github\copilot'), (Join-Path $proj '.agents\skills\custom'), (Join-Path $proj '.github\skills\repo-skill'), (Join-Path $proj '.claude\skills\claude-skill') -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        Set-Location $proj
+
+        # Active Mode A context so ctx-owned provenance is attributable.
+        Import-CtxFile -CtxFile $ctxFile | Out-Null
+        $homeSkills = Join-Path $env:COPILOT_HOME 'skills'
+        Test-Path -LiteralPath $homeSkills -PathType Container | Should -BeTrue
+
+        # Configured entries: COPILOT_SKILLS_DIRS (an existing dot-segment alias of
+        # the active profile skills dir, the repo .github/skills dir itself,
+        # and a missing dir) and skillDirectories in a repo settings file (one
+        # existing skill dir, one missing), plus an observable installed-plugin
+        # skills subdir. One row must retain multiple distinct source origins,
+        # including two external-class origins.
+        $profileSkills = Join-Path $reviewDir '.github\skills'
+        $profileSkillsAlias = Join-Path $reviewDir '.github\.\skills'
+        $repoGithubSkills = Join-Path $proj '.github\skills'
+        $env:COPILOT_SKILLS_DIRS = "$profileSkillsAlias,$repoGithubSkills,$(Join-Path $Script:TestTmp 'missing-skills-dir')"
+        # Serialize via ConvertTo-Json so backslashes in Windows paths are
+        # escaped correctly; hand-interpolated JSON would be invalid there and
+        # silently drop skillDirectories.
+        $settings = @{ skillDirectories = @((Join-Path $profileSkills 'review-skill'), (Join-Path $Script:TestTmp 'missing-from-settings')) }
+        Set-Content -LiteralPath (Join-Path $proj '.github\copilot\settings.json') -Value ($settings | ConvertTo-Json -Compress)
+        New-Item -ItemType Directory -Path (Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\my-plugin\skills\pskill'), (Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\no-skill') -Force | Out-Null
+
+        $beforeEnv = @($env:AI_CTX_PROFILES, $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS, $env:COPILOT_HOME, $env:COPILOT_SKILLS_DIRS)
+
+        $out = @(& { ctx skills } 6>&1)
+        ($out -join "`n") | Should -Match ([regex]::Escape('[ctx skills] potential Copilot skill discovery'))
+        ($out -join "`n") | Should -Match 'ctx does not claim these skills are loaded or invoked'
+
+        # ctx-profile candidate from the active profile is reported exactly
+        # once, retaining the distinct external-class origin from
+        # COPILOT_SKILLS_DIRS (dedup via normalization of the dot-segment
+        # alias), and ctx-profile wins as the classification. Proven by
+        # case-sensitive ordinal counting, not -Match (which is
+        # case-insensitive and would not prove "exactly one row").
+        $text = $out -join "`n"
+        $profileSkillsRow = "candidate: $profileSkills (classification: ctx-profile, origins: copilot-skill-dirs,ctx-profile)"
+        $text.IndexOf($profileSkillsRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+        $needle = "candidate: $profileSkills ("
+        $count = 0
+        $idx = 0
+        while (($idx = $text.IndexOf($needle, $idx, [System.StringComparison]::Ordinal)) -ge 0) {
+            $count++
+            $idx += $needle.Length
+        }
+        $count | Should -Be 1
+
+        # expected-home candidate (the active Mode A COPILOT_HOME/skills).
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $homeSkills (classification: expected-home, origins: expected-home)"))
+
+        # external candidates: repo .github/skills (found by repository
+        # discovery AND COPILOT_SKILLS_DIRS -> two external-class origins),
+        # .agents/skills, and .claude/skills, plugin skill dir, configured
+        # skillDirectories entry that exists.
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $repoGithubSkills (classification: external, origins: copilot-skill-dirs,repo-github-skills)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $proj '.agents\skills') (classification: external, origins: repo-agents-skills)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $proj '.claude\skills') (classification: external, origins: repo-claude-skills)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\my-plugin\skills') (classification: external, origins: plugin-skills)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("candidate: $(Join-Path $profileSkills 'review-skill') (classification: external, origins: settings-skill-dirs)"))
+
+        # Configured-but-missing paths are reported, not failed, and the
+        # plugins root itself is never a candidate.
+        ($out -join "`n") | Should -Match ([regex]::Escape("missing: $(Join-Path $Script:TestTmp 'missing-skills-dir') (classification: external, origins: copilot-skill-dirs)"))
+        ($out -join "`n") | Should -Match ([regex]::Escape("missing: $(Join-Path $Script:TestTmp 'missing-from-settings') (classification: external, origins: settings-skill-dirs)"))
+        ($out -join "`n") | Should -Not -Match ([regex]::Escape("candidate: $(Join-Path $env:CTX_COPILOT_DIR 'installed-plugins') ("))
+        ($out -join "`n") | Should -Not -Match ([regex]::Escape("candidate: $(Join-Path $env:CTX_COPILOT_DIR 'installed-plugins\no-skill') ("))
+
+        # Boundary disclosures.
+        ($out -join "`n") | Should -Match 'not observable: command-line arguments of another Copilot process'
+        ($out -join "`n") | Should -Match 'not observable: skill locations inside installed Copilot plugins'
+        ($out -join "`n") | Should -Match 'no Copilot CLI probe performed'
+
+        # Strictly read-only: environment and files are untouched.
+        $afterEnv = @($env:AI_CTX_PROFILES, $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS, $env:COPILOT_HOME, $env:COPILOT_SKILLS_DIRS)
+        $afterEnv | Should -Be $beforeEnv
+        Test-Path -LiteralPath $homeSkills -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $proj '.github\skills') -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $proj '.agents\skills\custom') -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $proj '.claude\skills') -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $proj '.github\copilot\settings.json') -PathType Leaf | Should -BeTrue
+    }
+
+    It 'ctx skills: case-only path variants stay distinct on case-sensitive platforms, dedup on Windows' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $proj = Join-Path $Script:TestTmp 'project-skills-case'
+        New-Item -ItemType Directory -Path (Join-Path $proj '.github\skills'), (Join-Path $proj '.github\Skills') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+
+        # COPILOT_SKILLS_DIRS names the same repo .github/skills location under
+        # a case-only variant, so the inventory's path-key comparison decides
+        # whether they collapse (Windows) or stay two rows (Linux/macOS).
+        $lower = Join-Path $proj '.github\skills'
+        $upper = Join-Path $proj '.github\Skills'
+        $env:COPILOT_SKILLS_DIRS = "$lower,$upper"
+
+        $out = @(& { ctx skills } 6>&1)
+        $text = $out -join "`n"
+
+        # Both variants exist as directories on this platform (on a
+        # case-insensitive filesystem the upper variant resolves to the same
+        # directory, which is exactly the collision under test).
+        Test-Path -LiteralPath $lower -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath $upper -PathType Container | Should -BeTrue
+
+        $lowerRow = "candidate: $lower (classification: external, origins: copilot-skill-dirs,repo-github-skills)"
+        $upperRow = "candidate: $upper (classification: external, origins: copilot-skill-dirs)"
+
+        # -Match/-Not -Match are case-insensitive even on Windows, so they would
+        # let the upper-case variant match a lower-case row. Use Ordinal
+        # case-sensitive substring checks instead.
+        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            # Windows: case-insensitive path keys collapse to exactly one
+            # deduped row (the first-added lower-case key), classification/
+            # origins retained; the upper-case variant is not a distinct row.
+            $text.IndexOf($lowerRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+            $text.IndexOf($upperRow, [System.StringComparison]::Ordinal) | Should -Be -1
+            $needle = "candidate: $lower ("
+            $count = 0
+            $idx = 0
+            while (($idx = $text.IndexOf($needle, $idx, [System.StringComparison]::Ordinal)) -ge 0) {
+                $count++
+                $idx += $needle.Length
+            }
+            $count | Should -Be 1
+        } else {
+            # Linux/macOS: case-sensitive path keys keep two distinct rows,
+            # each with its own classification/origins.
+            $text.IndexOf($lowerRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+            $text.IndexOf($upperRow, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+        }
+    }
+
+    It 'ctx skills: path normalization strips trailing separators but preserves roots' {
+        # Filesystem roots (drive root, UNC share root, /) are never stripped
+        # down to a bare drive/empty string.
+        $root = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath())
+        Get-CtxSkillPathNormalized -Path $root | Should -BeExactly $root
+
+        # Windows drive root explicitly: C:\ must stay C:\ (never C:) whether
+        # spelled with a forward or backward slash.
+        if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+            Get-CtxSkillPathNormalized -Path 'C:\' | Should -BeExactly 'C:\'
+            Get-CtxSkillPathNormalized -Path 'C:/' | Should -BeExactly 'C:\'
+        }
+
+        # A non-root directory normalizes to itself whether or not it is
+        # spelled with a trailing separator.
+        $base = Join-Path $Script:TestTmp 'norm-trailing'
+        New-Item -ItemType Directory -Path $base -Force | Out-Null
+        Get-CtxSkillPathNormalized -Path $base | Should -BeExactly $base
+        Get-CtxSkillPathNormalized -Path ($base + [System.IO.Path]::DirectorySeparatorChar) | Should -BeExactly $base
+    }
+
+    It 'ctx skills: duplicate configured paths differing only by a trailing separator dedup to one row' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $proj = Join-Path $Script:TestTmp 'project-skills-trailing-sep'
+        New-Item -ItemType Directory -Path (Join-Path $proj '.github\skills') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+
+        # Same directory listed with and without a trailing separator.
+        $skillsDir = Join-Path $proj '.github\skills'
+        $env:COPILOT_SKILLS_DIRS = "$skillsDir,$skillsDir$([System.IO.Path]::DirectorySeparatorChar)"
+        $beforeEnv = @($env:AI_CTX_PROFILES, $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS, $env:COPILOT_HOME, $env:COPILOT_SKILLS_DIRS)
+
+        $out = @(& { ctx skills } 6>&1)
+        $text = $out -join "`n"
+
+        # Exactly one row, proven by case-sensitive ordinal counting; both
+        # external-class origins (repository discovery + COPILOT_SKILLS_DIRS)
+        # are retained.
+        $row = "candidate: $skillsDir (classification: external, origins: copilot-skill-dirs,repo-github-skills)"
+        $text.IndexOf($row, [System.StringComparison]::Ordinal) | Should -Not -Be -1
+        $needle = "candidate: $skillsDir ("
+        $count = 0
+        $idx = 0
+        while (($idx = $text.IndexOf($needle, $idx, [System.StringComparison]::Ordinal)) -ge 0) {
+            $count++
+            $idx += $needle.Length
+        }
+        $count | Should -Be 1
+
+        # Strictly read-only: environment is untouched.
+        $afterEnv = @($env:AI_CTX_PROFILES, $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS, $env:COPILOT_HOME, $env:COPILOT_SKILLS_DIRS)
+        $afterEnv | Should -Be $beforeEnv
+    }
+
+    It 'ctx skills: unknown provenance does not guess ctx-owned paths' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        $proj = Join-Path $Script:TestTmp 'project-skills-unknown'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+        Set-Location $proj
+
+        # A context that is set in the environment but has NO matching session
+        # activation record: ctx-owned paths must not be guessed.
+        $env:AI_CTX_PROFILES = 'review'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = $reviewDir
+        Reset-CtxActiveRecord
+
+        $out = @(& { ctx skills } 6>&1)
+        ($out -join "`n") | Should -Match 'unknown: no matching ctx session activation record; ctx-owned paths are not guessed'
+        ($out -join "`n") | Should -Not -Match ([regex]::Escape("candidate: $(Join-Path $reviewDir '.github\skills')"))
+        ($out -join "`n") | Should -Not -Match 'classification: ctx-profile'
     }
 
     # --- Issue #40: Mode A skill-name collision reconciliation ---------------

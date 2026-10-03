@@ -4,7 +4,7 @@
 
 ### Requirement: Mode A synthetic-home behavior
 
-The system SHALL implement Mode A (`synthetic-home`) as today's synthetic-home behavior with the canonical-profile projection addition specified by the `profile-activation` capability. An explicit `synthetic-home` value SHALL be byte-identical to the selector being unset. All current `COPILOT_HOME` symlink reconciliation, skill population, and cleanup rules SHALL remain as documented, except for canonical instruction and skill sourcing specified by `profile-activation`. The rename-through-symlink hazard and concurrent last-writer-wins race SHALL remain documented, not fixed, and not hidden. The existing Mode A skill-collision behavior SHALL NOT be changed by this feature; canonical skills SHALL use the same collision behavior specified by `profile-activation`. Mode A SHALL NOT be altered to resolve unrelated issues such as the skill-name-collision bug. The Unix pwsh runtime guard in `profile-activation` SHALL apply: on Unix pwsh running .NET 8 and earlier an all-canonical Mode A selection SHALL fail before any mutation with a pwsh/.NET 9+ requirement rather than export a dropped empty value, and the present-empty contract SHALL NOT be weakened.
+The system SHALL implement Mode A (`synthetic-home`) as today's synthetic-home behavior with the canonical-profile projection addition specified by the `profile-activation` capability. An explicit `synthetic-home` value SHALL be byte-identical to the selector being unset. All current `COPILOT_HOME` symlink reconciliation, skill population, and cleanup rules SHALL remain as documented, except for canonical instruction and skill sourcing specified by `profile-activation`. The rename-through-symlink hazard and concurrent last-writer-wins race SHALL remain documented, not fixed, and not hidden. The existing Mode A skill-collision behavior SHALL NOT be changed by this feature; canonical skills SHALL use the same collision behavior specified by `profile-activation`. Mode A SHALL NOT be altered to resolve unrelated issues such as the skill-name-collision bug. The Unix pwsh runtime guard in `profile-activation` SHALL apply: on Unix pwsh running .NET 8 and earlier an all-canonical Mode A selection SHALL fail before any mutation with a pwsh/.NET 9+ requirement rather than export a dropped empty value, and the present-empty contract SHALL NOT be weakened. Mode A's `skills/` population SHALL be understood as projecting only the selected profiles' `.github/skills` into the synthetic `COPILOT_HOME` view; it SHALL NOT be represented as a complete skill-discovery mechanism or a security sandbox, because other built-in or configured discovery locations (e.g. personal `~/.agents/skills`, repository `.github/skills`/`.claude/skills`, `COPILOT_SKILLS_DIRS`, or configured `skillDirectories`) MAY remain discoverable by Copilot and SHALL NOT be blocked by Mode A.
 
 #### Scenario: Explicit synthetic-home is byte-identical to unset
 
@@ -15,6 +15,11 @@ The system SHALL implement Mode A (`synthetic-home`) as today's synthetic-home b
 
 - **WHEN** a context is active under Mode A
 - **THEN** the synthetic `COPILOT_HOME` uses the documented symlink, skill-directory, and cleanup rules; canonical instructions and skills follow the canonical-profile contract; and the rename-through-symlink hazard and concurrent race remain documented rather than fixed
+
+#### Scenario: Mode A projects profile skills but is not a discovery or security sandbox
+
+- **WHEN** a context is active under Mode A and other built-in or configured skill discovery locations exist
+- **THEN** the synthetic `COPILOT_HOME` view contains only the selected profiles' `.github/skills` projection, those other locations may still be discovered by Copilot, and `ctx` SHALL NOT claim that Mode A blocks them
 
 #### Scenario: Mode A default-visible addition is mode reporting only
 
