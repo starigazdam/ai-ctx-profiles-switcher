@@ -526,7 +526,8 @@ ctx() {
     local mode
     mode="$(_ctx_validate_copilot_mode)" || return 1
     local dirs_csv="" skills_dirs_csv=""
-    local -a resolved_dirs_manual=() context_names=() seen_names=()
+    local -a resolved_dirs_manual=() context_names=() seen_names=() legacy_dirs=() canon_labels=()
+    _ctx_canon_args=()
     for context_name in "$@"; do
         context_lc="$(_ctx_lowercase "$context_name")"
         for profile_name_lc in "${seen_names[@]}"; do
@@ -535,10 +536,25 @@ ctx() {
         seen_names+=("$context_lc")
         if ! profile_dir="$(_ctx_resolve_profile_identifier "$context_name")"; then return 1; fi
         context_names+=("$context_name"); resolved_dirs_manual+=("$profile_dir")
-        [ -z "$dirs_csv" ] && dirs_csv="$profile_dir" || dirs_csv="$dirs_csv,$profile_dir"
+        if _ctx_profile_is_canonical "$profile_dir"; then
+            _ctx_canon_args+=("${#context_names[@]}" "$context_name" "$profile_dir")
+            canon_labels+=("$context_name")
+        else
+            legacy_dirs+=("$profile_dir")
+        fi
     done
     [ "${#context_names[@]}" -gt 0 ] || return 1
     profile_name="${context_names[0]}"
+    # Canonical profiles are only projectable in Mode A. Reject any canonical
+    # selection under Modes B/C before any environment export, workspace write,
+    # or Copilot-home setup/creation (issue #48).
+    if [ "${#canon_labels[@]}" -gt 0 ] && [ "$mode" != "synthetic-home" ]; then
+        printf 'ctx: error: canonical profile(s) require synthetic-home mode (active mode: %s): %s\n' "$mode" "${canon_labels[*]}" >&2
+        return 1
+    fi
+    # Mode A includes only legacy roots in COPILOT_CUSTOM_INSTRUCTIONS_DIRS;
+    # an all-canonical selection yields the present-empty value.
+    dirs_csv="$(IFS=,; printf '%s' "${legacy_dirs[*]}")"
     # COPILOT_SKILLS_DIRS is computed/validated only in Modes B/C before any
     # state change; a comma in an included skills path rejects the activation.
     # Mode A must not run this new validation or otherwise change its parsing.
@@ -607,6 +623,10 @@ ctx() {
 # --- Auto-loading via .ctx files ----------------------------------------
 
 _ctx_auto_load_dir=""
+# Ordered canonical projection entries ("order label source-dir" triples) for
+# the activation currently being preflighted; set by the manual and .ctx
+# activation callers and read by _ctx_setup_copilot_home. Reset per activation.
+_ctx_canon_args=()
 # Tracks the "home:" directive override (issue #7), if any, from the last
 # .ctx file auto-loaded, so _ctx_clear --all knows to look for the
 # synthetic COPILOT_HOME at that location instead of the centralized one.
@@ -808,9 +828,170 @@ _ctx_copilot_home_root() {
 _ctx_sanitize_context_name() {
     # Sanitizes a context name for safe use as a single path component.
     # '+' is already filesystem-safe and left as-is. Any '/' or other
-    # unsafe character is replaced with '_' defensively.
+    # unsafe character is replaced with '_' defensively. Built-in pattern
+    # substitution (not tr) so a multibyte character like 'é' is replaced
+    # exactly once, matching Get-CtxSanitizedContextName (issue #48).
     local name="$1"
-    printf '%s' "$name" | tr -c 'A-Za-z0-9+._-' '_'
+    printf '%s' "${name//[^A-Za-z0-9+._-]/_}"
+}
+
+_ctx_profile_is_canonical() {
+    # A resolved profile directory is canonical when it has a root-level
+    # AGENTS.md; otherwise it keeps legacy behavior (issue #48).
+    [ -f "$1/AGENTS.md" ]
+}
+
+_ctx_in_list() {
+    # $1: needle; remaining args: list. Returns 0 when the needle is present.
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+_ctx_valid_projection_name() {
+    # Returns 0 when $1 matches the manifest grammar
+    # <4+ ASCII digits>-<A-Za-z0-9+._->.instructions.md.
+    local name="$1" stem digits label
+    case "$name" in
+        *.instructions.md) stem="${name%.instructions.md}" ;;
+        *) return 1 ;;
+    esac
+    case "$stem" in
+        *-*) : ;;
+        *) return 1 ;;
+    esac
+    digits="${stem%%-*}"
+    label="${stem#*-}"
+    [ "${#digits}" -ge 4 ] || return 1
+    case "$digits" in *[!0-9]*) return 1 ;; esac
+    [ -n "$label" ] || return 1
+    case "$label" in *[!A-Za-z0-9+._-]*) return 1 ;; esac
+    return 0
+}
+
+_ctx_projection_basename() {
+    # $1: one-based selection order, $2: raw label.
+    printf '%04d-%s.instructions.md' "$1" "$(_ctx_sanitize_context_name "$2")"
+}
+
+_ctx_project_instructions() {
+    # $1: COPILOT_HOME. Remaining args: triples "order label source-dir".
+    # Validates projection parent directories and the .ctx-managed manifest
+    # before any mutation, then reconciles the desired canonical instruction
+    # projections. Fails closed on unsafe/malformed/unmanaged state.
+    local home_dir="$1"; shift
+    local -a args=("$@")
+    local proj_dir="$home_dir/instructions/ctx-profiles"
+    local parent_dir="$home_dir/instructions"
+    local manifest="$proj_dir/.ctx-managed"
+    local item
+
+    for item in "$parent_dir" "$proj_dir"; do
+        if [ -L "$item" ] || { [ -e "$item" ] && [ ! -d "$item" ]; }; then
+            printf 'ctx: error: unsafe projection directory: %s\n' "$item" >&2
+            return 1
+        fi
+    done
+
+    local -a managed=()
+    if [ -L "$manifest" ]; then
+        printf 'ctx: error: malformed projection manifest: %s\n' "$manifest" >&2
+        return 1
+    fi
+    if [ -e "$manifest" ]; then
+        if [ ! -f "$manifest" ] || [ ! -r "$manifest" ]; then
+            printf 'ctx: error: malformed projection manifest: %s\n' "$manifest" >&2
+            return 1
+        fi
+        local line
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%$'\r'}"
+            [ -z "$line" ] && continue
+            if ! _ctx_valid_projection_name "$line"; then
+                printf 'ctx: error: malformed projection manifest: %s\n' "$manifest" >&2
+                return 1
+            fi
+            managed+=("$line")
+        done < "$manifest"
+    fi
+
+    local -a desired=()
+    local order label source name
+    set -- "${args[@]}"
+    while [ "$#" -gt 0 ]; do
+        order="$1"; label="$2"; source="$3"; shift 3
+        desired+=("$(_ctx_projection_basename "$order" "$label")")
+    done
+
+    for name in "${desired[@]}"; do
+        if [ -e "$proj_dir/$name" ] || [ -L "$proj_dir/$name" ]; then
+            if ! _ctx_in_list "$name" "${managed[@]}"; then
+                printf 'ctx: error: unmanaged projection file exists and is not in the manifest: %s\n' "$proj_dir/$name" >&2
+                return 1
+            fi
+            if [ -L "$proj_dir/$name" ] || [ ! -f "$proj_dir/$name" ]; then
+                printf 'ctx: error: unsafe managed projection target (must be a regular non-link file): %s\n' "$proj_dir/$name" >&2
+                return 1
+            fi
+        fi
+    done
+
+    local m
+    for m in "${managed[@]}"; do
+        if ! _ctx_in_list "$m" "${desired[@]}"; then
+            rm -f -- "$proj_dir/$m"
+        fi
+    done
+
+    set -- "${args[@]}"
+    while [ "$#" -gt 0 ]; do
+        order="$1"; label="$2"; source="$3"; shift 3
+        name="$(_ctx_projection_basename "$order" "$label")"
+        if [ ! -d "$proj_dir" ]; then
+            mkdir -p "$proj_dir" || {
+                printf 'ctx: error: could not create projection directory: %s\n' "$proj_dir" >&2
+                return 1
+            }
+        fi
+        { printf -- '---\napplyTo: "**"\n---\n\n'; cat -- "$source/AGENTS.md"; } > "$proj_dir/$name" || {
+            printf 'ctx: error: could not write projection: %s\n' "$proj_dir/$name" >&2
+            return 1
+        }
+    done
+
+    if [ "${#desired[@]}" -eq 0 ]; then
+        rm -f -- "$manifest"
+        rmdir "$proj_dir" 2>/dev/null || true
+        rmdir "$parent_dir" 2>/dev/null || true
+    else
+        : > "$manifest"
+        for name in "${desired[@]}"; do
+            printf '%s\n' "$name" >> "$manifest"
+        done
+    fi
+    return 0
+}
+
+_ctx_skill_source_dirs() {
+    # Prints candidate skill directories for a resolved profile directory:
+    # canonical profiles use .agents/skills/<name> with a regular non-link
+    # SKILL.md; legacy profiles use .github/skills as before (issue #48).
+    local rd="$1" skill_root s
+    if _ctx_profile_is_canonical "$rd"; then
+        skill_root="$rd/.agents/skills"
+        [ -d "$skill_root" ] || return 0
+        while IFS= read -r s; do
+            [ -f "$s/SKILL.md" ] && [ ! -L "$s/SKILL.md" ] || continue
+            printf '%s\n' "$s"
+        done < <(find "$skill_root" -mindepth 1 -maxdepth 1 -type d -print)
+    else
+        skill_root="$rd/.github/skills"
+        [ -d "$skill_root" ] || return 0
+        find "$skill_root" -mindepth 1 -maxdepth 1 -type d -print
+    fi
 }
 
 _ctx_validate_home_path() {
@@ -1027,6 +1208,11 @@ _ctx_setup_copilot_home() {
     fi
     copilot_dir="${CTX_COPILOT_DIR:-$HOME/.copilot}"
 
+    # Canonical instruction projection is validated/reconciled before any
+    # other mutation so an unsafe/unmanaged projection fails the whole
+    # activation atomically (issue #48).
+    _ctx_project_instructions "$home_dir" "${_ctx_canon_args[@]}" || return 1
+
     mkdir -p "$home_dir/skills" || {
         printf 'ctx: warning: could not create %s; leaving COPILOT_HOME unset\n' "$home_dir" >&2
         return 1
@@ -1056,19 +1242,19 @@ EOF
     fi
 
     # Reconcile skills/: desired (name -> target) pairs come from each
-    # resolved dir's .github/skills subfolder, if present. Skill names are
-    # compared case-insensitively using the same canonical key as PowerShell's
-    # ToLowerInvariant() (COPILOT_HOME targets are case-insensitive on
-    # Windows), so two source dirs contributing "foo" and "Foo" collide
-    # and the whole colliding group is skipped (issue #40).
+    # resolved dir's contracted skill source (.github/skills for legacy
+    # profiles, .agents/skills for canonical profiles), if present. Skill
+    # names are compared case-insensitively using the same canonical key as
+    # PowerShell's ToLowerInvariant() (COPILOT_HOME targets are
+    # case-insensitive on Windows), so two source dirs contributing "foo"
+    # and "Foo" collide and the whole colliding group is skipped (issue #40).
     local -A desired_skills=() desired_skill_names=() collided_skills=() collided_contribs=()
     local -a desired_skill_order=() collided_skill_order=()
-    local rd skill_dir sname lcname
+    local rd sname lcname
     for rd in "${resolved_dirs[@]}"; do
-        skill_dir="$rd/.github/skills"
-        [ -d "$skill_dir" ] || continue
         local s
         while IFS= read -r s; do
+            [ -n "$s" ] || continue
             sname="$(basename "$s")"
             if ! lcname="$(_ctx_skill_canonical_name "$sname")"; then
                 return 1
@@ -1086,7 +1272,7 @@ EOF
                 desired_skill_order+=("$lcname")
                 collided_contribs[$lcname]="$rd"
             fi
-        done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
+        done < <(_ctx_skill_source_dirs "$rd")
     done
 
     local cname
@@ -1335,7 +1521,29 @@ _ctx_load_ctx_file() {
         printf 'ctx: error: "home:" directive is only valid in synthetic-home mode (active mode: %s); allowed values: synthetic-home, global-user, ephemeral-clean\n' "$mode" >&2
         return 1
     fi
-    dirs_csv="$(IFS=,; printf '%s' "${_ctx_parsed_dirs[*]}")"
+    # Classify each ordered .ctx entry as canonical or legacy, then reject any
+    # canonical entry under Modes B/C before any environment export, workspace
+    # write, or Copilot-home setup/creation (issue #48).
+    local -a legacy_dirs=() canon_labels=()
+    _ctx_canon_args=()
+    local _p_name _p_path _p_order=0
+    local -a _pairs=("${_ctx_parsed_pairs[@]}")
+    set -- "${_pairs[@]}"
+    while [ "$#" -gt 0 ]; do
+        _p_name="$1"; _p_path="$2"; shift 2
+        _p_order=$((_p_order + 1))
+        if _ctx_profile_is_canonical "$_p_path"; then
+            _ctx_canon_args+=("$_p_order" "$_p_name" "$_p_path")
+            canon_labels+=("$_p_name")
+        else
+            legacy_dirs+=("$_p_path")
+        fi
+    done
+    if [ "${#canon_labels[@]}" -gt 0 ] && [ "$mode" != "synthetic-home" ]; then
+        printf 'ctx: error: canonical profile(s) require synthetic-home mode (active mode: %s): %s\n' "$mode" "${canon_labels[*]}" >&2
+        return 1
+    fi
+    dirs_csv="$(IFS=,; printf '%s' "${legacy_dirs[*]}")"
     # COPILOT_SKILLS_DIRS is computed/validated only in Modes B/C before any
     # state change; a comma in an included skills path rejects the activation.
     # Mode A must not run this new validation or otherwise change its parsing.
@@ -1418,17 +1626,16 @@ _ctx_check_skip_links_and_skills() {
 $(_ctx_copilot_home_shared_files)
 $(_ctx_copilot_home_shared_dirs)
 EOF
-    local -A desired=()
+    local -A skip_desired=()
     local -a desired_names=()
-    local rd skill_dir s sname
+    local rd s sname
     for rd in "$@"; do
-        skill_dir="$rd/.github/skills"
-        [ -d "$skill_dir" ] || continue
         while IFS= read -r s; do
+            [ -n "$s" ] || continue
             sname="$(basename "$s")"
-            [ -n "${desired[$sname]+set}" ] || desired_names+=("$sname")
-            desired["$sname"]="${s%/}"
-        done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
+            [ -n "${skip_desired[$sname]+set}" ] || desired_names+=("$sname")
+            skip_desired["$sname"]="${s%/}"
+        done < <(_ctx_skill_source_dirs "$rd")
     done
     local sorted
     sorted="$(printf '%s\n' "${desired_names[@]}" | sort)"
@@ -1436,6 +1643,96 @@ EOF
         [ -n "$sname" ] || continue
         printf 'CHECK SKIP skill:%s\n' "$sname"
     done <<< "$sorted"
+}
+
+_ctx_check_instructions() {
+    # Read-only canonical instruction audit. $1: expected COPILOT_HOME;
+    # $2: recorded mode; remaining args: alternating "name source-dir" pairs.
+    # Emits CHECK PASS/FAIL/SKIP instruction:<file>. B/C and unattributable
+    # (no-record) states skip Mode-A-only projections.
+    local expected_home="$1" recorded_mode="$2"; shift 2
+    local -a entries=("$@")
+    local n=${#entries[@]}
+
+    if [ "$recorded_mode" != "synthetic-home" ]; then
+        if [ "$n" -gt 0 ]; then
+            set -- "${entries[@]}"
+            while [ "$#" -gt 0 ]; do
+                printf 'CHECK SKIP instruction:%s\n' "$1"
+                shift 2
+            done
+        fi
+        return 0
+    fi
+
+    local proj_dir="$expected_home/instructions/ctx-profiles"
+    local parent_dir="$expected_home/instructions"
+    local manifest="$proj_dir/.ctx-managed"
+    local failures=0
+
+    if [ -L "$parent_dir" ] || { [ -e "$parent_dir" ] && [ ! -d "$parent_dir" ]; } \
+       || [ -L "$proj_dir" ] || { [ -e "$proj_dir" ] && [ ! -d "$proj_dir" ]; }; then
+        if [ "$n" -gt 0 ]; then
+            set -- "${entries[@]}"
+            while [ "$#" -gt 0 ]; do
+                printf 'CHECK FAIL instruction:%s\n' "$1"
+                shift 2
+            done
+        fi
+        return 1
+    fi
+
+    local -a managed=()
+    local manifest_ok=1
+    if [ -L "$manifest" ]; then
+        manifest_ok=0
+    elif [ -e "$manifest" ]; then
+        if [ ! -f "$manifest" ] || [ ! -r "$manifest" ]; then
+            manifest_ok=0
+        else
+            local line
+            while IFS= read -r line || [ -n "$line" ]; do
+                line="${line%$'\r'}"
+                [ -z "$line" ] && continue
+                if ! _ctx_valid_projection_name "$line"; then manifest_ok=0; break; fi
+                managed+=("$line")
+            done < "$manifest"
+        fi
+    elif [ "$n" -gt 0 ]; then
+        # A matching Mode A record with expected canonical entries requires a
+        # readable manifest.
+        manifest_ok=0
+    fi
+    if [ "$n" -gt 0 ] && [ "$manifest_ok" -eq 0 ]; then
+        printf 'CHECK FAIL instruction:manifest\n'
+        return 1
+    fi
+
+    local -a expected_names=()
+    local name source target
+    set -- "${entries[@]}"
+    while [ "$#" -gt 0 ]; do
+        name="$1"; source="$2"; shift 2
+        expected_names+=("$name")
+        target="$proj_dir/$name"
+        if _ctx_in_list "$name" "${managed[@]}" \
+           && [ -f "$target" ] && [ ! -L "$target" ] \
+           && { printf -- '---\napplyTo: "**"\n---\n\n'; cat -- "$source/AGENTS.md"; } | cmp -s - "$target"; then
+            printf 'CHECK PASS instruction:%s\n' "$name"
+        else
+            printf 'CHECK FAIL instruction:%s\n' "$name"
+            failures=$((failures + 1))
+        fi
+    done
+
+    local m
+    for m in "${managed[@]}"; do
+        if ! _ctx_in_list "$m" "${expected_names[@]}"; then
+            printf 'CHECK FAIL instruction:%s: stale projection\n' "$m"
+            failures=$((failures + 1))
+        fi
+    done
+    [ "$failures" -eq 0 ]
 }
 
 _ctx_check_skills_dirs() {
@@ -1474,6 +1771,8 @@ _ctx_check() {
     local failures=0
     local recorded_mode="" selector_mode=""
     local -A seen_labels=() seen_targets=()
+    local -a legacy_dirs=() canon_entries=()
+    local _p_name _p_path _p_order=0
 
     if ! ctx_file="$(_ctx_find_ctx_file)"; then
         printf 'ctx check: no .ctx file found; nothing to check\n'
@@ -1485,7 +1784,21 @@ _ctx_check() {
     fi
     dir_of_file="$_ctx_parsed_dir"; expected_context="$_ctx_parsed_context"; home_override="$_ctx_parsed_home"
     names=("${_ctx_parsed_names[@]}"); dirs=("${_ctx_parsed_dirs[@]}")
-    expected_dirs="$(IFS=,; printf '%s' "${dirs[*]}")"
+    # Canonical entries are never listed in COPILOT_CUSTOM_INSTRUCTIONS_DIRS;
+    # expected_dirs is therefore the ordered legacy roots only. A canonical
+    # entry's expected projection is keyed by its one-based selection order.
+    local -a _pairs=("${_ctx_parsed_pairs[@]}")
+    set -- "${_pairs[@]}"
+    while [ "$#" -gt 0 ]; do
+        _p_name="$1"; _p_path="$2"; shift 2
+        _p_order=$((_p_order + 1))
+        if _ctx_profile_is_canonical "$_p_path"; then
+            canon_entries+=("$(_ctx_projection_basename "$_p_order" "$_p_name")" "$_p_path")
+        else
+            legacy_dirs+=("$_p_path")
+        fi
+    done
+    expected_dirs="$(IFS=,; printf '%s' "${legacy_dirs[*]}")"
     if [ "${AI_CTX_PROFILES:-}" = "$expected_context" ]; then printf 'CHECK PASS AI_CTX_PROFILES\n'; else printf 'CHECK FAIL AI_CTX_PROFILES: expected %s, got %s\n' "$expected_context" "${AI_CTX_PROFILES:-<unset>}"; failures=$((failures+1)); fi
     # The active mode is the mode of the matching session-local activation
     # record, never the raw selector. A record matches only while its context
@@ -1507,7 +1820,16 @@ _ctx_check() {
     else
         printf 'CHECK UNKNOWN COPILOT_MODE: no matching local activation record\n'
     fi
-    if [ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" = "$expected_dirs" ]; then printf 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n'; else printf 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected %s, got %s\n' "$expected_dirs" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-<unset>}"; failures=$((failures+1)); fi
+    if [ -n "$expected_dirs" ]; then
+        if [ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}" = "$expected_dirs" ]; then printf 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n'; else printf 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected %s, got %s\n' "$expected_dirs" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-<unset>}"; failures=$((failures+1)); fi
+    elif [ -n "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS+x}" ] && [ -z "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" ]; then
+        # All-canonical Mode A requires a present-empty value; absent is not
+        # accepted as empty.
+        printf 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n'
+    else
+        printf 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected <present-empty>, got %s\n' "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-<unset>}"
+        failures=$((failures+1))
+    fi
 
     local expected_home
     if [ -n "$home_override" ]; then expected_home="$home_override"; else expected_home="$(_ctx_copilot_home_root)/$(_ctx_sanitize_context_name "$expected_context")"; fi
@@ -1569,11 +1891,10 @@ $(_ctx_copilot_home_shared_dirs)
 EOF
             local -A seen=() collided=() first_target=() contributors=() actual=() actual_seen=() actual_dup=()
             local -a all_names=() actual_names=() actual_dup_names=()
-            local rd skill_dir s skill_name lcname
+            local rd s skill_name lcname
             for rd in "${dirs[@]}"; do
-                skill_dir="$rd/.github/skills"
-                [ -d "$skill_dir" ] || continue
                 while IFS= read -r s; do
+                    [ -n "$s" ] || continue
                     skill_name="$(basename "$s")"
                     if ! lcname="$(_ctx_skill_canonical_name "$skill_name")"; then
                         printf 'CHECK FAIL skill:%s: cannot canonicalize skill name (python3/python not found)\n' "$skill_name"
@@ -1591,7 +1912,7 @@ EOF
                         contributors[$lcname]="$rd"
                         all_names+=("$lcname")
                     fi
-                done < <(find "$skill_dir" -mindepth 1 -maxdepth 1 -type d -print)
+                done < <(_ctx_skill_source_dirs "$rd")
             done
             while IFS= read -r s; do
                 skill_name="$(basename "$s")"
@@ -1651,6 +1972,10 @@ EOF
             _ctx_check_skip_links_and_skills "$expected_home" "${dirs[@]}"
             ;;
     esac
+
+    # Canonical instruction projections are audited under the recorded mode
+    # (Mode A checks, B/C and no-record SKIP). Read-only.
+    _ctx_check_instructions "$expected_home" "$recorded_mode" "${canon_entries[@]}" || failures=$((failures + 1))
 
     # Strict check is read-only: do not invoke external copilot commands.
     # Even a seemingly informational probe may write caches/state.

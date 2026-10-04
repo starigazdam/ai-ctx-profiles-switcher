@@ -469,7 +469,32 @@ function ctx {
         $dirsList += $profileDir
     }
 
-    $dirsCsv = $dirsList -join ','
+    # Canonical profiles are only projectable in Mode A. Reject any canonical
+    # selection under Modes B/C before any environment export, workspace write,
+    # or Copilot-home setup/creation (issue #48). An all-canonical Mode A
+    # selection additionally requires pwsh/.NET 9+ on Unix.
+    $canonicalNames = @()
+    $legacyDirs = @()
+    for ($ci = 0; $ci -lt $dirsList.Count; $ci++) {
+        if (Test-CtxProfileCanonical -ProfileDir $dirsList[$ci]) {
+            $canonicalNames += $profileNames[$ci]
+        } else {
+            $legacyDirs += $dirsList[$ci]
+        }
+    }
+    if ($canonicalNames.Count -gt 0 -and $mode -cne 'synthetic-home') {
+        Write-Error "ctx: error: canonical profile(s) require synthetic-home mode (active mode: $mode): $($canonicalNames -join ', ')"
+        return
+    }
+    $allCanonical = ($canonicalNames.Count -gt 0 -and $canonicalNames.Count -eq $dirsList.Count)
+    if ($mode -ceq 'synthetic-home' -and $allCanonical -and (Test-CtxUnixOldDotnet)) {
+        Write-Error 'ctx: error: all-canonical Mode A requires pwsh/.NET 9+ on Unix'
+        return
+    }
+
+    # Mode A includes only legacy roots in COPILOT_CUSTOM_INSTRUCTIONS_DIRS;
+    # an all-canonical selection yields the present-empty value.
+    $dirsCsv = $legacyDirs -join ','
     $sharedCsv = ""
 
     # COPILOT_SKILLS_DIRS is computed/validated only in Modes B/C before any
@@ -498,7 +523,7 @@ function ctx {
         # Mode A: preflight home creation and link reconciliation before any
         # state change so a failure leaves the previous context, COPILOT_HOME,
         # and all files untouched.
-        if (-not (Set-CtxCopilotHome -ContextName $newContext -ResolvedDirs $dirsList)) {
+        if (-not (Set-CtxCopilotHome -ContextName $newContext -ResolvedDirs $dirsList -Labels $profileNames)) {
             return $false
         }
     }
@@ -683,6 +708,234 @@ function Get-CtxSanitizedContextName {
     # character is replaced with '_' defensively.
     param([string]$Name)
     return ($Name -replace '[^A-Za-z0-9+._-]', '_')
+}
+
+function Test-CtxProfileCanonical {
+    # A resolved profile directory is canonical when it has a root-level
+    # AGENTS.md; otherwise it keeps legacy behavior (issue #48).
+    param([string]$ProfileDir)
+    return (Test-Path -LiteralPath (Join-Path $ProfileDir 'AGENTS.md') -PathType Leaf)
+}
+
+function Test-CtxValidProjectionName {
+    # Returns $true when $Name matches the manifest grammar
+    # <4+ ASCII digits>-<A-Za-z0-9+._->.instructions.md.
+    param([string]$Name)
+    return ($Name -cmatch '^[0-9]{4,}-[A-Za-z0-9+._-]+\.instructions\.md$')
+}
+
+function Get-CtxProjectionName {
+    # $Order: one-based selection order; $Label: raw label.
+    param([int]$Order, [string]$Label)
+    return ('{0:D4}-{1}.instructions.md' -f $Order, (Get-CtxSanitizedContextName -Name $Label))
+}
+
+function Test-CtxUnixOldDotnet {
+    # $true on Unix (Linux/macOS) PowerShell running .NET 8 or earlier, where
+    # assigning an empty environment variable removes it, so the required
+    # present-empty all-canonical Mode A value cannot be produced (issue #48).
+    $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
+    if ($isWindowsLike) { return $false }
+    return ([System.Environment]::Version.Major -lt 9)
+}
+
+function Get-CtxSkillSourceDirs {
+    # Emits candidate skill directories for a resolved profile directory:
+    # canonical profiles use .agents/skills/<name> with a regular non-link
+    # SKILL.md; legacy profiles use .github/skills as before (issue #48).
+    param([string]$ResolvedDir)
+    if (Test-CtxProfileCanonical -ProfileDir $ResolvedDir) {
+        $skillDir = Join-Path $ResolvedDir '.agents\skills'
+        if (Test-Path -LiteralPath $skillDir -PathType Container) {
+            foreach ($s in (Get-ChildItem -LiteralPath $skillDir -Directory)) {
+                $skillMd = Join-Path $s.FullName 'SKILL.md'
+                if ((Test-Path -LiteralPath $skillMd -PathType Leaf) -and -not (Test-CtxIsLink -Path $skillMd)) {
+                    $s
+                }
+            }
+        }
+    } else {
+        $skillDir = Join-Path $ResolvedDir '.github\skills'
+        if (Test-Path -LiteralPath $skillDir -PathType Container) {
+            Get-ChildItem -LiteralPath $skillDir -Directory
+        }
+    }
+}
+
+function Set-CtxCanonicalInstructions {
+    # Validates the projection parent directories and .ctx-managed manifest
+    # before any mutation, then reconciles the desired canonical instruction
+    # projections. Fails closed on unsafe/malformed/unmanaged state.
+    param(
+        [string]$HomeDir,
+        [object[]]$Entries
+    )
+    $projDir = Join-Path $HomeDir 'instructions/ctx-profiles'
+    $parentDir = Join-Path $HomeDir 'instructions'
+    $manifest = Join-Path $projDir '.ctx-managed'
+
+    foreach ($p in @($parentDir, $projDir)) {
+        $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+        if ($item -and ((Test-CtxIsLink -Path $p) -or -not $item.PSIsContainer)) {
+            throw "unsafe projection directory: $p"
+        }
+    }
+
+    $managed = @()
+    $manifestItem = Get-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
+    if ($manifestItem) {
+        if ((Test-CtxIsLink -Path $manifest) -or $manifestItem.PSIsContainer) {
+            throw "malformed projection manifest: $manifest"
+        }
+        try {
+            foreach ($line in [System.IO.File]::ReadAllLines($manifest)) {
+                $t = $line.TrimEnd("`r")
+                if (-not $t) { continue }
+                if (-not (Test-CtxValidProjectionName -Name $t)) {
+                    throw "malformed projection manifest: $manifest"
+                }
+                $managed += $t
+            }
+        } catch {
+            throw "malformed projection manifest: $manifest"
+        }
+    }
+
+    $desired = @()
+    foreach ($e in $Entries) {
+        $desired += (Get-CtxProjectionName -Order $e.Order -Label $e.Label)
+    }
+
+    foreach ($d in $desired) {
+        $target = Join-Path $projDir $d
+        if ((Test-Path -LiteralPath $target) -or (Test-CtxIsLink -Path $target)) {
+            if ($managed -notcontains $d) {
+                throw "unmanaged projection file exists and is not in the manifest: $target"
+            }
+            $item = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+            if (-not $item -or $item.PSIsContainer -or (Test-CtxIsLink -Path $target)) {
+                throw "unsafe managed projection target (must be a regular non-link file): $target"
+            }
+        }
+    }
+
+    foreach ($m in $managed) {
+        if ($desired -notcontains $m) {
+            Remove-Item -LiteralPath (Join-Path $projDir $m) -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $header = [System.Text.Encoding]::UTF8.GetBytes("---`napplyTo: `"**`"`n---`n`n")
+    foreach ($e in $Entries) {
+        $name = Get-CtxProjectionName -Order $e.Order -Label $e.Label
+        if (-not (Test-Path -LiteralPath $projDir)) {
+            New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        }
+        $body = [System.IO.File]::ReadAllBytes((Join-Path $e.Path 'AGENTS.md'))
+        $out = New-Object byte[] ($header.Length + $body.Length)
+        [Array]::Copy($header, 0, $out, 0, $header.Length)
+        [Array]::Copy($body, 0, $out, $header.Length, $body.Length)
+        [System.IO.File]::WriteAllBytes((Join-Path $projDir $name), $out)
+    }
+
+    if ($desired.Count -eq 0) {
+        Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
+        foreach ($p in @($projDir, $parentDir)) {
+            if (Test-Path -LiteralPath $p -PathType Container) {
+                if (-not (Get-ChildItem -LiteralPath $p -Force | Select-Object -First 1)) {
+                    Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    } else {
+        if (-not (Test-Path -LiteralPath $projDir)) {
+            New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        }
+        [System.IO.File]::WriteAllText($manifest, (($desired -join "`n") + "`n"))
+    }
+}
+
+function Write-CtxCheckInstructions {
+    # Read-only canonical instruction audit. $Entries are { Name; Source }
+    # objects. Emits CHECK PASS/FAIL/SKIP instruction:<file>. B/C and
+    # unattributable (no-record) states skip Mode-A-only projections.
+    param(
+        [string]$ExpectedHome,
+        [string]$RecordedMode,
+        [object[]]$Entries
+    )
+    $Entries = @($Entries)
+    if ($Entries.Count -eq 0) { return $true }
+
+    if (($RecordedMode -cne 'synthetic-home')) {
+        foreach ($e in $Entries) { Write-Host "CHECK SKIP instruction:$($e.Name)" }
+        return $true
+    }
+
+    $projDir = Join-Path $ExpectedHome 'instructions/ctx-profiles'
+    $parentDir = Join-Path $ExpectedHome 'instructions'
+    $manifest = Join-Path $projDir '.ctx-managed'
+
+    foreach ($p in @($parentDir, $projDir)) {
+        $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+        if ($item -and ((Test-CtxIsLink -Path $p) -or -not $item.PSIsContainer)) {
+            foreach ($e in $Entries) { Write-Host "CHECK FAIL instruction:$($e.Name)" }
+            return $false
+        }
+    }
+
+    $managed = @()
+    $manifestOk = $true
+    $manifestItem = Get-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
+    if ($manifestItem) {
+        if ((Test-CtxIsLink -Path $manifest) -or $manifestItem.PSIsContainer) {
+            $manifestOk = $false
+        } else {
+            try {
+                foreach ($line in [System.IO.File]::ReadAllLines($manifest)) {
+                    $t = $line.TrimEnd("`r")
+                    if (-not $t) { continue }
+                    if (-not (Test-CtxValidProjectionName -Name $t)) { $manifestOk = $false; break }
+                    $managed += $t
+                }
+            } catch { $manifestOk = $false }
+        }
+    } else {
+        # A matching Mode A record with expected canonical entries requires a
+        # readable manifest.
+        $manifestOk = $false
+    }
+    if (-not $manifestOk) { Write-Host 'CHECK FAIL instruction:manifest'; return $false }
+
+    $header = [System.Text.Encoding]::UTF8.GetBytes("---`napplyTo: `"**`"`n---`n`n")
+    $failures = 0
+    $expectedNames = @()
+    foreach ($e in $Entries) {
+        $expectedNames += $e.Name
+        $target = Join-Path $projDir $e.Name
+        $ok = $false
+        if ($managed -contains $e.Name) {
+            $item = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+            if ($item -and -not $item.PSIsContainer -and -not (Test-CtxIsLink -Path $target)) {
+                $expected = $header + [System.IO.File]::ReadAllBytes((Join-Path $e.Source 'AGENTS.md'))
+                $actual = [System.IO.File]::ReadAllBytes($target)
+                if ($expected.Length -eq $actual.Length) {
+                    $ok = $true
+                    for ($k = 0; $k -lt $expected.Length; $k++) {
+                        if ($expected[$k] -ne $actual[$k]) { $ok = $false; break }
+                    }
+                }
+            }
+        }
+        if ($ok) { Write-Host "CHECK PASS instruction:$($e.Name)" } else { Write-Host "CHECK FAIL instruction:$($e.Name)"; $failures++ }
+    }
+    foreach ($m in $managed) {
+        if ($expectedNames -notcontains $m) {
+            Write-Host "CHECK FAIL instruction:${m}: stale projection"
+            $failures++
+        }
+    }
+    return ($failures -eq 0)
 }
 
 function Get-CtxValidatedHomePath {
@@ -1052,7 +1305,8 @@ function Set-CtxCopilotHome {
     param(
         [string]$ContextName,
         [string[]]$ResolvedDirs,
-        [string]$HomeOverride
+        [string]$HomeOverride,
+        [string[]]$Labels
     )
 
     if ($HomeOverride) {
@@ -1063,6 +1317,24 @@ function Set-CtxCopilotHome {
         $homeDir = Join-Path $homesRoot $sanitized
     }
     $copilotDir = Get-CtxCopilotDir
+
+    # Canonical instruction projection is validated/reconciled before any
+    # other mutation so an unsafe/unmanaged projection fails the whole
+    # activation atomically (issue #48).
+    $canonicalEntries = @()
+    for ($ci = 0; $ci -lt $ResolvedDirs.Count; $ci++) {
+        $rd = $ResolvedDirs[$ci]
+        if (Test-CtxProfileCanonical -ProfileDir $rd) {
+            $label = if ($Labels -and $ci -lt $Labels.Count) { $Labels[$ci] } else { Split-Path -Leaf $rd }
+            $canonicalEntries += [PSCustomObject]@{ Order = ($ci + 1); Label = $label; Path = $rd }
+        }
+    }
+    try {
+        Set-CtxCanonicalInstructions -HomeDir $homeDir -Entries $canonicalEntries
+    } catch {
+        Write-Error "ctx: error: $_"
+        return $false
+    }
 
     if (-not (Test-Path -LiteralPath (Join-Path $homeDir 'skills'))) {
         try {
@@ -1094,30 +1366,28 @@ function Set-CtxCopilotHome {
     }
 
     # Reconcile skills/: desired (name -> target) pairs come from each
-    # resolved dir's .github\skills subfolder, if present. Skill names are
-    # compared case-insensitively (COPILOT_HOME targets are case-insensitive
-    # on Windows), so two source dirs contributing "foo" and "Foo" collide
-    # and the whole colliding group is skipped (issue #40).
+    # resolved dir's contracted skill source (.github\skills for legacy
+    # profiles, .agents\skills for canonical profiles), if present. Skill
+    # names are compared case-insensitively (COPILOT_HOME targets are
+    # case-insensitive on Windows), so two source dirs contributing "foo"
+    # and "Foo" collide and the whole colliding group is skipped (issue #40).
     $desiredSkills = @{}
     $desiredOnDisk = @{}
     $collidedSkills = @{}
     $collidedContribs = @{}
     foreach ($rd in $ResolvedDirs) {
-        $skillDir = Join-Path $rd '.github\skills'
-        if (Test-Path -LiteralPath $skillDir -PathType Container) {
-            foreach ($s in (Get-ChildItem -LiteralPath $skillDir -Directory)) {
-                $key = $s.Name.ToLowerInvariant()
-                if ($collidedSkills.ContainsKey($key)) {
-                    $collidedContribs[$key] = $collidedContribs[$key] + ', ' + $rd
-                } elseif ($desiredSkills.ContainsKey($key)) {
-                    $collidedSkills[$key] = $true
-                    $collidedContribs[$key] = $collidedContribs[$key] + ', ' + $rd
-                    $desiredSkills.Remove($key)
-                } else {
-                    $desiredSkills[$key] = $s.FullName
-                    $desiredOnDisk[$key] = $s.Name
-                    $collidedContribs[$key] = $rd
-                }
+        foreach ($s in (Get-CtxSkillSourceDirs -ResolvedDir $rd)) {
+            $key = $s.Name.ToLowerInvariant()
+            if ($collidedSkills.ContainsKey($key)) {
+                $collidedContribs[$key] = $collidedContribs[$key] + ', ' + $rd
+            } elseif ($desiredSkills.ContainsKey($key)) {
+                $collidedSkills[$key] = $true
+                $collidedContribs[$key] = $collidedContribs[$key] + ', ' + $rd
+                $desiredSkills.Remove($key)
+            } else {
+                $desiredSkills[$key] = $s.FullName
+                $desiredOnDisk[$key] = $s.Name
+                $collidedContribs[$key] = $rd
             }
         }
     }
@@ -1350,7 +1620,29 @@ function Import-CtxFile {
         Write-Error "ctx: error: `"home:`" directive is only valid in synthetic-home mode (active mode: $mode); allowed values: synthetic-home, global-user, ephemeral-clean"
         return $false
     }
-    $dirsCsv = $parsed.Dirs -join ','
+    # Classify each ordered .ctx entry as canonical or legacy, then reject any
+    # canonical entry under Modes B/C before any environment export, workspace
+    # write, or Copilot-home setup/creation (issue #48). An all-canonical Mode
+    # A selection additionally requires pwsh/.NET 9+ on Unix.
+    $canonicalNames = @()
+    $legacyDirs = @()
+    for ($ci = 0; $ci -lt $parsed.Dirs.Count; $ci++) {
+        if (Test-CtxProfileCanonical -ProfileDir $parsed.Dirs[$ci]) {
+            $canonicalNames += $parsed.Names[$ci]
+        } else {
+            $legacyDirs += $parsed.Dirs[$ci]
+        }
+    }
+    if ($canonicalNames.Count -gt 0 -and $mode -cne 'synthetic-home') {
+        Write-Error "ctx: error: canonical profile(s) require synthetic-home mode (active mode: $mode): $($canonicalNames -join ', ')"
+        return $false
+    }
+    $allCanonical = ($canonicalNames.Count -gt 0 -and $canonicalNames.Count -eq $parsed.Dirs.Count)
+    if ($mode -ceq 'synthetic-home' -and $allCanonical -and (Test-CtxUnixOldDotnet)) {
+        Write-Error 'ctx: error: all-canonical Mode A requires pwsh/.NET 9+ on Unix'
+        return $false
+    }
+    $dirsCsv = $legacyDirs -join ','
     # COPILOT_SKILLS_DIRS is computed/validated only in Modes B/C before any
     # state change; a comma in an included skills path rejects the activation.
     # Mode A must not run this new validation or otherwise change its parsing.
@@ -1375,7 +1667,7 @@ function Import-CtxFile {
         # Mode A: preflight home creation and link reconciliation before any
         # state change (including the workspace-file write) so a failure
         # leaves the previous context, COPILOT_HOME, and all files untouched.
-        if (-not (Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride)) {
+        if (-not (Set-CtxCopilotHome -ContextName $parsed.Context -ResolvedDirs $parsed.Dirs -HomeOverride $parsed.HomeOverride -Labels $parsed.Names)) {
             return $false
         }
     }
@@ -1422,11 +1714,8 @@ function Write-CtxSkipLinksAndSkills {
     }
     $desired = @()
     foreach ($rd in $ResolvedDirs) {
-        $skillDir = Join-Path $rd '.github\skills'
-        if (Test-Path -LiteralPath $skillDir -PathType Container) {
-            foreach ($s in (Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name)) {
-                $desired += $s.Name
-            }
+        foreach ($s in (Get-CtxSkillSourceDirs -ResolvedDir $rd)) {
+            $desired += $s.Name
         }
     }
     foreach ($name in ($desired | Sort-Object -Unique)) {
@@ -1469,7 +1758,20 @@ function Test-CtxActivation {
     if (-not $ctxFile) { Write-Host 'ctx check: no .ctx file found; nothing to check'; return $true }
     try { $parsed = Parse-CtxFile -CtxFile $ctxFile } catch { Write-Host 'CHECK FAIL parser: invalid .ctx file'; return $false }
     $dir = $parsed.Dir; $names = @($parsed.Names); $dirs = @($parsed.Dirs); $homeOverride = $parsed.HomeOverride; $failures = 0
-    $expectedContext = $parsed.Context; $expectedDirs = $dirs -join ','
+    $expectedContext = $parsed.Context
+    # Canonical entries are never listed in COPILOT_CUSTOM_INSTRUCTIONS_DIRS;
+    # expectedDirs is therefore the ordered legacy roots only. A canonical
+    # entry's expected projection is keyed by its one-based selection order.
+    $canonicalEntries = @()
+    $legacyDirs = @()
+    for ($ci = 0; $ci -lt $dirs.Count; $ci++) {
+        if (Test-CtxProfileCanonical -ProfileDir $dirs[$ci]) {
+            $canonicalEntries += [PSCustomObject]@{ Name = (Get-CtxProjectionName -Order ($ci + 1) -Label $names[$ci]); Source = $dirs[$ci] }
+        } else {
+            $legacyDirs += $dirs[$ci]
+        }
+    }
+    $expectedDirs = $legacyDirs -join ','
     if ($env:AI_CTX_PROFILES -ceq $expectedContext) { Write-Host 'CHECK PASS AI_CTX_PROFILES' } else { Write-Host "CHECK FAIL AI_CTX_PROFILES: expected $expectedContext, got $(if($env:AI_CTX_PROFILES){$env:AI_CTX_PROFILES}else{'<unset>'})"; $failures++ }
     # The active mode is the mode of the matching session-local activation
     # record, never the raw selector. A record matches only while its context
@@ -1494,7 +1796,17 @@ function Test-CtxActivation {
     } else {
         Write-Host 'CHECK UNKNOWN COPILOT_MODE: no matching local activation record'
     }
-    if ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq $expectedDirs) { Write-Host 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS' } else { Write-Host "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected $expectedDirs, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"; $failures++ }
+    $dirsPresent = Test-Path Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    if ($expectedDirs) {
+        if ($dirsPresent -and ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq $expectedDirs)) { Write-Host 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS' } else { Write-Host "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected $expectedDirs, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"; $failures++ }
+    } elseif ($dirsPresent -and ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ceq '')) {
+        # All-canonical Mode A requires a present-empty value; absent is not
+        # accepted as empty.
+        Write-Host 'CHECK PASS COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+    } else {
+        Write-Host "CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS: expected <present-empty>, got $(if($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS){$env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS}else{'<unset>'})"
+        $failures++
+    }
     $expectedHome = if ($homeOverride) { $homeOverride } else { Join-Path (Get-CtxCopilotHomeRoot) (Get-CtxSanitizedContextName -Name $expectedContext) }
     switch ($recordedMode) {
         'global-user' {
@@ -1543,18 +1855,15 @@ function Test-CtxActivation {
             $firstTarget = @{}
             $contributors = @{}
             foreach ($rd in $dirs) {
-                $skillDir = Join-Path $rd '.github\skills'
-                if (Test-Path -LiteralPath $skillDir -PathType Container) {
-                    foreach ($s in (Get-ChildItem -LiteralPath $skillDir -Directory | Sort-Object Name)) {
-                        $key = $s.Name.ToLowerInvariant()
-                        if (-not $counts.ContainsKey($key)) {
-                            $counts[$key] = 1
-                            $firstTarget[$key] = $s.FullName
-                            $contributors[$key] = $rd
-                        } else {
-                            $counts[$key] = $counts[$key] + 1
-                            $contributors[$key] = $contributors[$key] + ', ' + $rd
-                        }
+                foreach ($s in (Get-CtxSkillSourceDirs -ResolvedDir $rd | Sort-Object Name)) {
+                    $key = $s.Name.ToLowerInvariant()
+                    if (-not $counts.ContainsKey($key)) {
+                        $counts[$key] = 1
+                        $firstTarget[$key] = $s.FullName
+                        $contributors[$key] = $rd
+                    } else {
+                        $counts[$key] = $counts[$key] + 1
+                        $contributors[$key] = $contributors[$key] + ', ' + $rd
                     }
                 }
             }
@@ -1605,6 +1914,9 @@ function Test-CtxActivation {
             Write-CtxSkipLinksAndSkills -ResolvedDirs $dirs
         }
     }
+    # Canonical instruction projections are audited under the recorded mode
+    # (Mode A checks, B/C and no-record SKIP). Read-only.
+    if (-not (Write-CtxCheckInstructions -ExpectedHome $expectedHome -RecordedMode $recordedMode -Entries $canonicalEntries)) { $failures++ }
     Write-Host 'CHECK SKIP skills: copilot probe disabled in read-only check'
     $workspace = Join-Path $dir "$(Split-Path -Leaf $dir).code-workspace"
     if (Test-Path -LiteralPath $workspace -PathType Leaf) {
