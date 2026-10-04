@@ -89,7 +89,9 @@
 #   ----------------
 #   COPILOT_CUSTOM_INSTRUCTIONS_DIRS does not make Copilot CLI discover agent
 #   skills stored in your .ctx entries. ctx sets COPILOT_HOME to a per-context
-#   home and links the resolved .github/skills entries into its skills folder.
+#   home and links each resolved entry's contracted skill source (.github/skills
+#   for legacy profiles, .agents/skills for canonical AGENTS.md profiles) into
+#   its skills folder.
 #   Shared Copilot files are reconciled against the real Copilot home on every
 #   activation. The cache remains after ctx clear; ctx clear --all removes it.
 #
@@ -203,7 +205,6 @@ EOF
 _ctx_print_status() {
     local profile="$1"
     local shared_csv="$2"
-    local dirs_csv="$3"
 
     printf '\n[AI Context]\n\n'
     printf 'Profile : %s\n' "${profile:-<none>}"
@@ -233,11 +234,14 @@ _ctx_print_status() {
             printf 'COPILOT_HOME=<unset>\n'
         fi
     fi
+    # Truthfully distinguish a present-empty all-canonical value from unset.
     printf '\nCOPILOT_CUSTOM_INSTRUCTIONS_DIRS=\n'
-    if [ -n "$dirs_csv" ]; then
-        printf '%s\n' "$dirs_csv" | tr ',' '\n'
-    else
+    if [ -z "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS+x}" ]; then
         printf '<unset>\n'
+    elif [ -z "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" ]; then
+        printf '<present-empty>\n'
+    else
+        printf '%s\n' "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" | tr ',' '\n'
     fi
 }
 
@@ -257,7 +261,7 @@ _ctx_current() {
         shared_csv="${shared_csv//+/, }"
     fi
 
-    _ctx_print_status "$profile" "$shared_csv" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}"
+    _ctx_print_status "$profile" "$shared_csv"
 }
 
 _ctx_file_identity() {
@@ -269,6 +273,20 @@ _ctx_file_identity() {
     fi
     [ -n "$result" ] || return 1
     printf '%s\n' "$result"
+}
+
+_ctx_same_file() {
+    # Returns 0 when both paths reference the same file (device:inode), used to
+    # detect a case-alias on a case-insensitive filesystem without guessing:
+    # only an exact existing spelling that resolves to the same file is treated
+    # as the same entry. Returns 1 when either path is missing or identity
+    # cannot be determined (callers fail closed).
+    local a="$1" b="$2" ia ib
+    [ -e "$a" ] || return 1
+    [ -e "$b" ] || return 1
+    ia="$(_ctx_file_identity "$a")" || return 1
+    ib="$(_ctx_file_identity "$b")" || return 1
+    [ "$ia" = "$ib" ]
 }
 
 _ctx_link_matches() {
@@ -618,7 +636,7 @@ ctx() {
     if [ -n "$old_ephemeral_home" ]; then
         _ctx_report_retained_ephemeral_home "$old_ephemeral_home"
     fi
-    _ctx_print_status "$AI_CTX_PROFILES" "" "$dirs_csv"
+    _ctx_print_status "$AI_CTX_PROFILES" ""
 }
 # --- Auto-loading via .ctx files ----------------------------------------
 
@@ -827,12 +845,29 @@ _ctx_copilot_home_root() {
 
 _ctx_sanitize_context_name() {
     # Sanitizes a context name for safe use as a single path component.
-    # '+' is already filesystem-safe and left as-is. Any '/' or other
-    # unsafe character is replaced with '_' defensively. Built-in pattern
-    # substitution (not tr) so a multibyte character like 'é' is replaced
-    # exactly once, matching Get-CtxSanitizedContextName (issue #48).
-    local name="$1"
-    printf '%s' "${name//[^A-Za-z0-9+._-]/_}"
+    # '+' is already filesystem-safe and left as-is. Every disallowed
+    # Unicode character is replaced with exactly one '_', decoding UTF-8
+    # bytes independent of locale so bash/zsh match PowerShell (issue #48):
+    # ASCII letters/digits/'.'/'_'/'-'/'+' are kept, disallowed ASCII bytes
+    # become '_', and each non-ASCII character (one UTF-8 lead byte plus its
+    # continuation bytes) becomes a single '_'. Uses POSIX `od` only; no
+    # locale-sensitive pattern matching or byte-oriented tr.
+    local name="$1" out="" b
+    for b in $(printf '%s' "$name" | od -An -v -tu1); do
+        if { [ "$b" -ge 48 ] && [ "$b" -le 57 ]; } \
+           || { [ "$b" -ge 65 ] && [ "$b" -le 90 ]; } \
+           || { [ "$b" -ge 97 ] && [ "$b" -le 122 ]; } \
+           || [ "$b" -eq 43 ] || [ "$b" -eq 45 ] || [ "$b" -eq 46 ] || [ "$b" -eq 95 ]; then
+            out="$out$(printf '%b' "\\$(printf '%03o' "$b")")"
+        elif [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
+            # UTF-8 continuation byte; already counted by its lead byte.
+            :
+        else
+            # Disallowed ASCII byte, or the lead byte of a non-ASCII character.
+            out="${out}_"
+        fi
+    done
+    printf '%s' "$out"
 }
 
 _ctx_profile_is_canonical() {
@@ -853,23 +888,39 @@ _ctx_in_list() {
 
 _ctx_valid_projection_name() {
     # Returns 0 when $1 matches the manifest grammar
-    # <4+ ASCII digits>-<A-Za-z0-9+._->.instructions.md.
-    local name="$1" stem digits label
+    # <4+ ASCII digits>-<A-Za-z0-9+._->.instructions.md. The bracket ranges
+    # are evaluated under LC_ALL=C so a locale's collation rules cannot admit
+    # non-ASCII characters (which would otherwise pass [a-z] under a UTF-8
+    # locale in some shells); the caller's locale is restored afterwards.
+    local name="$1" stem digits label saved_lc_all="${LC_ALL-}" lc_all_set=0 fail=0
+    [ -n "${LC_ALL+x}" ] && lc_all_set=1
+    export LC_ALL=C
     case "$name" in
         *.instructions.md) stem="${name%.instructions.md}" ;;
-        *) return 1 ;;
+        *) fail=1 ;;
     esac
-    case "$stem" in
-        *-*) : ;;
-        *) return 1 ;;
-    esac
-    digits="${stem%%-*}"
-    label="${stem#*-}"
-    [ "${#digits}" -ge 4 ] || return 1
-    case "$digits" in *[!0-9]*) return 1 ;; esac
-    [ -n "$label" ] || return 1
-    case "$label" in *[!A-Za-z0-9+._-]*) return 1 ;; esac
-    return 0
+    if [ "$fail" -eq 0 ]; then
+        case "$stem" in
+            *-*) : ;;
+            *) fail=1 ;;
+        esac
+    fi
+    if [ "$fail" -eq 0 ]; then
+        digits="${stem%%-*}"
+        label="${stem#*-}"
+        [ "${#digits}" -ge 4 ] || fail=1
+    fi
+    if [ "$fail" -eq 0 ]; then
+        case "$digits" in *[!0-9]*) fail=1 ;; esac
+    fi
+    if [ "$fail" -eq 0 ]; then
+        [ -n "$label" ] || fail=1
+    fi
+    if [ "$fail" -eq 0 ]; then
+        case "$label" in *[!A-Za-z0-9+._-]*) fail=1 ;; esac
+    fi
+    if [ "$lc_all_set" -eq 1 ]; then export LC_ALL="$saved_lc_all"; else unset LC_ALL; fi
+    return "$fail"
 }
 
 _ctx_projection_basename() {
@@ -879,16 +930,39 @@ _ctx_projection_basename() {
 
 _ctx_project_instructions() {
     # $1: COPILOT_HOME. Remaining args: triples "order label source-dir".
-    # Validates projection parent directories and the .ctx-managed manifest
-    # before any mutation, then reconciles the desired canonical instruction
-    # projections. Fails closed on unsafe/malformed/unmanaged state.
+    # Reconciles the desired canonical instruction projections transactionally:
+    # all source bytes are read and staged in one uniquely created per-call
+    # staging directory before any target or manifest is changed; the
+    # .ctx-managed manifest is expanded to cover old managed plus all desired
+    # names before any target replacement; and stale targets are pruned and the
+    # manifest shrunk only after all desired writes succeed. An interrupted run
+    # therefore leaves only managed, retryable state. Fails closed on
+    # unsafe/malformed/unmanaged state, and no step clobbers an existing file
+    # with `>` (noclobber-safe). Target replacement uses rename, which never
+    # follows a link at the destination. Only the current invocation's staging
+    # directory is ever removed; no user files are swept by wildcard.
     local home_dir="$1"; shift
     local -a args=("$@")
     local proj_dir="$home_dir/instructions/ctx-profiles"
     local parent_dir="$home_dir/instructions"
     local manifest="$proj_dir/.ctx-managed"
-    local item
 
+    local -a desired=()
+    local order label source name
+    set -- "${args[@]}"
+    while [ "$#" -gt 0 ]; do
+        order="$1"; label="$2"; source="$3"; shift 3
+        desired+=("$(_ctx_projection_basename "$order" "$label")")
+    done
+
+    # No canonical entries and no ctx manifest is a pure no-op: the
+    # instructions directory may be user-owned or an unrelated linked path, so
+    # it is neither validated nor touched.
+    if [ "${#desired[@]}" -eq 0 ] && [ ! -e "$manifest" ]; then
+        return 0
+    fi
+
+    local item
     for item in "$parent_dir" "$proj_dir"; do
         if [ -L "$item" ] || { [ -e "$item" ] && [ ! -d "$item" ]; }; then
             printf 'ctx: error: unsafe projection directory: %s\n' "$item" >&2
@@ -918,19 +992,21 @@ _ctx_project_instructions() {
         done < "$manifest"
     fi
 
-    local -a desired=()
-    local order label source name
-    set -- "${args[@]}"
-    while [ "$#" -gt 0 ]; do
-        order="$1"; label="$2"; source="$3"; shift 3
-        desired+=("$(_ctx_projection_basename "$order" "$label")")
-    done
-
     for name in "${desired[@]}"; do
         if [ -e "$proj_dir/$name" ] || [ -L "$proj_dir/$name" ]; then
             if ! _ctx_in_list "$name" "${managed[@]}"; then
-                printf 'ctx: error: unmanaged projection file exists and is not in the manifest: %s\n' "$proj_dir/$name" >&2
-                return 1
+                # Not managed under this exact spelling. It may be a filesystem
+                # alias (case-insensitive filesystem) of a managed projection;
+                # only an exact existing managed spelling that resolves to the
+                # same file is treated as managed. Never guessed.
+                local managed_alias=0 m2
+                for m2 in "${managed[@]}"; do
+                    if _ctx_same_file "$proj_dir/$name" "$proj_dir/$m2"; then managed_alias=1; break; fi
+                done
+                if [ "$managed_alias" -eq 0 ]; then
+                    printf 'ctx: error: unmanaged projection file exists and is not in the manifest: %s\n' "$proj_dir/$name" >&2
+                    return 1
+                fi
             fi
             if [ -L "$proj_dir/$name" ] || [ ! -f "$proj_dir/$name" ]; then
                 printf 'ctx: error: unsafe managed projection target (must be a regular non-link file): %s\n' "$proj_dir/$name" >&2
@@ -939,39 +1015,136 @@ _ctx_project_instructions() {
         fi
     done
 
-    local m
-    for m in "${managed[@]}"; do
-        if ! _ctx_in_list "$m" "${desired[@]}"; then
-            rm -f -- "$proj_dir/$m"
-        fi
-    done
+    if [ "${#desired[@]}" -gt 0 ] && [ ! -d "$proj_dir" ]; then
+        mkdir -p "$proj_dir" || {
+            printf 'ctx: error: could not create projection directory: %s\n' "$proj_dir" >&2
+            return 1
+        }
+    fi
 
+    # Phase 1: create one uniquely named per-transaction staging directory
+    # inside the projection directory (so renames stay on the same filesystem)
+    # and stage every desired output inside it. All source bytes are read
+    # before any target or manifest is changed; a missing/unreadable source
+    # aborts with no mutation. Only this invocation's staging directory is ever
+    # removed; leftover directories from a crash are ignored safely, and no
+    # user files are swept by wildcard.
+    local tmpdir=""
+    if [ "${#desired[@]}" -gt 0 ]; then
+        tmpdir="$(mktemp -d "$proj_dir/.ctx-txn.XXXXXX" 2>/dev/null)" || {
+            printf 'ctx: error: could not create staging directory in %s\n' "$proj_dir" >&2
+            return 1
+        }
+    fi
     set -- "${args[@]}"
     while [ "$#" -gt 0 ]; do
         order="$1"; label="$2"; source="$3"; shift 3
         name="$(_ctx_projection_basename "$order" "$label")"
-        if [ ! -d "$proj_dir" ]; then
-            mkdir -p "$proj_dir" || {
-                printf 'ctx: error: could not create projection directory: %s\n' "$proj_dir" >&2
-                return 1
-            }
-        fi
-        { printf -- '---\napplyTo: "**"\n---\n\n'; cat -- "$source/AGENTS.md"; } > "$proj_dir/$name" || {
-            printf 'ctx: error: could not write projection: %s\n' "$proj_dir/$name" >&2
+        if [ ! -f "$source/AGENTS.md" ]; then
+            printf 'ctx: error: could not read projection source: %s\n' "$source/AGENTS.md" >&2
+            [ -n "$tmpdir" ] && rm -rf -- "$tmpdir" 2>/dev/null
             return 1
-        }
+        fi
+        if ! { printf -- '---\napplyTo: "**"\n---\n\n'; cat -- "$source/AGENTS.md"; } > "$tmpdir/$name" 2>/dev/null; then
+            printf 'ctx: error: could not stage projection: %s\n' "$name" >&2
+            [ -n "$tmpdir" ] && rm -rf -- "$tmpdir" 2>/dev/null
+            return 1
+        fi
     done
 
+    # Phase 2: expand the manifest to cover old managed plus all desired names
+    # before any target replacement, so a partially completed run stays
+    # recoverable. Written via a temp file + rename (never clobbered in place);
+    # every write/move is checked and only this transaction's staging
+    # directory is cleaned, preserving the previous valid manifest on failure.
+    if [ "${#desired[@]}" -gt 0 ]; then
+        local -a union=()
+        local m
+        for m in "${managed[@]}"; do
+            if ! _ctx_in_list "$m" "${union[@]}"; then union+=("$m"); fi
+        done
+        for name in "${desired[@]}"; do
+            if ! _ctx_in_list "$name" "${union[@]}"; then union+=("$name"); fi
+        done
+        if ! printf '%s\n' "${union[@]}" > "$tmpdir/manifest" 2>/dev/null; then
+            printf 'ctx: error: could not write projection manifest: %s\n' "$manifest" >&2
+            rm -rf -- "$tmpdir" 2>/dev/null
+            return 1
+        fi
+        mv -f -- "$tmpdir/manifest" "$manifest" || {
+            printf 'ctx: error: could not write projection manifest: %s\n' "$manifest" >&2
+            rm -rf -- "$tmpdir" 2>/dev/null
+            return 1
+        }
+    fi
+
+    # Phase 3: replace each target with its completed temp via rename; rename
+    # replaces the destination entry itself and never follows a link there.
+    set -- "${args[@]}"
+    while [ "$#" -gt 0 ]; do
+        order="$1"; label="$2"; source="$3"; shift 3
+        name="$(_ctx_projection_basename "$order" "$label")"
+        if ! mv -f -- "$tmpdir/$name" "$proj_dir/$name" 2>/dev/null; then
+            printf 'ctx: error: could not write projection: %s\n' "$proj_dir/$name" >&2
+            rm -rf -- "$tmpdir" 2>/dev/null
+            return 1
+        fi
+    done
+
+    # Phase 4: only after all desired writes succeeded, prune stale managed
+    # projections that are no longer selected. Every removal is checked; a
+    # failure (including a directory/non-regular stale target, which is never
+    # deleted recursively) aborts while keeping the expanded union manifest so
+    # a retry remains possible. A stale name that is only a case-alias of a
+    # desired file on a case-insensitive filesystem is not deleted.
+    local m
+    for m in "${managed[@]}"; do
+        if ! _ctx_in_list "$m" "${desired[@]}"; then
+            local stale="$proj_dir/$m" skip_stale=0 d2
+            for d2 in "${desired[@]}"; do
+                if _ctx_same_file "$stale" "$proj_dir/$d2"; then skip_stale=1; break; fi
+            done
+            [ "$skip_stale" -eq 1 ] && continue
+            if [ -e "$stale" ] && [ ! -L "$stale" ] && [ ! -f "$stale" ]; then
+                printf 'ctx: error: refusing to remove non-regular stale projection: %s\n' "$stale" >&2
+                rm -rf -- "$tmpdir" 2>/dev/null
+                return 1
+            fi
+            if [ -e "$stale" ] || [ -L "$stale" ]; then
+                rm -f -- "$stale" || {
+                    printf 'ctx: error: could not remove stale projection: %s\n' "$stale" >&2
+                    rm -rf -- "$tmpdir" 2>/dev/null
+                    return 1
+                }
+            fi
+        fi
+    done
+
+    # Phase 5: shrink the manifest to the desired set; an empty desired set
+    # removes the manifest and any now-empty directories it owns. Removal and
+    # writes are checked: a failure returns an error instead of silently
+    # claiming success with stale manifest state.
     if [ "${#desired[@]}" -eq 0 ]; then
-        rm -f -- "$manifest"
+        rm -f -- "$manifest" || {
+            printf 'ctx: error: could not remove projection manifest: %s\n' "$manifest" >&2
+            [ -n "$tmpdir" ] && rm -rf -- "$tmpdir" 2>/dev/null
+            return 1
+        }
         rmdir "$proj_dir" 2>/dev/null || true
         rmdir "$parent_dir" 2>/dev/null || true
     else
-        : > "$manifest"
-        for name in "${desired[@]}"; do
-            printf '%s\n' "$name" >> "$manifest"
-        done
+        if ! printf '%s\n' "${desired[@]}" > "$tmpdir/manifest" 2>/dev/null; then
+            printf 'ctx: error: could not write projection manifest: %s\n' "$manifest" >&2
+            rm -rf -- "$tmpdir" 2>/dev/null
+            return 1
+        fi
+        mv -f -- "$tmpdir/manifest" "$manifest" || {
+            printf 'ctx: error: could not write projection manifest: %s\n' "$manifest" >&2
+            rm -rf -- "$tmpdir" 2>/dev/null
+            return 1
+        }
     fi
+    [ -n "$tmpdir" ] && rm -rf -- "$tmpdir" 2>/dev/null
     return 0
 }
 
@@ -1609,7 +1782,7 @@ _ctx_load_ctx_file() {
         _ctx_report_retained_ephemeral_home "$old_ephemeral_home"
     fi
     if [ "$_ctx_parsed_context" = "$_ctx_parsed_first_name" ]; then shared_csv=""; else shared_csv="${_ctx_parsed_context#*+}"; shared_csv="${shared_csv//+/, }"; fi
-    _ctx_print_status "$_ctx_parsed_first_name" "$shared_csv" "$dirs_csv"
+    _ctx_print_status "$_ctx_parsed_first_name" "$shared_csv"
 }
 _ctx_check_skip_links_and_skills() {
     # Modes B/C and unattributable (no-record) state do not own the Mode-A
@@ -1678,8 +1851,11 @@ _ctx_check_instructions() {
                 printf 'CHECK FAIL instruction:%s\n' "$1"
                 shift 2
             done
+            return 1
         fi
-        return 1
+        # No expected canonical entries: an unrelated (possibly linked)
+        # instructions path without ctx manifest state is not an applicable
+        # check; only a present ctx manifest is audited below.
     fi
 
     local -a managed=()
@@ -1703,7 +1879,10 @@ _ctx_check_instructions() {
         # readable manifest.
         manifest_ok=0
     fi
-    if [ "$n" -gt 0 ] && [ "$manifest_ok" -eq 0 ]; then
+    # A malformed/unreadable/linked manifest is a CHECK FAIL even with zero
+    # expected entries: ctx-owned state that cannot be trusted is never
+    # silently accepted.
+    if [ "$manifest_ok" -eq 0 ]; then
         printf 'CHECK FAIL instruction:manifest\n'
         return 1
     fi

@@ -229,10 +229,13 @@ security:./local-instructions
 
 When your shell prompt renders after a `cd` / `Set-Location` into that
 directory (or any descendant of it), `AI_CTX_PROFILES` (the names joined by `+`)
-and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` (the paths joined by `,`) are set,
-overwriting any previous value. Leaving the directory tree (into a location
-with no `.ctx` file anywhere in its ancestry) automatically clears the
-context.
+is set, overwriting any previous value. `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+contains only the *legacy* roots of the selection in order — canonical
+`AGENTS.md` roots are omitted — so it is set to the present-empty value when
+every selected entry is canonical (see
+[Canonical profiles](#canonical-profiles-agentsmd)). Leaving the directory tree
+(into a location with no `.ctx` file anywhere in its ancestry) automatically
+clears the context.
 
 ### Skill discovery
 

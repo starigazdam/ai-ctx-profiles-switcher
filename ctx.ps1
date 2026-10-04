@@ -88,10 +88,11 @@
     ---------------
     COPILOT_CUSTOM_INSTRUCTIONS_DIRS does not make Copilot CLI discover
     agent skills stored in your .ctx entries. ctx sets COPILOT_HOME to a
-    per-context home and links resolved .github\skills entries into its
-    skills folder. Shared Copilot files are reconciled against the real
-    Copilot home on every activation. The cache remains after ctx clear;
-    ctx clear --all removes it.
+    per-context home and links each resolved entry's contracted skill source
+    (.github\skills for legacy profiles, .agents\skills for canonical AGENTS.md
+    profiles) into its skills folder. Shared Copilot files are reconciled
+    against the real Copilot home on every activation. The cache remains after
+    ctx clear; ctx clear --all removes it.
 
     VS CODE WORKSPACE
     ------------------
@@ -156,8 +157,7 @@ Environment:
 function Write-CtxStatus {
     param(
         [string]$ProfileName,
-        [string]$SharedCsv,
-        [string]$DirsCsv
+        [string]$SharedCsv
     )
 
     Write-Host ""
@@ -187,8 +187,12 @@ function Write-CtxStatus {
     }
     Write-Host ""
     Write-Host "COPILOT_CUSTOM_INSTRUCTIONS_DIRS="
-    if ($DirsCsv) {
-        ($DirsCsv -split ',') | ForEach-Object { Write-Host $_ }
+    if (Test-Path Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS) {
+        if ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS) {
+            ($env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS -split ',') | ForEach-Object { Write-Host $_ }
+        } else {
+            Write-Host "<present-empty>"
+        }
     } else {
         Write-Host "<unset>"
     }
@@ -205,7 +209,7 @@ function Show-CtxCurrent {
     $profileName = $parts[0]
     $sharedCsv = ($parts | Select-Object -Skip 1) -join ', '
 
-    Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv -DirsCsv $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv
 }
 
 function Clear-CtxContext {
@@ -558,7 +562,7 @@ function ctx {
         Write-CtxRetainedEphemeralHome -Path $oldEphemeralHome
     }
 
-    Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv -DirsCsv $dirsCsv
+    Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv
     if ($mode -ceq 'synthetic-home') {
         # Only Mode A reports the documented Boolean success value for manual
         # activation; Modes B/C keep their old no-pipeline-output behavior.
@@ -704,10 +708,12 @@ function Get-CtxCopilotDir {
 
 function Get-CtxSanitizedContextName {
     # Sanitizes a context name for safe use as a single path component.
-    # '+' is already filesystem-safe and left as-is. Any other unsafe
-    # character is replaced with '_' defensively.
+    # '+' is already filesystem-safe and left as-is. Every disallowed
+    # Unicode character is replaced with exactly one '_' (issue #48),
+    # matching the Bash/zsh UTF-8 semantic: surrogate pairs are combined
+    # first so a supplementary character counts as a single replacement.
     param([string]$Name)
-    return ($Name -replace '[^A-Za-z0-9+._-]', '_')
+    return (($Name -replace '[\uD800-\uDBFF][\uDC00-\uDFFF]', '_') -replace '[^A-Za-z0-9+._-]', '_')
 }
 
 function Test-CtxProfileCanonical {
@@ -763,9 +769,20 @@ function Get-CtxSkillSourceDirs {
 }
 
 function Set-CtxCanonicalInstructions {
-    # Validates the projection parent directories and .ctx-managed manifest
-    # before any mutation, then reconciles the desired canonical instruction
-    # projections. Fails closed on unsafe/malformed/unmanaged state.
+    # Reconciles the desired canonical instruction projections transactionally
+    # (see ctx.sh _ctx_project_instructions): all source bytes are read and
+    # staged in one uniquely created per-call staging directory before any
+    # target or manifest is changed; the .ctx-managed manifest is expanded to
+    # cover old managed plus all desired names before any target replacement;
+    # and stale targets are pruned and the manifest shrunk only after all
+    # desired writes succeed. An interrupted run therefore leaves only managed,
+    # retryable state. Fails closed on unsafe/malformed/unmanaged state. Target
+    # replacement uses Move-Item (rename), which replaces the destination entry
+    # itself and never writes through a link. Projection-name membership is
+    # case-sensitive (matching Bash); a case-alias of a managed file is only
+    # accepted when an exact managed spelling resolves to the same file. Only
+    # the current invocation's staging directory is ever removed. Works on
+    # Windows PowerShell 5.1.
     param(
         [string]$HomeDir,
         [object[]]$Entries
@@ -773,6 +790,18 @@ function Set-CtxCanonicalInstructions {
     $projDir = Join-Path $HomeDir 'instructions/ctx-profiles'
     $parentDir = Join-Path $HomeDir 'instructions'
     $manifest = Join-Path $projDir '.ctx-managed'
+
+    $desired = @()
+    foreach ($e in $Entries) {
+        $desired += (Get-CtxProjectionName -Order $e.Order -Label $e.Label)
+    }
+
+    # No canonical entries and no ctx manifest is a pure no-op: the
+    # instructions directory may be user-owned or an unrelated linked path, so
+    # it is neither validated nor touched.
+    if ($desired.Count -eq 0 -and -not (Test-Path -LiteralPath $manifest)) {
+        return
+    }
 
     foreach ($p in @($parentDir, $projDir)) {
         $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
@@ -784,7 +813,7 @@ function Set-CtxCanonicalInstructions {
     $managed = @()
     $manifestItem = Get-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
     if ($manifestItem) {
-        if ((Test-CtxIsLink -Path $manifest) -or $manifestItem.PSIsContainer) {
+        if ((Test-CtxIsLink -Path $manifest) -or $manifestItem.PSIsContainer -or -not (Test-CtxRegularFile -Path $manifest)) {
             throw "malformed projection manifest: $manifest"
         }
         try {
@@ -801,45 +830,143 @@ function Set-CtxCanonicalInstructions {
         }
     }
 
-    $desired = @()
-    foreach ($e in $Entries) {
-        $desired += (Get-CtxProjectionName -Order $e.Order -Label $e.Label)
-    }
-
     foreach ($d in $desired) {
         $target = Join-Path $projDir $d
         if ((Test-Path -LiteralPath $target) -or (Test-CtxIsLink -Path $target)) {
-            if ($managed -notcontains $d) {
-                throw "unmanaged projection file exists and is not in the manifest: $target"
+            if ($managed -cnotcontains $d) {
+                # Not managed under this exact spelling. It may be a filesystem
+                # alias (case-insensitive filesystem) of a managed projection;
+                # only an exact existing managed spelling that resolves to the
+                # same file is treated as managed. Never guessed.
+                $managedAlias = $false
+                foreach ($m2 in $managed) {
+                    $leftId = Get-CtxFileIdentity -Path $target
+                    $rightId = Get-CtxFileIdentity -Path (Join-Path $projDir $m2)
+                    if ($leftId -and $rightId -and ($leftId -ceq $rightId)) { $managedAlias = $true; break }
+                }
+                if (-not $managedAlias) {
+                    throw "unmanaged projection file exists and is not in the manifest: $target"
+                }
             }
             $item = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-            if (-not $item -or $item.PSIsContainer -or (Test-CtxIsLink -Path $target)) {
+            if (-not $item -or $item.PSIsContainer -or (Test-CtxIsLink -Path $target) -or -not (Test-CtxRegularFile -Path $target)) {
                 throw "unsafe managed projection target (must be a regular non-link file): $target"
             }
         }
     }
 
-    foreach ($m in $managed) {
-        if ($desired -notcontains $m) {
-            Remove-Item -LiteralPath (Join-Path $projDir $m) -Force -ErrorAction SilentlyContinue
+    if ($desired.Count -gt 0 -and -not (Test-Path -LiteralPath $projDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+    }
+
+    # Phase 1: create one uniquely named per-transaction staging directory
+    # inside the projection directory (so renames stay on the same filesystem)
+    # and stage every desired output inside it. All source bytes are read
+    # before any target or manifest is changed; a missing source aborts with no
+    # mutation. Only this invocation's staging directory is ever removed;
+    # leftover directories from a crash are ignored safely, and no user files
+    # are swept by wildcard.
+    $txnDir = $null
+    $removeTxn = { if ($txnDir -and (Test-Path -LiteralPath $txnDir)) { Remove-Item -LiteralPath $txnDir -Recurse -Force -ErrorAction SilentlyContinue } }
+    $header = [System.Text.Encoding]::UTF8.GetBytes("---`napplyTo: `"**`"`n---`n`n")
+    if ($desired.Count -gt 0) {
+        $txnDir = Join-Path $projDir ('.ctx-txn.' + [guid]::NewGuid().ToString('N'))
+        try {
+            # No -Force: a path collision must fail closed, never reuse an
+            # existing (possibly user-owned) directory.
+            New-Item -ItemType Directory -Path $txnDir -ErrorAction Stop | Out-Null
+        } catch {
+            throw "could not create staging directory in $projDir"
         }
     }
 
-    $header = [System.Text.Encoding]::UTF8.GetBytes("---`napplyTo: `"**`"`n---`n`n")
     foreach ($e in $Entries) {
         $name = Get-CtxProjectionName -Order $e.Order -Label $e.Label
-        if (-not (Test-Path -LiteralPath $projDir)) {
-            New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        try {
+            $body = [System.IO.File]::ReadAllBytes((Join-Path $e.Path 'AGENTS.md'))
+        } catch {
+            & $removeTxn
+            throw "could not read projection source: $(Join-Path $e.Path 'AGENTS.md')"
         }
-        $body = [System.IO.File]::ReadAllBytes((Join-Path $e.Path 'AGENTS.md'))
         $out = New-Object byte[] ($header.Length + $body.Length)
         [Array]::Copy($header, 0, $out, 0, $header.Length)
         [Array]::Copy($body, 0, $out, $header.Length, $body.Length)
-        [System.IO.File]::WriteAllBytes((Join-Path $projDir $name), $out)
+        try {
+            [System.IO.File]::WriteAllBytes((Join-Path $txnDir $name), $out)
+        } catch {
+            & $removeTxn
+            throw "could not stage projection: $name"
+        }
     }
 
+    # Phase 2: expand the manifest to cover old managed plus all desired names
+    # before any target replacement, so a partially completed run stays
+    # recoverable. Written via a temp file + rename (never clobbered in place).
+    if ($desired.Count -gt 0) {
+        $union = @($managed)
+        foreach ($d in $desired) { if ($union -cnotcontains $d) { $union += $d } }
+        try {
+            [System.IO.File]::WriteAllLines((Join-Path $txnDir 'manifest'), [string[]]$union)
+            Move-Item -LiteralPath (Join-Path $txnDir 'manifest') -Destination $manifest -Force -ErrorAction Stop
+        } catch {
+            & $removeTxn
+            throw "could not write projection manifest: $manifest"
+        }
+    }
+
+    # Phase 3: replace each target with its completed temp via rename.
+    foreach ($e in $Entries) {
+        $name = Get-CtxProjectionName -Order $e.Order -Label $e.Label
+        try {
+            Move-Item -LiteralPath (Join-Path $txnDir $name) -Destination (Join-Path $projDir $name) -Force -ErrorAction Stop
+        } catch {
+            & $removeTxn
+            throw "could not write projection: $(Join-Path $projDir $name)"
+        }
+    }
+
+    # Phase 4: only after all desired writes succeeded, prune stale managed
+    # projections that are no longer selected. Every removal is checked; a
+    # failure (including a directory/non-regular stale target, which is never
+    # deleted recursively) aborts while keeping the expanded union manifest so
+    # a retry remains possible. A stale name that is only a case-alias of a
+    # desired file on a case-insensitive filesystem is not deleted.
+    foreach ($m in $managed) {
+        if ($desired -cnotcontains $m) {
+            $stale = Join-Path $projDir $m
+            $skipStale = $false
+            foreach ($d2 in $desired) {
+                $leftId = Get-CtxFileIdentity -Path $stale
+                $rightId = Get-CtxFileIdentity -Path (Join-Path $projDir $d2)
+                if ($leftId -and $rightId -and ($leftId -ceq $rightId)) { $skipStale = $true; break }
+            }
+            if ($skipStale) { continue }
+            $staleItem = Get-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
+            if (-not $staleItem) { continue }
+            if ((Test-CtxIsLink -Path $stale) -or ($staleItem -is [System.IO.FileInfo])) {
+                try {
+                    Remove-Item -LiteralPath $stale -Force -ErrorAction Stop
+                } catch {
+                    & $removeTxn
+                    throw "could not remove stale projection: $stale"
+                }
+            } else {
+                & $removeTxn
+                throw "refusing to remove non-regular stale projection: $stale"
+            }
+        }
+    }
+
+    # Phase 5: shrink the manifest to the desired set; an empty desired set
+    # removes the manifest and any now-empty directories it owns. Removal is
+    # checked so stale manifest state is never silently left behind.
     if ($desired.Count -eq 0) {
-        Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
+        try {
+            Remove-Item -LiteralPath $manifest -Force -ErrorAction Stop
+        } catch {
+            & $removeTxn
+            throw "could not remove projection manifest: $manifest"
+        }
         foreach ($p in @($projDir, $parentDir)) {
             if (Test-Path -LiteralPath $p -PathType Container) {
                 if (-not (Get-ChildItem -LiteralPath $p -Force | Select-Object -First 1)) {
@@ -848,24 +975,29 @@ function Set-CtxCanonicalInstructions {
             }
         }
     } else {
-        if (-not (Test-Path -LiteralPath $projDir)) {
-            New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        try {
+            [System.IO.File]::WriteAllLines((Join-Path $txnDir 'manifest'), [string[]]$desired)
+            Move-Item -LiteralPath (Join-Path $txnDir 'manifest') -Destination $manifest -Force -ErrorAction Stop
+        } catch {
+            & $removeTxn
+            throw "could not write projection manifest: $manifest"
         }
-        [System.IO.File]::WriteAllText($manifest, (($desired -join "`n") + "`n"))
     }
+    & $removeTxn
 }
 
 function Write-CtxCheckInstructions {
     # Read-only canonical instruction audit. $Entries are { Name; Source }
     # objects. Emits CHECK PASS/FAIL/SKIP instruction:<file>. B/C and
-    # unattributable (no-record) states skip Mode-A-only projections.
+    # unattributable (no-record) states skip Mode-A-only projections. With zero
+    # entries, a missing manifest is a successful no-op but an existing
+    # malformed or stale ctx manifest is still a CHECK FAIL (N3 parity).
     param(
         [string]$ExpectedHome,
         [string]$RecordedMode,
         [object[]]$Entries
     )
     $Entries = @($Entries)
-    if ($Entries.Count -eq 0) { return $true }
 
     if (($RecordedMode -cne 'synthetic-home')) {
         foreach ($e in $Entries) { Write-Host "CHECK SKIP instruction:$($e.Name)" }
@@ -879,8 +1011,13 @@ function Write-CtxCheckInstructions {
     foreach ($p in @($parentDir, $projDir)) {
         $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
         if ($item -and ((Test-CtxIsLink -Path $p) -or -not $item.PSIsContainer)) {
-            foreach ($e in $Entries) { Write-Host "CHECK FAIL instruction:$($e.Name)" }
-            return $false
+            if ($Entries.Count -gt 0) {
+                foreach ($e in $Entries) { Write-Host "CHECK FAIL instruction:$($e.Name)" }
+                return $false
+            }
+            # No expected canonical entries: an unrelated (possibly linked)
+            # instructions path without ctx manifest state is not an applicable
+            # check; only a present ctx manifest is audited below.
         }
     }
 
@@ -888,7 +1025,7 @@ function Write-CtxCheckInstructions {
     $manifestOk = $true
     $manifestItem = Get-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
     if ($manifestItem) {
-        if ((Test-CtxIsLink -Path $manifest) -or $manifestItem.PSIsContainer) {
+        if ((Test-CtxIsLink -Path $manifest) -or $manifestItem.PSIsContainer -or -not (Test-CtxRegularFile -Path $manifest)) {
             $manifestOk = $false
         } else {
             try {
@@ -900,7 +1037,7 @@ function Write-CtxCheckInstructions {
                 }
             } catch { $manifestOk = $false }
         }
-    } else {
+    } elseif ($Entries.Count -gt 0) {
         # A matching Mode A record with expected canonical entries requires a
         # readable manifest.
         $manifestOk = $false
@@ -914,9 +1051,9 @@ function Write-CtxCheckInstructions {
         $expectedNames += $e.Name
         $target = Join-Path $projDir $e.Name
         $ok = $false
-        if ($managed -contains $e.Name) {
+        if ($managed -ccontains $e.Name) {
             $item = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-            if ($item -and -not $item.PSIsContainer -and -not (Test-CtxIsLink -Path $target)) {
+            if ($item -and -not $item.PSIsContainer -and -not (Test-CtxIsLink -Path $target) -and (Test-CtxRegularFile -Path $target)) {
                 $expected = $header + [System.IO.File]::ReadAllBytes((Join-Path $e.Source 'AGENTS.md'))
                 $actual = [System.IO.File]::ReadAllBytes($target)
                 if ($expected.Length -eq $actual.Length) {
@@ -930,7 +1067,7 @@ function Write-CtxCheckInstructions {
         if ($ok) { Write-Host "CHECK PASS instruction:$($e.Name)" } else { Write-Host "CHECK FAIL instruction:$($e.Name)"; $failures++ }
     }
     foreach ($m in $managed) {
-        if ($expectedNames -notcontains $m) {
+        if ($expectedNames -cnotcontains $m) {
             Write-Host "CHECK FAIL instruction:${m}: stale projection"
             $failures++
         }
@@ -1158,6 +1295,29 @@ function Test-CtxIsLink {
         $left = Get-CtxFileIdentity -Path $Path
         $right = Get-CtxFileIdentity -Path $Target
         return [bool]($left -and $right -and $left -eq $right)
+    }
+    return $false
+}
+
+function Test-CtxRegularFile {
+    # Returns $true only when $Path is an existing regular, non-link file.
+    # PowerShell's Get-Item reports a FIFO/socket as a FileInfo with
+    # Attributes=Normal and PSIsContainer=$false, so opening it as a file
+    # (ReadAllLines/ReadAllBytes) would block indefinitely; a portable stat
+    # file-type check is used on Unix. On Windows any non-container, non-link
+    # item is a regular file. Never opens the path.
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return $false }
+    if ($item.PSIsContainer) { return $false }
+    if (Test-CtxIsLink -Path $Path) { return $false }
+    if ($IsWindows -or $env:OS -ceq 'Windows_NT') { return $true }
+    foreach ($statArgs in @(@('-c', '%F'), @('-f', '%HT'))) {
+        try {
+            $fileType = (& stat @statArgs -- $Path 2>$null).Trim()
+            if ($fileType -match 'regular') { return $true }
+            return $false
+        } catch { }
     }
     return $false
 }
@@ -1700,7 +1860,7 @@ function Import-CtxFile {
         Write-CtxRetainedEphemeralHome -Path $oldEphemeralHome
     }
     $sharedCsv = ($parsed.Names | Select-Object -Skip 1) -join ', '
-    Write-CtxStatus -ProfileName $parsed.Names[0] -SharedCsv $sharedCsv -DirsCsv $dirsCsv
+    Write-CtxStatus -ProfileName $parsed.Names[0] -SharedCsv $sharedCsv
     return $true
 }
 function Write-CtxSkipLinksAndSkills {

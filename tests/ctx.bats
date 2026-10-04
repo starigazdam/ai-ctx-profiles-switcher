@@ -3040,15 +3040,19 @@ _make_canonical_skill() {
     [ ! -e "$TEST_TMP/escape.instructions.md" ]
 }
 
-@test "Issue48: stale managed projection is removed on switch to legacy" {
+@test "Issue48: removing AGENTS.md from a canonical profile cleans its stale projection on reactivation" {
     _make_canonical_profile review $'# review\n'
-    _make_profile security security-skill
     ctx review >/dev/null
-    [ -f "$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md" ]
+    local home="$COPILOT_HOME"
+    local proj="$home/instructions/ctx-profiles/0001-review.instructions.md"
+    [ -f "$proj" ]
 
-    ctx security >/dev/null
-    [ ! -e "$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md" ]
-    [ ! -e "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed" ]
+    # The profile becomes legacy while the same context (and home) stays
+    # selected, so the now-unwanted managed projection must be cleaned.
+    rm -f "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    ctx review >/dev/null
+    [ ! -e "$proj" ]
+    [ ! -e "$home/instructions/ctx-profiles/.ctx-managed" ]
 }
 
 @test "Issue48: ctx clear preserves the cached projection and clear --all removes the home" {
@@ -3121,4 +3125,293 @@ _make_canonical_skill() {
     run ctx current
     [ "$status" -eq 0 ]
     [[ "$output" != *"instructions.md"* ]]
+}
+
+@test "Issue48: ctx current distinguishes present-empty from unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"COPILOT_CUSTOM_INSTRUCTIONS_DIRS="*"<present-empty>"* ]]
+
+    unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"COPILOT_CUSTOM_INSTRUCTIONS_DIRS="*"<unset>"* ]]
+}
+
+@test "Issue48: legacy-only activation preserves an empty user instructions directory" {
+    _make_profile security security-skill
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/security"
+    mkdir -p "$home/instructions"
+
+    ctx security >/dev/null
+    [ -d "$home/instructions" ]
+}
+
+@test "Issue48: legacy-only activation does not reject an unrelated linked instructions path without a manifest" {
+    _make_profile security security-skill
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/security"
+    local outside="$TEST_TMP/outside-instructions"
+    mkdir -p "$home" "$outside"
+    ln -s "$outside" "$home/instructions"
+
+    ctx security >/dev/null
+    [ -L "$home/instructions" ]
+}
+
+@test "Issue48: legacy-only activation with an existing ctx manifest removes only stale managed projections" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+    local home="$COPILOT_HOME"
+    local proj="$home/instructions/ctx-profiles/0001-review.instructions.md"
+    [ -f "$proj" ]
+
+    # A legacy-only .ctx selection that reuses the same home must drop the
+    # now-stale managed projection and manifest while keeping the shared home.
+    _make_profile security security-skill
+    local pdir="$TEST_TMP/project-legacy-reuse"
+    mkdir -p "$pdir"
+    printf 'security:@profile\nhome:%s\n' "$home" > "$pdir/.ctx"
+    cd "$pdir"
+    _ctx_load_ctx_file "$pdir/.ctx" >/dev/null
+
+    [ ! -e "$proj" ]
+    [ ! -e "$home/instructions/ctx-profiles/.ctx-managed" ]
+    [ -d "$home/skills" ]
+}
+
+@test "Issue48: ctx check skips projections when no canonical entries and no manifest exist" {
+    _make_profile security security-skill
+    local proj="$TEST_TMP/project-legacy-check"
+    mkdir -p "$proj"
+    printf 'security:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+
+    run ctx check
+    [ "$status" -eq 0 ]
+}
+
+@test "Issue48: ctx check fails on a malformed ctx-managed manifest with zero canonical entries" {
+    _make_profile security security-skill
+    local proj="$TEST_TMP/project-legacy-check-malformed"
+    mkdir -p "$proj"
+    printf 'security:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    mkdir -p "$COPILOT_HOME/instructions/ctx-profiles"
+    printf 'bad name\n' > "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed"
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:manifest"* ]]
+}
+
+@test "Issue48: ctx check fails on a stale ctx-managed manifest with zero canonical entries" {
+    _make_profile security security-skill
+    local proj="$TEST_TMP/project-legacy-check-stale"
+    mkdir -p "$proj"
+    printf 'security:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    mkdir -p "$COPILOT_HOME/instructions/ctx-profiles"
+    printf '0001-review.instructions.md\n' > "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed"
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"stale projection"* ]]
+}
+
+@test "Issue48: projection transaction fails closed when a later source is missing" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review+arch"
+    local missing="$TEST_TMP/missing-source"
+    mkdir -p "$missing"
+
+    local status=0
+    _ctx_project_instructions "$home" \
+        1 review "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" \
+        2 arch "$missing" >"$TEST_TMP/b1-fail.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/b1-fail.out")" == *"could not read projection source"* ]]
+    [ ! -e "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ ! -e "$home/instructions/ctx-profiles/0002-arch.instructions.md" ]
+    [ ! -e "$home/instructions/ctx-profiles/.ctx-managed" ]
+    [ -z "$(find "$home/instructions/ctx-profiles" -mindepth 1 -maxdepth 1 -name '.ctx-txn.*' -print 2>/dev/null)" ]
+}
+
+@test "Issue48: projection transaction retry succeeds after the source is fixed" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review+arch"
+    local missing="$TEST_TMP/missing-source"
+    mkdir -p "$missing"
+
+    local status=0
+    _ctx_project_instructions "$home" 1 review "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" 2 arch "$missing" >/dev/null 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+
+    printf '# arch\n' > "$missing/AGENTS.md"
+    _ctx_project_instructions "$home" 1 review "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" 2 arch "$missing"
+
+    [ -f "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ -f "$home/instructions/ctx-profiles/0002-arch.instructions.md" ]
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx-managed")" = "0001-review.instructions.md
+0002-arch.instructions.md" ]
+    [ -z "$(find "$home/instructions/ctx-profiles" -mindepth 1 -maxdepth 1 -name '.ctx-txn.*' -print 2>/dev/null)" ]
+}
+
+@test "Issue48: an interrupted projection transaction is recoverable on retry" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review+arch"
+    mkdir -p "$home/instructions/ctx-profiles"
+
+    # Simulate a crash after the union manifest was written and one target
+    # replaced: the manifest still covers the old stale name plus both desired
+    # names, and a leftover per-transaction staging directory remains.
+    printf '0001-review.instructions.md\n0001-old.instructions.md\n0002-arch.instructions.md\n' > "$home/instructions/ctx-profiles/.ctx-managed"
+    printf 'old review\n' > "$home/instructions/ctx-profiles/0001-review.instructions.md"
+    printf 'old stale\n' > "$home/instructions/ctx-profiles/0001-old.instructions.md"
+    printf 'old arch\n' > "$home/instructions/ctx-profiles/0002-arch.instructions.md"
+    mkdir -p "$home/instructions/ctx-profiles/.ctx-txn.crashed"
+    printf 'partial\n' > "$home/instructions/ctx-profiles/.ctx-txn.crashed/0001-review.instructions.md"
+
+    ctx review arch >/dev/null
+    cmp -s <(printf -- '---\napplyTo: "**"\n---\n\n# review\n') "$home/instructions/ctx-profiles/0001-review.instructions.md"
+    cmp -s <(printf -- '---\napplyTo: "**"\n---\n\n# arch\n') "$home/instructions/ctx-profiles/0002-arch.instructions.md"
+    [ ! -e "$home/instructions/ctx-profiles/0001-old.instructions.md" ]
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx-managed")" = "0001-review.instructions.md
+0002-arch.instructions.md" ]
+    # A crashed transaction directory is never swept; it is ignored safely.
+    [ -d "$home/instructions/ctx-profiles/.ctx-txn.crashed" ]
+}
+
+@test "Issue48: an unrelated .ctx.tmp.keep file survives activation and retry" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    mkdir -p "$home/instructions/ctx-profiles"
+    printf 'keep me\n' > "$home/instructions/ctx-profiles/.ctx.tmp.keep"
+
+    ctx review >/dev/null
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx.tmp.keep")" = "keep me" ]
+
+    printf '# review v2\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    ctx review >/dev/null
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx.tmp.keep")" = "keep me" ]
+    [ -z "$(find "$home/instructions/ctx-profiles" -mindepth 1 -maxdepth 1 -name '.ctx-txn.*' -print 2>/dev/null)" ]
+}
+
+@test "Issue48: stale prune failure retains the expanded manifest and never deletes directory contents" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    mkdir -p "$home/instructions/ctx-profiles/0001-old.instructions.md"
+    printf 'precious\n' > "$home/instructions/ctx-profiles/0001-old.instructions.md/inner.txt"
+    printf '0001-old.instructions.md\n0001-review.instructions.md\n' > "$home/instructions/ctx-profiles/.ctx-managed"
+    printf 'old review\n' > "$home/instructions/ctx-profiles/0001-review.instructions.md"
+
+    local status=0
+    ctx review >"$TEST_TMP/prune-fail.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/prune-fail.out")" == *"refusing to remove non-regular stale projection"* ]]
+    # The expanded union manifest is retained so a retry remains possible.
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx-managed")" = "0001-old.instructions.md
+0001-review.instructions.md" ]
+    # Directory contents were never recursively deleted.
+    [ "$(cat "$home/instructions/ctx-profiles/0001-old.instructions.md/inner.txt")" = "precious" ]
+    # No transaction staging directory is left behind.
+    [ -z "$(find "$home/instructions/ctx-profiles" -mindepth 1 -maxdepth 1 -name '.ctx-txn.*' -print 2>/dev/null)" ]
+}
+
+@test "Issue48: case-only projection label transition under a shared home removes the stale old-case projection" {
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/Review"
+    printf '# review\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/Review/AGENTS.md"
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/case-home"
+    local pdir="$TEST_TMP/project-case-home"
+    mkdir -p "$pdir" "$home"
+
+    printf 'Review:@profile\nhome:%s\n' "$home" > "$pdir/.ctx"
+    cd "$pdir"
+    _ctx_load_ctx_file "$pdir/.ctx" >/dev/null
+    [ -f "$home/instructions/ctx-profiles/0001-Review.instructions.md" ]
+
+    # On a case-sensitive filesystem the old-case projection is a distinct
+    # stale file that must be removed, not orphaned, when the label case flips.
+    mv "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/Review" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    printf 'review:@profile\nhome:%s\n' "$home" > "$pdir/.ctx"
+    _ctx_load_ctx_file "$pdir/.ctx" >/dev/null
+    [ -f "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ ! -e "$home/instructions/ctx-profiles/0001-Review.instructions.md" ]
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx-managed")" = "0001-review.instructions.md" ]
+}
+
+@test "Issue48: ordinary managed projection files update on reactivation" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+    local proj="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+
+    printf '# review v2\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    ctx review >/dev/null
+    cmp -s <(printf -- '---\napplyTo: "**"\n---\n\n# review v2\n') "$proj"
+    [ ! -L "$proj" ]
+}
+
+@test "Issue48: projection activation works with noclobber set" {
+    set -o noclobber
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+    local proj="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+    [ -f "$proj" ]
+
+    # Reactivation must also work: no transaction step clobbers an existing
+    # file with `>` (temps are new files, targets/manifest are renamed).
+    printf '# review v2\n' > "$TEST_TMP/agents-v2"
+    mv -f "$TEST_TMP/agents-v2" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    ctx review >/dev/null
+    cmp -s <(printf -- '---\napplyTo: "**"\n---\n\n# review v2\n') "$proj"
+    set +o noclobber
+}
+
+@test "Issue48: sanitizer replaces each disallowed Unicode character once across locales" {
+    local saved_lc_all="${LC_ALL-}" lc_all_set=0
+    [ -n "${LC_ALL+x}" ] && lc_all_set=1
+    restore_lc_all() {
+        if [ "$lc_all_set" -eq 1 ]; then export LC_ALL="$saved_lc_all"; else unset LC_ALL; fi
+    }
+    trap restore_lc_all EXIT
+
+    export LC_ALL=en_US.UTF-8
+    [ "$(_ctx_sanitize_context_name 'café')" = 'caf_' ]
+    [ "$(_ctx_sanitize_context_name 'caféñ')" = 'caf__' ]
+    [ "$(_ctx_sanitize_context_name 'a𝄞b')" = 'a_b' ]
+    export LC_ALL=C
+    [ "$(_ctx_sanitize_context_name 'café')" = 'caf_' ]
+    [ "$(_ctx_sanitize_context_name 'caféñ')" = 'caf__' ]
+    [ "$(_ctx_sanitize_context_name 'a𝄞b')" = 'a_b' ]
+    restore_lc_all
+    trap - EXIT
+}
+
+@test "Issue48: non-ASCII manifest names are rejected under a UTF-8 locale" {
+    local saved_lc_all="${LC_ALL-}" lc_all_set=0
+    [ -n "${LC_ALL+x}" ] && lc_all_set=1
+    restore_lc_all() {
+        if [ "$lc_all_set" -eq 1 ]; then export LC_ALL="$saved_lc_all"; else unset LC_ALL; fi
+    }
+    trap restore_lc_all EXIT
+
+    export LC_ALL=en_US.UTF-8
+    # A collation range like [a-z] must not admit accented letters in the
+    # manifest grammar; the ASCII-stable check runs under LC_ALL=C internally.
+    _ctx_valid_projection_name '0001-café.instructions.md' && return 1
+    _ctx_valid_projection_name '0001-ok.instructions.md' || return 1
+    _ctx_valid_projection_name '1-short.instructions.md' && return 1
+    _ctx_valid_projection_name '0001-bad/name.instructions.md' && return 1
+    restore_lc_all
+    trap - EXIT
 }
