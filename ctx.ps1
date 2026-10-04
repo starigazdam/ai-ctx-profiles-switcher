@@ -493,7 +493,7 @@ function ctx {
     $allCanonical = ($canonicalNames.Count -gt 0 -and $canonicalNames.Count -eq $dirsList.Count)
     if ($mode -ceq 'synthetic-home' -and $allCanonical -and (Test-CtxUnixOldDotnet)) {
         Write-Error 'ctx: error: all-canonical Mode A requires pwsh/.NET 9+ on Unix'
-        return
+        return $false
     }
 
     # Mode A includes only legacy roots in COPILOT_CUSTOM_INSTRUCTIONS_DIRS;
@@ -712,15 +712,20 @@ function Get-CtxSanitizedContextName {
     # Unicode character is replaced with exactly one '_' (issue #48),
     # matching the Bash/zsh UTF-8 semantic: surrogate pairs are combined
     # first so a supplementary character counts as a single replacement.
+    # Both regex stages are case-sensitive (-creplace) so culture case-folding
+    # (e.g. Kelvin sign, dotted capital I) can never smuggle a non-ASCII
+    # character through the ASCII [A-Za-z0-9+._-] class.
     param([string]$Name)
-    return (($Name -replace '[\uD800-\uDBFF][\uDC00-\uDFFF]', '_') -replace '[^A-Za-z0-9+._-]', '_')
+    return (($Name -creplace '[\uD800-\uDBFF][\uDC00-\uDFFF]', '_') -creplace '[^A-Za-z0-9+._-]', '_')
 }
 
 function Test-CtxProfileCanonical {
     # A resolved profile directory is canonical when it has a root-level
-    # AGENTS.md; otherwise it keeps legacy behavior (issue #48).
+    # AGENTS.md that is a regular file after resolving symlinks, matching Bash
+    # `[ -f .../AGENTS.md ]` (issue #48). A FIFO/socket AGENTS.md is never
+    # treated as canonical and is never opened (reading it would block).
     param([string]$ProfileDir)
-    return (Test-Path -LiteralPath (Join-Path $ProfileDir 'AGENTS.md') -PathType Leaf)
+    return (Test-CtxFollowedRegularFile -Path (Join-Path $ProfileDir 'AGENTS.md'))
 }
 
 function Test-CtxValidProjectionName {
@@ -755,7 +760,10 @@ function Get-CtxSkillSourceDirs {
         if (Test-Path -LiteralPath $skillDir -PathType Container) {
             foreach ($s in (Get-ChildItem -LiteralPath $skillDir -Directory)) {
                 $skillMd = Join-Path $s.FullName 'SKILL.md'
-                if ((Test-Path -LiteralPath $skillMd -PathType Leaf) -and -not (Test-CtxIsLink -Path $skillMd)) {
+                # Bash parity ([ -f ] && [ ! -L ]): a hard-linked regular
+                # SKILL.md is accepted (AllowHardLinks), while symlinks and
+                # special files (FIFO/socket) are rejected.
+                if ((Test-Path -LiteralPath $skillMd -PathType Leaf) -and (Test-CtxRegularFile -Path $skillMd -AllowHardLinks)) {
                     $s
                 }
             }
@@ -1306,14 +1314,59 @@ function Test-CtxRegularFile {
     # (ReadAllLines/ReadAllBytes) would block indefinitely; a portable stat
     # file-type check is used on Unix. On Windows any non-container, non-link
     # item is a regular file. Never opens the path.
+    # -AllowHardLinks keeps the shared-file semantics of Test-CtxIsLink
+    # (link count > 1 is not a regular file) off, so callers that must match
+    # Bash's `[ -f ]` (which accepts hard-linked regular files) can opt out.
+    param(
+        [string]$Path,
+        [switch]$AllowHardLinks
+    )
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return $false }
+    if ($item.PSIsContainer) { return $false }
+    # A symlink/junction/reparse point is never a regular file; .NET reports
+    # hard links with LinkType=HardLink, so only those are treated as links.
+    $isSymlink = ($item.LinkType -in @('SymbolicLink', 'Junction')) -or [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+    if ($isSymlink) { return $false }
+    if (-not $AllowHardLinks -and ($item.LinkType -ceq 'HardLink')) { return $false }
+    if (-not $AllowHardLinks -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        # Matching Test-CtxIsLink: a file with multiple hard links is treated
+        # as a link for shared-file reconciliation.
+        try {
+            $linkCount = (& stat -c '%h' -- $Path 2>$null).Trim()
+            if ($linkCount -and [int]$linkCount -gt 1) { return $false }
+        } catch { }
+    }
+    if ($IsWindows -or $env:OS -ceq 'Windows_NT') { return $true }
+    foreach ($statArgs in @(@('-c', '%F'), @('-f', '%HT'))) {
+        try {
+            $fileType = (& stat @statArgs -- $Path 2>$null).Trim()
+            if ($fileType -match 'regular') { return $true }
+            return $false
+        } catch { }
+    }
+    return $false
+}
+
+function Test-CtxFollowedRegularFile {
+    # Returns $true when $Path resolves (following symlinks, like Bash
+    # `[ -f ]`) to a regular file: a symlink to a regular file is accepted,
+    # while a FIFO/socket/device (and a symlink to one) is not. Uses the
+    # same non-blocking stat file-type check as Test-CtxRegularFile but
+    # never treats a symlink as non-regular by itself. Never opens the path.
     param([string]$Path)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if (-not $item) { return $false }
     if ($item.PSIsContainer) { return $false }
-    if (Test-CtxIsLink -Path $Path) { return $false }
-    if ($IsWindows -or $env:OS -ceq 'Windows_NT') { return $true }
-    foreach ($statArgs in @(@('-c', '%F'), @('-f', '%HT'))) {
+    if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+        # No FIFOs/sockets as files on Windows; a non-container leaf is a
+        # regular file (Test-Path resolves symlinks/junctions).
+        return (Test-Path -LiteralPath $Path -PathType Leaf)
+    }
+    foreach ($statArgs in @(@('-Lc', '%F'), @('-Lf', '%HT'))) {
         try {
+            # -L makes stat follow symlinks (like Bash `[ -f ]`); the bare
+            # form reports "symbolic link" for the link itself.
             $fileType = (& stat @statArgs -- $Path 2>$null).Trim()
             if ($fileType -match 'regular') { return $true }
             return $false

@@ -851,14 +851,16 @@ _ctx_sanitize_context_name() {
     # ASCII letters/digits/'.'/'_'/'-'/'+' are kept, disallowed ASCII bytes
     # become '_', and each non-ASCII character (one UTF-8 lead byte plus its
     # continuation bytes) becomes a single '_'. Uses POSIX `od` only; no
-    # locale-sensitive pattern matching or byte-oriented tr.
+    # locale-sensitive pattern matching or byte-oriented tr. Allowed bytes
+    # are re-encoded with printf '%b' using the \0NNN octal form, which both
+    # bash and zsh decode (the bare \NNN form is left literal by zsh).
     local name="$1" out="" b
     for b in $(printf '%s' "$name" | od -An -v -tu1); do
         if { [ "$b" -ge 48 ] && [ "$b" -le 57 ]; } \
            || { [ "$b" -ge 65 ] && [ "$b" -le 90 ]; } \
            || { [ "$b" -ge 97 ] && [ "$b" -le 122 ]; } \
            || [ "$b" -eq 43 ] || [ "$b" -eq 45 ] || [ "$b" -eq 46 ] || [ "$b" -eq 95 ]; then
-            out="$out$(printf '%b' "\\$(printf '%03o' "$b")")"
+            out="$out$(printf '%b' "\\0$(printf '%03o' "$b")")"
         elif [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
             # UTF-8 continuation byte; already counted by its lead byte.
             :

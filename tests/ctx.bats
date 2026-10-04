@@ -3415,3 +3415,44 @@ _make_canonical_skill() {
     restore_lc_all
     trap - EXIT
 }
+
+@test "Issue48: zsh sanitizer emits ASCII names without escape text and survives reactivation + ctx check (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+    _make_canonical_profile review $'# review\n'
+    local pdir="$TEST_TMP/project-zsh"
+    mkdir -p "$pdir"
+    printf 'review:@profile\n' > "$pdir/.ctx"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    # Run entirely under zsh -f (no user startup files) so the sanitizer's
+    # printf '%b' octal decoding is exercised in zsh (which leaves the bare
+    # \NNN form literal). A broken sanitizer corrupts home/projection/manifest
+    # names, either activation fails, and ctx check fails.
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        printf "a=%s\n" "$(_ctx_sanitize_context_name review)"
+        printf "c=%s\n" "$(_ctx_sanitize_context_name café)"
+        ctx review >/dev/null 2>&1
+        printf "act1=%s\n" "$?"
+        ctx review >/dev/null 2>&1
+        printf "act2=%s\n" "$?"
+        cd "$2"
+        ctx check >/dev/null 2>&1
+        printf "check=%s\n" "$?"
+        printf "proj=%s\n" "$(basename "$COPILOT_HOME"/instructions/ctx-profiles/*.instructions.md)"
+        printf "manifest=%s\n" "$(<"$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed")"
+    ' -- "$CTX_SRC" "$pdir"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"a=review"* ]]
+    [[ "$output" == *"c=caf_"* ]]
+    [[ "$output" == *"act1=0"* ]]
+    [[ "$output" == *"act2=0"* ]]
+    [[ "$output" == *"check=0"* ]]
+    [[ "$output" == *"proj=0001-review.instructions.md"* ]]
+    [[ "$output" == *"manifest=0001-review.instructions.md"* ]]
+    [[ "$output" != *"\\"* ]]
+}

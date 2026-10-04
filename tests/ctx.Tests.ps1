@@ -2674,6 +2674,8 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         try { $out = @(& { ctx review } *>&1) } finally { $ErrorActionPreference = $prevEap }
 
         ($out -join "`n") | Should -Match 'all-canonical Mode A requires pwsh/\.NET 9\+ on Unix'
+        # A failed Mode A manual activation returns $false (README contract).
+        $out[-1] | Should -BeFalse
         $env:AI_CTX_PROFILES | Should -Be 'previous'
         $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
         $env:COPILOT_HOME | Should -Be 'previous-home'
@@ -2754,6 +2756,34 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $check = @(& { ctx check } 3>&1 6>&1)
         ($check -join "`n") | Should -Match 'CHECK PASS skill:good-skill'
         (ctx check) | Should -BeTrue
+    }
+
+    It 'Issue48: canonical skill detection accepts hard-linked SKILL.md like Bash while rejecting symlinks (where supported)' {
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        New-Item -ItemType Directory -Path (Join-Path $reviewDir '.agents/skills/hard-skill') -Force | Out-Null
+        $skillMd = Join-Path $reviewDir '.agents/skills/hard-skill/SKILL.md'
+        Set-Content -LiteralPath $skillMd -Value "---`nname: hard`n---`n"
+        try {
+            # A second hard link raises the link count above 1.
+            New-Item -ItemType HardLink -Path (Join-Path $reviewDir '.agents/skills/hard-skill/SKILL.hard') -Target $skillMd -ErrorAction Stop | Out-Null
+        } catch {
+            Set-ItResult -Skipped -Because 'hard links not supported on this platform'
+            return
+        }
+        # Shared-file semantics preserved: Test-CtxIsLink still treats a
+        # multi-link file as a link.
+        Test-CtxIsLink -Path $skillMd | Should -BeTrue
+        Test-CtxRegularFile -Path $skillMd | Should -BeFalse
+        # But canonical skill validation matches Bash `[ -f ] && [ ! -L ]`.
+        Test-CtxRegularFile -Path $skillMd -AllowHardLinks | Should -BeTrue
+        @(Get-CtxSkillSourceDirs -ResolvedDir $reviewDir | ForEach-Object { $_.Name }) | Should -Contain 'hard-skill'
+
+        # A symlinked SKILL.md is still rejected.
+        $symDir = Join-Path $reviewDir '.agents/skills/sym-skill'
+        New-Item -ItemType Directory -Path $symDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $symDir 'SKILL.real') -Value "---`nname: sym`n---`n"
+        New-Item -ItemType SymbolicLink -Path (Join-Path $symDir 'SKILL.md') -Target (Join-Path $symDir 'SKILL.real') | Out-Null
+        @(Get-CtxSkillSourceDirs -ResolvedDir $reviewDir | ForEach-Object { $_.Name }) | Should -Not -Contain 'sym-skill'
     }
 
     It 'Issue48: canonical/legacy skill collisions reuse warn-and-skip and check FAIL' {
@@ -3335,6 +3365,61 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Get-CtxSanitizedContextName -Name 'a𝄞b' | Should -Be 'a_b'
         Get-CtxSanitizedContextName -Name 'my profile' | Should -Be 'my_profile'
         Get-CtxSanitizedContextName -Name 'hello/world' | Should -Be 'hello_world'
+    }
+
+    It 'Issue48: sanitizer replaces culture-case-folded Unicode letters with _ (Kelvin, dotted I)' {
+        $savedCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        $savedUiCulture = [System.Threading.Thread]::CurrentThread.CurrentUICulture
+        try {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('tr-TR')
+            # Case-sensitive replacement must not let case-folding (Kelvin sign
+            # -> k, dotted capital I -> i) smuggle characters through [A-Za-z].
+            Get-CtxSanitizedContextName -Name "Kſİ" | Should -Be '___'
+            Get-CtxSanitizedContextName -Name "K" | Should -Be '_'
+            Get-CtxSanitizedContextName -Name "İ" | Should -Be '_'
+            Get-CtxSanitizedContextName -Name 'review' | Should -Be 'review'
+        } finally {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $savedCulture
+            [System.Threading.Thread]::CurrentThread.CurrentUICulture = $savedUiCulture
+        }
+    }
+
+    It 'Issue48: canonical detection rejects a FIFO AGENTS.md without blocking (Unix)' {
+        if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+            Set-ItResult -Skipped -Because 'requires mkfifo (Unix)'
+            return
+        }
+        $profileDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/fifo-profile'
+        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+        $fifo = Join-Path $profileDir 'AGENTS.md'
+        & mkfifo $fifo
+
+        # A FIFO AGENTS.md must not make a profile canonical (Bash `[ -f ]` is
+        # false for a FIFO) and must never be opened (reading it would block).
+        Test-CtxProfileCanonical -ProfileDir $profileDir | Should -BeFalse
+        Test-CtxFollowedRegularFile -Path $fifo | Should -BeFalse
+
+        # A symlink to a regular AGENTS.md is still canonical (Bash follows
+        # links); a symlink to a FIFO is not.
+        $symProfile = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/symlink-profile'
+        New-Item -ItemType Directory -Path $symProfile -Force | Out-Null
+        $real = Join-Path $Script:TestTmp 'real-agents.md'
+        Set-Content -LiteralPath $real -Value '# x' -NoNewline
+        New-Item -ItemType SymbolicLink -Path (Join-Path $symProfile 'AGENTS.md') -Target $real | Out-Null
+        Test-CtxProfileCanonical -ProfileDir $symProfile | Should -BeTrue
+
+        $symFifoProfile = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/symfifo-profile'
+        New-Item -ItemType Directory -Path $symFifoProfile -Force | Out-Null
+        $realFifo = Join-Path $Script:TestTmp 'real-fifo'
+        & mkfifo $realFifo
+        New-Item -ItemType SymbolicLink -Path (Join-Path $symFifoProfile 'AGENTS.md') -Target $realFifo | Out-Null
+        Test-CtxProfileCanonical -ProfileDir $symFifoProfile | Should -BeFalse
+
+        # A regular AGENTS.md is canonical.
+        $regProfile = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/reg-profile'
+        New-Item -ItemType Directory -Path $regProfile -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $regProfile 'AGENTS.md') -Value '# x' -NoNewline
+        Test-CtxProfileCanonical -ProfileDir $regProfile | Should -BeTrue
     }
 
     It 'Issue48: a FIFO manifest is rejected without blocking (Unix regular-file predicate)' {
