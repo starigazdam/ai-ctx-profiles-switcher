@@ -3185,7 +3185,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Set-CtxCanonicalInstructions -HomeDir $syntheticHome -Entries $entries
         Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0001-review.instructions.md') | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0002-arch.instructions.md') | Should -BeTrue
-        (Get-Content -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') -Raw).Trim() | Should -Be "0001-review.instructions.md`n0002-arch.instructions.md"
+        ((Get-Content -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') -Raw).Trim() -replace "`r`n", "`n") | Should -Be "0001-review.instructions.md`n0002-arch.instructions.md"
         @(Get-ChildItem -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles') -Force -Filter '.ctx-txn.*' -ErrorAction SilentlyContinue).Count | Should -Be 0
     }
 
@@ -3212,7 +3212,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Assert-CtxFileBytes -Path (Join-Path $projDir '0002-review.instructions.md') -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")))
         Assert-CtxFileBytes -Path (Join-Path $projDir '0003-arch.instructions.md') -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n")))
         Test-Path -LiteralPath (Join-Path $projDir '0001-old.instructions.md') | Should -BeFalse
-        (Get-Content -LiteralPath (Join-Path $projDir '.ctx-managed') -Raw).Trim() | Should -Be "0002-review.instructions.md`n0003-arch.instructions.md"
+        ((Get-Content -LiteralPath (Join-Path $projDir '.ctx-managed') -Raw).Trim() -replace "`r`n", "`n") | Should -Be "0002-review.instructions.md`n0003-arch.instructions.md"
         # A crashed transaction directory is never swept; it is ignored safely.
         Test-Path -LiteralPath (Join-Path $projDir '.ctx-txn.crashed') -PathType Container | Should -BeTrue
     }
@@ -3264,7 +3264,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
         ($out -join "`n") | Should -Match 'refusing to remove non-regular stale projection'
         # The expanded union manifest is retained so a retry remains possible.
-        (Get-Content -LiteralPath (Join-Path $projDir '.ctx-managed') -Raw).Trim() | Should -Be "0001-old.instructions.md`n0002-review.instructions.md"
+        ((Get-Content -LiteralPath (Join-Path $projDir '.ctx-managed') -Raw).Trim() -replace "`r`n", "`n") | Should -Be "0001-old.instructions.md`n0002-review.instructions.md"
         # Directory contents were never recursively deleted.
         (Get-Content -LiteralPath (Join-Path $projDir '0001-old.instructions.md/inner.txt') -Raw) | Should -Be 'precious'
         # No transaction staging directory is left behind.
@@ -3272,6 +3272,10 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
     }
 
     It 'Issue48: case-only projection label transition under a shared home removes the stale old-case projection' {
+        if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+            Set-ItResult -Skipped -Because 'case-insensitive filesystem: covered by the dedicated Windows alias test'
+            return
+        }
         New-CtxTestProfile -Name 'base' | Out-Null
         $reviewDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/Review'
         New-Item -ItemType Directory -Path $reviewDir -Force | Out-Null
