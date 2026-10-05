@@ -3490,4 +3490,146 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review/instructions') | Should -BeFalse
     }
 
+    It 'Issue48: direct .ctx canonical profile outside the configured profiles root fails atomically' {
+        $outside = Join-Path $Script:TestTmp 'outside-canonical'
+        New-Item -ItemType Directory -Path $outside -Force | Out-Null
+        $sentinel = Join-Path $outside 'AGENTS.md'
+        [System.IO.File]::WriteAllText($sentinel, "# outside canonical`n")
+        $before = [System.IO.File]::ReadAllBytes($sentinel)
+
+        $proj = Join-Path $Script:TestTmp 'project-canon-outside'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "outside:$outside"
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+        $env:COPILOT_SKILLS_DIRS = 'previous-skills'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile $ctxFile } finally { $ErrorActionPreference = $prevEap }
+
+        $result | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'outside the configured profiles root'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'previous-skills'
+        Test-Path -LiteralPath (Join-Path $proj 'project-canon-outside.code-workspace') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'outside') | Should -BeFalse
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($sentinel)) | Should -Be ([Convert]::ToBase64String($before))
+    }
+
+    It 'Issue48: in-root canonical profile symlink whose target escapes the profiles root fails atomically' {
+        $outside = Join-Path $Script:TestTmp 'outside-symlink-target'
+        New-Item -ItemType Directory -Path $outside -Force | Out-Null
+        $sentinel = Join-Path $outside 'AGENTS.md'
+        [System.IO.File]::WriteAllText($sentinel, "# outside symlink target`n")
+        $before = [System.IO.File]::ReadAllBytes($sentinel)
+        $link = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/evil'
+        New-Item -ItemType SymbolicLink -Path $link -Target $outside | Out-Null
+
+        $proj = Join-Path $Script:TestTmp 'project-canon-symlink-escape'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "evil:$link"
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile $ctxFile } finally { $ErrorActionPreference = $prevEap }
+
+        $result | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'outside the configured profiles root'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        Test-Path -LiteralPath (Join-Path $proj 'project-canon-symlink-escape.code-workspace') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'evil') | Should -BeFalse
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($sentinel)) | Should -Be ([Convert]::ToBase64String($before))
+    }
+
+    It 'Issue48: direct .ctx canonical profile inside the configured root still activates and identifier activation remains compatible' {
+        $baseDir = New-CtxTestProfile -Name 'base'
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $archDir = New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n"))
+        $ghostDir = New-CtxTestCanonicalProfile -Name 'ghost' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# ghost unselected`n"))
+        New-CtxTestCanonicalSkill -Profile 'review' -Skill 'review-skill'
+        New-CtxTestCanonicalSkill -Profile 'arch' -Skill 'arch-skill'
+        New-CtxTestCanonicalSkill -Profile 'ghost' -Skill 'ghost-skill'
+
+        # Capture every source so activation can be proven read-only.
+        $sources = @(
+            (Join-Path $reviewDir 'AGENTS.md'),
+            (Join-Path $archDir 'AGENTS.md'),
+            (Join-Path $ghostDir 'AGENTS.md'),
+            (Join-Path $reviewDir '.agents/skills/review-skill/SKILL.md'),
+            (Join-Path $archDir '.agents/skills/arch-skill/SKILL.md'),
+            (Join-Path $ghostDir '.agents/skills/ghost-skill/SKILL.md')
+        )
+        $before = @{}
+        foreach ($s in $sources) { $before[$s] = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($s)) }
+
+        $proj = Join-Path $Script:TestTmp 'project-canon-inroot'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "base:@profile`nreview:$reviewDir`narch:@profile"
+
+        ctx load $ctxFile | Out-Null
+
+        # Mixed legacy/identifier compatibility is preserved.
+        $env:AI_CTX_PROFILES | Should -Be 'base+review+arch'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $baseDir
+
+        # Projections are deterministic and keyed to selected entry order (base
+        # is legacy, so the canonical entries keep indexes 2 and 3); only the
+        # selected canonical entries appear, never the unselected ghost profile.
+        $projDir = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles'
+        ((@(Get-ChildItem -LiteralPath $projDir -File -Filter '*.instructions.md').Name | Sort-Object) -join "`n") | Should -Be "0002-review.instructions.md`n0003-arch.instructions.md"
+        ((Get-Content -LiteralPath (Join-Path $projDir '.ctx-managed')) -join "`n") | Should -Be "0002-review.instructions.md`n0003-arch.instructions.md"
+        Test-Path -LiteralPath (Join-Path $projDir '0004-ghost.instructions.md') | Should -BeFalse
+
+        # Only the selected profiles' distinct skills are linked; ghost is absent.
+        $skillsHome = Join-Path $env:COPILOT_HOME 'skills'
+        ((@(Get-ChildItem -LiteralPath $skillsHome).Name | Sort-Object) -join "`n") | Should -Be "arch-skill`nreview-skill"
+        (Get-CtxLinkTarget -Path (Join-Path $skillsHome 'review-skill') -Target $null) | Should -Be (Join-Path $reviewDir '.agents/skills/review-skill')
+        (Get-CtxLinkTarget -Path (Join-Path $skillsHome 'arch-skill') -Target $null) | Should -Be (Join-Path $archDir '.agents/skills/arch-skill')
+        Test-Path -LiteralPath (Join-Path $skillsHome 'ghost-skill') | Should -BeFalse
+
+        # Sources are byte-identical after activation.
+        foreach ($s in $sources) {
+            [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($s)) | Should -Be $before[$s]
+        }
+    }
+
+    It 'Issue48: an intermediate in-root symlink followed by .. is not approved as in-root (filesystem order)' {
+        $outsideDir = Join-Path $Script:TestTmp 'outside-escape/dir'
+        $outsideProfile = Join-Path $Script:TestTmp 'outside-escape/outside-profile'
+        New-Item -ItemType Directory -Path $outsideDir, $outsideProfile -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $outsideProfile 'AGENTS.md'), "# outside`n")
+        $link = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/escape-link'
+        New-Item -ItemType SymbolicLink -Path $link -Target $outsideDir | Out-Null
+
+        # Filesystem order resolves escape-link -> outside/dir, then .. -> the
+        # outside parent; the lexical collapse would wrongly land back in root.
+        $crafted = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/escape-link/../outside-profile'
+        Test-CtxCanonicalProfileWithinRoot -ProfileDir $crafted | Should -BeFalse
+        (Get-CtxPhysicalPath -Path $crafted) | Should -Be $outsideProfile
+
+        # Control: a legitimate in-root canonical profile is still approved.
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        Test-CtxCanonicalProfileWithinRoot -ProfileDir $reviewDir | Should -BeTrue
+    }
+
+    It 'Issue48: a symlink loop in the profile path fails closed without recursing indefinitely' {
+        $linkA = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/loop-a'
+        $linkB = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/loop-b'
+        New-Item -ItemType SymbolicLink -Path $linkA -Target $linkB | Out-Null
+        New-Item -ItemType SymbolicLink -Path $linkB -Target $linkA | Out-Null
+
+        (Get-CtxPhysicalPath -Path $linkA) | Should -BeNullOrEmpty
+        Test-CtxCanonicalProfileWithinRoot -ProfileDir $linkA | Should -BeFalse
+    }
+
 }

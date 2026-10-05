@@ -3416,6 +3416,158 @@ _make_canonical_skill() {
     trap - EXIT
 }
 
+@test "Issue48: direct .ctx canonical profile outside the configured profiles root fails atomically" {
+    local outside="$TEST_TMP/outside-canonical"
+    mkdir -p "$outside"
+    printf '# outside canonical\n' > "$outside/AGENTS.md"
+    local sentinel="$outside/AGENTS.md" before
+    before="$(cksum "$sentinel")"
+
+    local proj="$TEST_TMP/project-canon-outside"
+    mkdir -p "$proj"
+    printf 'outside:%s\n' "$outside" > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+    export COPILOT_SKILLS_DIRS=previous-skills
+    _ctx_auto_load_dir=""
+    _ctx_reset_active_record
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/canon-outside.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/canon-outside.out")" == *"outside the configured profiles root"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ "$COPILOT_SKILLS_DIRS" = previous-skills ]
+    [ ! -e "$proj/project-canon-outside.code-workspace" ]
+    [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/outside" ]
+    [ "$(cksum "$sentinel")" = "$before" ]
+}
+
+@test "Issue48: in-root canonical profile symlink whose target escapes the profiles root fails atomically" {
+    local outside="$TEST_TMP/outside-symlink-target"
+    mkdir -p "$outside"
+    printf '# outside symlink target\n' > "$outside/AGENTS.md"
+    local sentinel="$outside/AGENTS.md" before
+    before="$(cksum "$sentinel")"
+    ln -s "$outside" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/evil"
+
+    local proj="$TEST_TMP/project-canon-symlink-escape"
+    mkdir -p "$proj"
+    printf 'evil:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/evil" > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+    _ctx_auto_load_dir=""
+    _ctx_reset_active_record
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/canon-symlink.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/canon-symlink.out")" == *"outside the configured profiles root"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ ! -e "$proj/project-canon-symlink-escape.code-workspace" ]
+    [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/evil" ]
+    [ "$(cksum "$sentinel")" = "$before" ]
+}
+
+@test "Issue48: direct .ctx canonical profile inside the configured root still activates and identifier activation remains compatible" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    _make_canonical_profile ghost $'# ghost unselected\n'
+    _make_canonical_skill review review-skill
+    _make_canonical_skill arch arch-skill
+    _make_canonical_skill ghost ghost-skill
+
+    # Capture every source so activation can be proven read-only.
+    local review_agents="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    local arch_agents="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch/AGENTS.md"
+    local ghost_agents="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/ghost/AGENTS.md"
+    local review_skill_md="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/review-skill/SKILL.md"
+    local arch_skill_md="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch/.agents/skills/arch-skill/SKILL.md"
+    local ghost_skill_md="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/ghost/.agents/skills/ghost-skill/SKILL.md"
+    local review_agents_sum arch_agents_sum ghost_agents_sum
+    local review_skill_sum arch_skill_sum ghost_skill_sum
+    review_agents_sum="$(cksum "$review_agents")"
+    arch_agents_sum="$(cksum "$arch_agents")"
+    ghost_agents_sum="$(cksum "$ghost_agents")"
+    review_skill_sum="$(cksum "$review_skill_md")"
+    arch_skill_sum="$(cksum "$arch_skill_md")"
+    ghost_skill_sum="$(cksum "$ghost_skill_md")"
+
+    local proj="$TEST_TMP/project-canon-inroot"
+    mkdir -p "$proj"
+    printf 'review:%s\narch:@profile\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    ctx load "$proj/.ctx" >/dev/null
+
+    # Mixed direct-path + identifier compatibility is preserved.
+    [ "$AI_CTX_PROFILES" = "review+arch" ]
+
+    # Projections are deterministic and keyed to selected entry order; only the
+    # selected canonical entries appear, never the unselected ghost profile.
+    local projections
+    projections="$(cd "$COPILOT_HOME/instructions/ctx-profiles" && ls -1 *.instructions.md | sort)"
+    [ "$projections" = "$(printf '0001-review.instructions.md\n0002-arch.instructions.md')" ]
+    [ "$(cat "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed")" = "$(printf '0001-review.instructions.md\n0002-arch.instructions.md')" ]
+    [ ! -e "$COPILOT_HOME/instructions/ctx-profiles/0003-ghost.instructions.md" ]
+
+    # Only the selected profiles' distinct skills are linked; ghost is absent.
+    local links
+    links="$(cd "$COPILOT_HOME/skills" && ls -1 | sort)"
+    [ "$links" = "$(printf 'arch-skill\nreview-skill')" ]
+    [ "$(readlink -f "$COPILOT_HOME/skills/review-skill")" = "$(readlink -f "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/review-skill")" ]
+    [ "$(readlink -f "$COPILOT_HOME/skills/arch-skill")" = "$(readlink -f "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch/.agents/skills/arch-skill")" ]
+    [ ! -e "$COPILOT_HOME/skills/ghost-skill" ]
+
+    # Sources are byte-identical after activation.
+    [ "$(cksum "$review_agents")" = "$review_agents_sum" ]
+    [ "$(cksum "$arch_agents")" = "$arch_agents_sum" ]
+    [ "$(cksum "$ghost_agents")" = "$ghost_agents_sum" ]
+    [ "$(cksum "$review_skill_md")" = "$review_skill_sum" ]
+    [ "$(cksum "$arch_skill_md")" = "$arch_skill_sum" ]
+    [ "$(cksum "$ghost_skill_md")" = "$ghost_skill_sum" ]
+}
+
+@test "Issue48: intermediate in-root symlink followed by .. cannot escape the profiles root" {
+    local outside_dir="$TEST_TMP/outside-escape/dir"
+    local outside_profile="$TEST_TMP/outside-escape/outside-profile"
+    mkdir -p "$outside_dir" "$outside_profile"
+    printf '# outside\n' > "$outside_profile/AGENTS.md"
+    ln -s "$outside_dir" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/escape-link"
+
+    # Filesystem order resolves escape-link -> outside/dir, then .. -> the
+    # outside parent; realpath -m follows that order, so this canonical
+    # profile is outside the root and must be rejected.
+    local crafted="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/escape-link/../outside-profile"
+    ! _ctx_canonical_profile_within_root "$crafted"
+
+    local proj="$TEST_TMP/project-canon-symlink-dotdot"
+    mkdir -p "$proj"
+    printf 'evil:%s\n' "$crafted" > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+    _ctx_auto_load_dir=""
+    _ctx_reset_active_record
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/canon-dotdot.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/canon-dotdot.out")" == *"outside the configured profiles root"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ ! -e "$proj/project-canon-symlink-dotdot.code-workspace" ]
+}
+
 @test "Issue48: zsh sanitizer emits ASCII names without escape text and survives reactivation + ctx check (zsh-gated)" {
     if ! command -v zsh >/dev/null 2>&1; then
         skip "zsh is not installed"

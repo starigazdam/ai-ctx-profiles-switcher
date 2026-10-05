@@ -728,6 +728,75 @@ function Test-CtxProfileCanonical {
     return (Test-CtxFollowedRegularFile -Path (Join-Path $ProfileDir 'AGENTS.md'))
 }
 
+function Get-CtxPhysicalPath {
+    # Resolves $Path to its physical form by walking components in filesystem
+    # order: each symlink/junction is resolved as it is encountered, so a
+    # following ".." applies to the link target's parent (Bash `realpath -m`
+    # parity) instead of being collapsed lexically before the link is seen.
+    # Non-existent trailing components are normalized textually. Returns
+    # $null when the path cannot be resolved, a symlink is already being
+    # resolved on this chain (loop), or the chain exceeds the safety bound,
+    # so symlink loops fail closed. Never opens a file.
+    param(
+        [string]$Path,
+        [int]$Depth = 0,
+        [System.Collections.Generic.HashSet[string]]$Resolving
+    )
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ($Depth -gt 40) { return $null }
+    if ($null -eq $Resolving) {
+        $Resolving = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    }
+    if (-not [System.IO.Path]::IsPathRooted($Path)) {
+        $Path = Join-Path (Get-Location).Path $Path
+    }
+    $root = [System.IO.Path]::GetPathRoot($Path)
+    if (-not $root) { return $null }
+    $current = $root
+    foreach ($part in ($Path.Substring($root.Length) -split '[\\/]')) {
+        if (-not $part -or $part -eq '.') { continue }
+        if ($part -eq '..') {
+            $parent = Split-Path -Parent $current
+            if ($parent) { $current = $parent }
+            continue
+        }
+        $next = Join-Path $current $part
+        if ((Test-Path -LiteralPath $next) -and (Test-CtxIsLink -Path $next)) {
+            $target = Get-CtxLinkTarget -Path $next -Target $null
+            if (-not $target) { return $null }
+            if (-not [System.IO.Path]::IsPathRooted($target)) {
+                $target = Join-Path (Split-Path -Parent $next) $target
+            }
+            if (-not $Resolving.Add($next)) { return $null }
+            $resolved = Get-CtxPhysicalPath -Path $target -Depth ($Depth + 1) -Resolving $Resolving
+            [void]$Resolving.Remove($next)
+            if (-not $resolved) { return $null }
+            $current = $resolved
+        } else {
+            $current = $next
+        }
+    }
+    return $current
+}
+
+function Test-CtxCanonicalProfileWithinRoot {
+    # Returns $true only when $ProfileDir physically resolves to a strict
+    # descendant of the configured profiles root. Symlinks are followed in
+    # both paths, so an in-root link whose target escapes the root is
+    # rejected; the separator-safe comparison rejects textual-prefix sibling
+    # paths. Case-insensitive on Windows, ordinal elsewhere (issue #48).
+    param([string]$ProfileDir)
+    $profilesRoot = Join-Path (Get-CtxRoot) 'profiles'
+    $rootResolved = Get-CtxPhysicalPath -Path $profilesRoot
+    $dirResolved = Get-CtxPhysicalPath -Path $ProfileDir
+    if (-not $rootResolved -or -not $dirResolved) { return $false }
+    $rootTrimmed = $rootResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $dirTrimmed = $dirResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $comparison = if ($IsWindows -or $env:OS -ceq 'Windows_NT') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    if ([string]::Equals($dirTrimmed, $rootTrimmed, $comparison)) { return $false }
+    return $dirTrimmed.StartsWith($rootTrimmed + [System.IO.Path]::DirectorySeparatorChar, $comparison)
+}
+
 function Test-CtxValidProjectionName {
     # Returns $true when $Name matches the manifest grammar
     # <4+ ASCII digits>-<A-Za-z0-9+._->.instructions.md.
@@ -1816,6 +1885,9 @@ function Parse-CtxFile {
             continue
         }
         if (-not (Test-Path -LiteralPath $resolvedPath -PathType Container)) { throw ".ctx entry `"$name`" in $CtxFile points to missing directory: $resolvedPath" }
+        if ((Test-CtxProfileCanonical -ProfileDir $resolvedPath) -and -not (Test-CtxCanonicalProfileWithinRoot -ProfileDir $resolvedPath)) {
+            throw "canonical profile `"$name`" resolves outside the configured profiles root: $resolvedPath"
+        }
         $canonical = [System.IO.Path]::GetFullPath($resolvedPath)
         if ($seenTargets.ContainsKey($canonical)) { throw ".ctx entries `"$($seenTargets[$canonical])`" and `"$name`" resolve to the same directory" }
         $seenTargets[$canonical] = $name; $names += $name; $dirs += $resolvedPath

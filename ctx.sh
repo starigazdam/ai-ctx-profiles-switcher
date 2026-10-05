@@ -878,6 +878,22 @@ _ctx_profile_is_canonical() {
     [ -f "$1/AGENTS.md" ]
 }
 
+_ctx_canonical_profile_within_root() {
+    # A canonical profile must physically resolve to a strict descendant of
+    # the configured profiles root. Symlinks are followed in both paths so an
+    # in-root link whose target escapes the root is rejected; the separator-
+    # safe case pattern rejects textual-prefix sibling paths. Non-canonical
+    # (legacy) direct paths are never validated here (issue #48).
+    local profile_dir="$1" profiles_root root_canonical profile_canonical
+    profiles_root="$(_ctx_root)/profiles"
+    root_canonical="$(realpath -m -- "$profiles_root" 2>/dev/null)" || return 1
+    profile_canonical="$(realpath -m -- "$profile_dir" 2>/dev/null)" || return 1
+    case "$profile_canonical" in
+        "$root_canonical"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 _ctx_in_list() {
     # $1: needle; remaining args: list. Returns 0 when the needle is present.
     local needle="$1" item
@@ -1678,6 +1694,10 @@ _ctx_parse_ctx_file() {
             continue
         fi
         if [ ! -d "$resolved_path" ]; then printf 'ctx: error: .ctx entry "%s" in %s points to missing directory: %s\n' "$name" "$ctx_file" "$resolved_path" >&2; return 1; fi
+        if _ctx_profile_is_canonical "$resolved_path" && ! _ctx_canonical_profile_within_root "$resolved_path"; then
+            printf 'ctx: error: canonical profile "%s" resolves outside the configured profiles root: %s\n' "$name" "$resolved_path" >&2
+            return 1
+        fi
         canonical_path="$(realpath -m -- "$resolved_path" 2>/dev/null)" || return 1
         if [ -n "${seen_targets[$canonical_path]+set}" ]; then printf 'ctx: error: .ctx entries "%s" and "%s" resolve to the same directory\n' "${seen_targets[$canonical_path]}" "$name" >&2; return 1; fi
         seen_targets[$canonical_path]="$name"; names+=("$name"); dirs+=("$resolved_path"); pairs+=("$name" "$resolved_path")
