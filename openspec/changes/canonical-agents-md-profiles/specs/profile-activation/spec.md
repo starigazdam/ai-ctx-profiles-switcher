@@ -16,6 +16,21 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 - **WHEN** a user runs `ctx coding azure` and both directories exist under the profiles root without root-level `AGENTS.md` files
 - **THEN** `AI_CTX_PROFILES` is set to `coding+azure` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` lists both resolved directories in invocation order, joined with `,`
 
+#### Scenario: Profile under an opted-in external root is activated
+
+- **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` names an existing absolute directory and a requested profile exists only as an immediate child of that physical root
+- **THEN** the profile is activated using its physical directory, while the configured profiles root remains available and takes precedence for same-name profiles
+
+#### Scenario: Invalid external root is rejected before state changes
+
+- **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is relative, missing, not a directory, or resolves to the filesystem root
+- **THEN** activation errors before changing the active context
+
+#### Scenario: Profile symlink outside all trusted roots is rejected
+
+- **WHEN** a profile entry beneath either configured root physically resolves outside every trusted root
+- **THEN** activation errors before changing the active context
+
 #### Scenario: Unknown profile is rejected
 
 - **WHEN** a user runs `ctx nonexistent` and no `nonexistent` directory exists under the profiles root
