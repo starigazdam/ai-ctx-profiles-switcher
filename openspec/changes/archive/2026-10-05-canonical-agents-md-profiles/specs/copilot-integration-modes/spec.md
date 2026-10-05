@@ -42,8 +42,13 @@ The system SHALL wire Copilot environment variables as follows. `COPILOT_CUSTOM_
 
 #### Scenario: Mode A all-canonical selection exports an empty value
 
-- **WHEN** a user activates one or more canonical profiles and no legacy profiles under Mode A on a supported runtime (Bash/zsh, PowerShell on Windows (Windows PowerShell 5.1 or pwsh), or Unix pwsh running .NET 9+)
+- **WHEN** a user activates one or more canonical profiles and no legacy profiles under Mode A on a supported runtime (Bash/zsh, Windows pwsh (PowerShell 7+), or Unix pwsh running .NET 9+)
 - **THEN** `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is set to the empty string; on Unix pwsh running .NET 8 and earlier the selection instead fails before mutation as specified by `profile-activation`
+
+#### Scenario: Windows PowerShell 5.1 all-canonical present-empty is unverified
+
+- **WHEN** an all-canonical Mode A selection would run under Windows PowerShell 5.1
+- **THEN** present-empty success is not claimed; the behavior remains unverified and is tracked by issue #63
 
 #### Scenario: Unix pwsh/.NET 8 and earlier reject all-canonical Mode A before mutation
 
