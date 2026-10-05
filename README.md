@@ -411,7 +411,7 @@ again rather than suppressing it.
 | Windows pwsh (PowerShell 7+) | present-empty | supported |
 | Unix pwsh on .NET 9+ | present-empty | supported |
 | Unix pwsh on .NET 8 or earlier | **rejected before mutation** with a pwsh/.NET 9+ requirement | supported |
-| Windows PowerShell 5.1 | **unverified** (tracked by [#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63)) | supported |
+| Windows PowerShell 5.1 | **unverified** (tracked by [#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63)) | **not exercised here** |
 
 Before .NET 9, Unix PowerShell cannot represent a present-empty environment
 variable (assigning an empty value removes it), so an all-canonical Mode A
@@ -429,6 +429,10 @@ Windows PowerShell 5.1 is **not** claimed: the CI exercises `pwsh`, not
 Windows PowerShell 5.1, and its all-canonical present-empty behavior remains
 unverified and tracked by
 [#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63).
+Windows PowerShell 5.1 was not exercised by these runs at all: the
+all-canonical present-empty gap is the specific item tracked by #63, while
+mixed/legacy Windows PowerShell 5.1 behavior is simply **not exercised here**
+and is not verified by the runs described above.
 
 ### Integration modes
 

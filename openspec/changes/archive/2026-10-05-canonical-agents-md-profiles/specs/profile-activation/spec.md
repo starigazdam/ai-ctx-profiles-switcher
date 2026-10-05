@@ -4,7 +4,7 @@
 
 ### Requirement: Manual profile activation
 
-The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`) and setting `AI_CTX_PROFILES` to the profile names joined with `+`. In Mode A, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` SHALL contain the resolved directories of selected profiles without a root-level `AGENTS.md`, in invocation order and comma-joined; canonical profile directories SHALL be omitted, and if every selected profile is canonical the variable SHALL be set to the empty string, subject to the runtime guard in `Unix pwsh all-canonical Mode A guard`. Under Modes B and C, canonical selections SHALL be rejected before state changes as specified by `copilot-integration-modes`; successful B/C selections contain only legacy profiles and SHALL list every resolved directory. Resolution SHALL reject identifiers that escape the profiles root, such as `.`, `..`, or paths containing separators.
+The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`). When `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is set, it SHALL be an absolute, existing directory other than a filesystem root; it adds a second trusted root and is searched only when no matching candidate exists in the primary root. Each identifier's physical target SHALL be an immediate child of one of the physically resolved trusted roots. The system SHALL set `AI_CTX_PROFILES` to the profile names joined with `+`. In Mode A, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` SHALL contain the resolved directories of selected profiles without a root-level `AGENTS.md`, in invocation order and comma-joined; canonical profile directories SHALL be omitted, and if every selected profile is canonical the variable SHALL be set to the empty string, subject to the runtime guard in `Unix pwsh all-canonical Mode A guard`. Under Modes B and C, canonical selections SHALL be rejected before state changes as specified by `copilot-integration-modes`; successful B/C selections contain only legacy profiles and SHALL list every resolved directory. Resolution SHALL reject identifiers that escape all trusted roots, such as `.`, `..`, or paths containing separators.
 
 #### Scenario: Activate a single profile
 
@@ -72,7 +72,7 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 
 #### Scenario: Projection bytes and line endings are stable across shells
 
-- **WHEN** Bash/zsh, PowerShell on Windows, or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
+- **WHEN** Bash/zsh, Windows pwsh (PowerShell 7+), or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
 - **THEN** the output bytes equal the fixed LF header followed by the source bytes unchanged
 
 #### Scenario: Canonical profiles discover only valid canonical skills

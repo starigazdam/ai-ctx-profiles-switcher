@@ -172,7 +172,7 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 
 #### Scenario: Projection bytes and line endings are stable across shells
 
-- **WHEN** Bash/zsh, PowerShell on Windows, or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
+- **WHEN** Bash/zsh, Windows pwsh (PowerShell 7+), or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
 - **THEN** the output bytes equal the fixed LF header followed by the source bytes unchanged
 
 #### Scenario: Canonical profiles discover only valid canonical skills
