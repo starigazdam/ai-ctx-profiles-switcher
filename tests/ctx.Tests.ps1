@@ -3926,4 +3926,41 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $dirsBefore
     }
 
+    It 'PR65: external root backslash on Unix fails closed instead of following the slash-sibling symlink' -Skip:($IsWindows -or ($env:OS -ceq 'Windows_NT')) {
+        # On Unix a backslash is a literal filename character, not a separator.
+        # The configured root here is a real directory named "trusted\root".
+        $literalRoot = [System.IO.Path]::Combine($Script:TestTmp, ('trusted' + [char]0x5C + 'root'))
+        [System.IO.Directory]::CreateDirectory($literalRoot) | Out-Null
+
+        # A normalized slash sibling "trusted/root" is a symlink to an
+        # attacker-controlled directory that contains a rogue profile.
+        $attacker = [System.IO.Path]::Combine($Script:TestTmp, 'attacker')
+        [System.IO.Directory]::CreateDirectory($attacker) | Out-Null
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::Combine($attacker, 'rogue')) | Out-Null
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::Combine($Script:TestTmp, 'trusted')) | Out-Null
+        $slashSibling = [System.IO.Path]::Combine($Script:TestTmp, 'trusted', 'root')
+        [System.IO.Directory]::CreateSymbolicLink($slashSibling, $attacker) | Out-Null
+
+        $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = $literalRoot
+
+        # Fail closed: reject a backslash-containing external root on Unix with
+        # an error that tells the user to use '/' separators.
+        $err = $null
+        try { Get-CtxExternalProfilesRoot | Out-Null } catch { $err = $_ }
+        $err | Should -Not -BeNullOrEmpty
+        $err.Exception.Message | Should -Match 'backslash'
+        $err.Exception.Message | Should -Match 'separator'
+        $err.Exception.Message | Should -Match '/'
+
+        # The outside profile must not be resolvable through the slash sibling.
+        { Resolve-CtxProfileIdentifier -Name 'rogue' } | Should -Throw
+    }
+
+    It 'PR65: invalid external profiles root does not suppress primary-root suggestions in Get-CtxProfileName' {
+        New-CtxTestProfile -Name 'review' | Out-Null
+        $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = 'relative/profiles'
+
+        @(Get-CtxProfileName) | Should -Contain 'review'
+    }
+
 }

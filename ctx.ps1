@@ -792,6 +792,9 @@ function Get-CtxExternalProfilesRoot {
     if (-not $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT) { return $null }
     $configured = $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT
     $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
+    if (-not $isWindowsLike -and $configured.Contains('\')) {
+        throw "AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT must not contain a backslash on Unix; use '/' path separators: $configured"
+    }
     $isAbsolute = [System.IO.Path]::IsPathRooted($configured)
     if ($isWindowsLike) {
         $isAbsolute = ($configured -match '^[A-Za-z]:[\\/]') -or ($configured -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+')
@@ -2570,7 +2573,8 @@ function Get-CtxSubdirName {
 
 function Get-CtxProfileName {
     $names = @(Get-CtxSubdirName (Join-Path (Get-CtxRoot) 'profiles'))
-    $externalRoot = Get-CtxExternalProfilesRoot
+    $externalRoot = $null
+    try { $externalRoot = Get-CtxExternalProfilesRoot } catch { $externalRoot = $null }
     if ($externalRoot) { $names += Get-CtxSubdirName $externalRoot }
     return $names | Sort-Object -Unique
 }
