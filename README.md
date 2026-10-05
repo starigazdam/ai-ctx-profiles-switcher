@@ -408,7 +408,7 @@ again rather than suppressing it.
 | Runtime | All-canonical Mode A | Mixed / legacy Mode A |
 |---------|----------------------|------------------------|
 | Bash / zsh | present-empty `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | supported |
-| Windows pwsh (PowerShell 7+) | present-empty | supported |
+| Native-Windows pwsh (the runtime exercised by PR CI; exact PowerShell/.NET version is not logged, so no version-wide PowerShell 7+ claim) | present-empty | supported |
 | Unix pwsh on .NET 9+ | present-empty | supported |
 | Unix pwsh on .NET 8 or earlier | **rejected before mutation** with a pwsh/.NET 9+ requirement | supported |
 | Windows PowerShell 5.1 | **unverified** (tracked by [#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63)) | **not exercised here** |
@@ -423,16 +423,19 @@ absent-as-empty. Mixed canonical+legacy and legacy-only selections are
 unaffected because their `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` value is
 non-empty.
 
-All-canonical present-empty success is asserted for Bash/zsh, Windows `pwsh`
-(PowerShell 7+, exercised by the Windows Pester CI), and Unix pwsh on .NET 9+.
-Windows PowerShell 5.1 is **not** claimed: the CI exercises `pwsh`, not
-Windows PowerShell 5.1, and its all-canonical present-empty behavior remains
-unverified and tracked by
+All-canonical present-empty success is asserted for Bash/zsh, the native-Windows
+`pwsh` exercised by the PR CI's Windows Pester job, and Unix pwsh on .NET 9+.
+The exact native-Windows `pwsh`/.NET version is not logged, so no version-wide
+claim is made for all PowerShell 7+ releases. Windows PowerShell 5.1 is
+**not** claimed: the CI exercises `pwsh`, not Windows PowerShell 5.1, and its
+all-canonical present-empty behavior remains unverified and tracked by
 [#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63).
-Windows PowerShell 5.1 was not exercised by these runs at all: the
+Windows PowerShell 5.1 was not exercised by the PR CI runs at all: the
 all-canonical present-empty gap is the specific item tracked by #63, while
-mixed/legacy Windows PowerShell 5.1 behavior is simply **not exercised here**
-and is not verified by the runs described above.
+mixed/legacy Windows PowerShell 5.1 behavior was not exercised or verified
+by this PR CI. The Unix .NET 9+ present-empty test path is gated by the
+runtime check, and the hosted Unix pwsh/.NET version is not logged, so no
+specific host version is claimed.
 
 ### Integration modes
 

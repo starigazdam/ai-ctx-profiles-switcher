@@ -2663,6 +2663,34 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         (Get-Content -LiteralPath $manifest -Raw).Trim() | Should -Be '0001-review.instructions.md'
     }
 
+    It 'Issue48: canonical .ctx activation projects and ctx check passes' {
+        if (Test-CtxOldUnixDotnet) {
+            Set-ItResult -Skipped -Because 'all-canonical Mode A requires pwsh/.NET 9+ on Unix'
+            return
+        }
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# hello`n")) | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-canonical-check'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value 'review:@profile'
+        Set-Location $proj
+
+        ctx load $ctxFile | Out-Null
+
+        $projection = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0001-review.instructions.md'
+        Test-Path -LiteralPath $projection -PathType Leaf | Should -BeTrue
+        Assert-CtxFileBytes -Path $projection -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# hello`n")))
+        $manifest = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/.ctx-managed'
+        (Get-Content -LiteralPath $manifest -Raw).Trim() | Should -Be '0001-review.instructions.md'
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        Test-Path Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -BeTrue
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be ''
+
+        $check = @(& { ctx check } *>&1)
+        ($check -join "`n") | Should -Match 'CHECK PASS instruction:0001-review\.instructions\.md'
+        (ctx check) | Should -BeTrue
+    }
+
     It 'Issue48: old Unix pwsh/.NET <=8 rejects all-canonical Mode A before mutation' {
         if (-not (Test-CtxOldUnixDotnet)) {
             Set-ItResult -Skipped -Because 'requires Unix pwsh/.NET 8 or earlier'

@@ -38,7 +38,7 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 
 #### Scenario: All-canonical Mode A selection sets custom directories empty
 
-- **WHEN** a user activates only canonical profiles under Mode A on a supported runtime (Bash/zsh, Windows pwsh (PowerShell 7+), or Unix pwsh running .NET 9+)
+- **WHEN** a user activates only canonical profiles under Mode A on a supported runtime (Bash/zsh, native-Windows pwsh (the runtime exercised by PR CI; exact PowerShell/.NET version is not logged, so no version-wide PowerShell 7+ claim), or Unix pwsh running .NET 9+)
 - **THEN** `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is set to the empty string; on Unix pwsh running .NET 8 and earlier the selection instead fails as specified by the `Unix pwsh all-canonical Mode A guard` requirement
 
 #### Scenario: Windows PowerShell 5.1 all-canonical present-empty is unverified
@@ -72,7 +72,7 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 
 #### Scenario: Projection bytes and line endings are stable across shells
 
-- **WHEN** Bash/zsh, Windows pwsh (PowerShell 7+), or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
+- **WHEN** Bash/zsh, native-Windows pwsh (the runtime exercised by PR CI; exact PowerShell/.NET version is not logged, so no version-wide PowerShell 7+ claim), or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
 - **THEN** the output bytes equal the fixed LF header followed by the source bytes unchanged
 
 #### Scenario: Canonical profiles discover only valid canonical skills
