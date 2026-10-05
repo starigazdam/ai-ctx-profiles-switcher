@@ -126,6 +126,28 @@ export AI_CTX_PROFILES_CONFIG_ROOT="/path/to/ai-config"       # bash/zsh
 $env:AI_CTX_PROFILES_CONFIG_ROOT = "C:\path\to\ai-config"      # PowerShell
 ```
 
+### Opt in to an external canonical profiles root
+
+Canonical profiles normally must physically resolve beneath
+`$AI_CTX_PROFILES_CONFIG_ROOT/profiles`. To trust canonical profiles from one
+additional location, set `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` to the
+**absolute path of the directory containing those profile directories**:
+
+```sh
+export AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT="$HOME/src/ai-task-scaffold/profiles"
+```
+```powershell
+$env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = "C:\path\to\ai-task-scaffold\profiles"
+```
+
+The root must exist and cannot be a filesystem root. `ctx` physically resolves
+both configured roots and profile targets; named profile links and canonical
+`.ctx` targets are accepted only when their targets remain beneath either
+trusted root. Traversal and links outside both roots still fail before context
+state changes. Leaving this variable unset preserves the default root-only
+behavior. A direct `.ctx` path does not bypass this check for canonical
+profiles.
+
 ## Usage
 
 ```sh
@@ -219,6 +241,10 @@ security:./local-instructions
   under `AI_CTX_PROFILES_CONFIG_ROOT/profiles` — the path on each line is used
   directly, so you can point at any folder (including project-local
   instructions that live outside your `ai-config` repo).
+- Canonical `AGENTS.md` profiles are still physically constrained to the
+  configured profiles roots; use the opt-in external root above when that
+  canonical directory lives elsewhere. Legacy direct-path entries are
+  unaffected.
 - Every path is validated to exist; an invalid `.ctx` file leaves the
   previously active context untouched and prints a clear error.
 - An optional `home:<path>` line is a reserved directive, not a
@@ -312,6 +338,15 @@ A resolved profile directory that has a root-level `AGENTS.md` is a
 **canonical** profile; one without it keeps the legacy behavior described
 above. Canonical and legacy profiles can be mixed in one ordered Mode A
 activation. Canonical profiles are a Mode A (`synthetic-home`) feature only.
+
+By default, canonical profiles must physically resolve beneath
+`$AI_CTX_PROFILES_CONFIG_ROOT/profiles`. Set
+`AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` to an existing absolute directory to
+explicitly trust one additional set of profile directories. `ctx` still
+resolves symlinks physically and rejects traversal or any target outside the
+configured and explicitly trusted roots; an absolute `.ctx` path alone does
+not widen the boundary. Manual profile names are immediate children of one of
+the trusted roots.
 
 #### Instruction projection
 

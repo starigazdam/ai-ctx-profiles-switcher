@@ -97,6 +97,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
         Remove-Item Env:\CTX_AUTO_LOAD -ErrorAction SilentlyContinue
         Remove-Item Env:\AI_CTX_PROFILES_COPILOT_MODE -ErrorAction SilentlyContinue
+        Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
         $Script:CtxAutoLoadDir = $null
         $Script:CtxAutoLoadHomeOverride = $null
         $Script:CtxSkillsDirsOwned = $false
@@ -1132,6 +1133,8 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
     It 'Issue 4: manual and @profile traversal cannot escape profiles before state changes' {
         New-CtxTestProfile -Name 'review' | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'escaped') -Force | Out-Null
+        $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = Join-Path $Script:TestTmp 'trusted-external-profiles'
+        New-Item -ItemType Directory -Path $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -Force | Out-Null
         $env:AI_CTX_PROFILES = 'previous'; $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
 
         $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
@@ -3630,6 +3633,85 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
         (Get-CtxPhysicalPath -Path $linkA) | Should -BeNullOrEmpty
         Test-CtxCanonicalProfileWithinRoot -ProfileDir $linkA | Should -BeFalse
+    }
+
+    It 'opt-in external profile root accepts canonical aliases and direct paths' {
+        $teamDir = New-CtxTestProfile -Name 'team' -Skill $null
+        $externalRoot = Join-Path $Script:TestTmp 'external-profiles'
+        $externalProfile = Join-Path $externalRoot 'task-scaffold'
+        New-Item -ItemType Directory -Path $externalProfile -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $externalProfile 'AGENTS.md'), "# task scaffold instructions`n")
+        $profileLink = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/task-scaffold'
+        New-Item -ItemType SymbolicLink -Path $profileLink -Target $externalProfile | Out-Null
+        $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = $externalRoot
+
+        $proj = Join-Path $Script:TestTmp 'project-external-profile'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "team:@profile`ntask-scaffold:@profile"
+        Import-CtxFile -CtxFile $ctxFile | Should -BeTrue
+        $env:AI_CTX_PROFILES | Should -Be 'team+task-scaffold'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $teamDir
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0002-task-scaffold.instructions.md') | Should -BeTrue
+
+        Set-Location $proj
+        Test-CtxActivation | Should -BeTrue
+
+        $directProj = Join-Path $Script:TestTmp 'project-external-direct-path'
+        New-Item -ItemType Directory -Path $directProj -Force | Out-Null
+        $directCtx = Join-Path $directProj '.ctx'
+        Set-Content -LiteralPath $directCtx -Value "team:$teamDir`ntask-scaffold:$externalProfile"
+        Import-CtxFile -CtxFile $directCtx | Should -BeTrue
+        $env:AI_CTX_PROFILES | Should -Be 'team+task-scaffold'
+        Test-CtxCanonicalProfileWithinRoot -ProfileDir $externalProfile | Should -BeTrue
+    }
+
+    It 'external profile allowlist rejects untrusted links and invalid roots without mutation' {
+        $null = New-CtxTestProfile -Name 'team' -Skill $null
+        $null = New-CtxTestProfile -Name 'review' -Skill $null
+        $trustedRoot = Join-Path $Script:TestTmp 'trusted-profiles'
+        $untrustedProfile = Join-Path $Script:TestTmp 'untrusted/task-scaffold'
+        New-Item -ItemType Directory -Path $trustedRoot, $untrustedProfile -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $untrustedProfile 'AGENTS.md'), "# untrusted`n")
+        $profileLink = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/evil'
+        New-Item -ItemType SymbolicLink -Path $profileLink -Target $untrustedProfile | Out-Null
+        $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = $trustedRoot
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx team evil } finally { $ErrorActionPreference = $previous }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'invalid profile identifier'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+
+        $proj = Join-Path $Script:TestTmp 'project-untrusted-direct-canonical'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $directCtx = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $directCtx -Value "evil:$untrustedProfile"
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile $directCtx } finally { $ErrorActionPreference = $previous }
+        $result | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'outside the configured profiles root'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+
+        $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = Join-Path $Script:TestTmp 'missing-profiles-root'
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx review } finally { $ErrorActionPreference = $previous }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'external profiles root'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+
+        $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = 'relative/profiles'
+        $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { ctx review } finally { $ErrorActionPreference = $previous }
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'must be an absolute path'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
     }
 
 }

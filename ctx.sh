@@ -123,6 +123,19 @@ _ctx_root() {
     printf '%s\n' "${AI_CTX_PROFILES_CONFIG_ROOT:-$HOME/work/ai-config}"
 }
 
+_ctx_external_profiles_root() {
+    local root="${AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT:-}" canonical
+    [ -n "$root" ] || return 0
+    case "$root" in
+        /*) ;;
+        *) printf 'ctx: error: AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT must be an absolute path: %s\n' "$root" >&2; return 1 ;;
+    esac
+    [ -d "$root" ] || { printf 'ctx: error: external profiles root is not a directory: %s\n' "$root" >&2; return 1; }
+    canonical="$(realpath -m -- "$root" 2>/dev/null)" || { printf 'ctx: error: cannot resolve external profiles root: %s\n' "$root" >&2; return 1; }
+    [ "$canonical" != "/" ] || { printf 'ctx: error: external profiles root cannot be the filesystem root\n' >&2; return 1; }
+    printf '%s\n' "$canonical"
+}
+
 # Lowercase a context name without shell-specific case conversion syntax.
 # `${name,,}` is not supported by zsh, despite ctx.sh supporting both shells.
 _ctx_lowercase() {
@@ -198,6 +211,8 @@ Examples:
 Environment:
   AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles/
                        (default: $HOME/work/ai-config)
+  AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT
+                       Optional absolute path to a trusted external profiles directory
   CTX_AUTO_LOAD        Set to 0 to disable automatic .ctx loading on cd
 EOF
 }
@@ -479,30 +494,35 @@ _ctx_clear() {
 }
 
 _ctx_resolve_profile_identifier() {
-    # Resolve a profile identifier only if its canonical target is an immediate
-    # descendant of the canonical profiles root. This rejects traversal and
-    # profile-root symlinks that escape the configured profiles directory.
-    local name="$1" profiles_root root_canonical candidate canonical
+    # Resolve a name under the configured root, or its explicit external
+    # allowlist. Its physical target must be an immediate child of a trusted
+    # root; traversal and untrusted profile symlinks remain rejected.
+    local name="$1" profiles_root external_root root_canonical candidate candidate_root canonical parent
     case "$name" in
         ''|.|..|*/*|*\\*)
             printf 'ctx: error: invalid profile identifier "%s"\n' "$name" >&2
             return 1 ;;
     esac
     profiles_root="$(_ctx_root)/profiles"
+    external_root="$(_ctx_external_profiles_root)" || return 1
     root_canonical="$(realpath -m -- "$profiles_root" 2>/dev/null)" || return 1
-    candidate="$profiles_root/$name"
-    if [ ! -d "$candidate" ]; then
-        printf 'ctx: error: unknown profile "%s" (looked in %s)\n' "$name" "$profiles_root" >&2
-        printf 'ctx: available profiles:\n' >&2
-        [ -d "$profiles_root" ] && find "$profiles_root" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sed 's/^/  - /' >&2
-        return 1
-    fi
-    canonical="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
-    if [ "$(dirname "$canonical")" != "$root_canonical" ]; then
+    for candidate_root in "$profiles_root" "$external_root"; do
+        [ -n "$candidate_root" ] || continue
+        candidate="$candidate_root/$name"
+        [ -d "$candidate" ] || continue
+        canonical="$(realpath -m -- "$candidate" 2>/dev/null)" || return 1
+        parent="$(dirname "$canonical")"
+        if [ "$parent" = "$root_canonical" ] || { [ -n "$external_root" ] && [ "$parent" = "$external_root" ]; }; then
+            printf '%s\n' "$canonical"
+            return 0
+        fi
         printf 'ctx: error: invalid profile identifier "%s"\n' "$name" >&2
         return 1
-    fi
-    printf '%s\n' "$canonical"
+    done
+    printf 'ctx: error: unknown profile "%s" (looked in %s%s)\n' "$name" "$profiles_root" "${external_root:+ and $external_root}" >&2
+    printf 'ctx: available profiles:\n' >&2
+    { [ -d "$profiles_root" ] && find "$profiles_root" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null; [ -n "$external_root" ] && find "$external_root" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null; } | LC_ALL=C sort -u | sed 's/^/  - /' >&2
+    return 1
 }
 
 ctx() {
@@ -879,19 +899,21 @@ _ctx_profile_is_canonical() {
 }
 
 _ctx_canonical_profile_within_root() {
-    # A canonical profile must physically resolve to a strict descendant of
-    # the configured profiles root. Symlinks are followed in both paths so an
-    # in-root link whose target escapes the root is rejected; the separator-
-    # safe case pattern rejects textual-prefix sibling paths. Non-canonical
-    # (legacy) direct paths are never validated here (issue #48).
-    local profile_dir="$1" profiles_root root_canonical profile_canonical
+    # A canonical profile must physically resolve beneath the configured or
+    # explicitly trusted external profiles root. Symlinks are followed in
+    # both paths; intermediate symlink/.. components are resolved by realpath.
+    local profile_dir="$1" profiles_root external_root root root_canonical profile_canonical
     profiles_root="$(_ctx_root)/profiles"
-    root_canonical="$(realpath -m -- "$profiles_root" 2>/dev/null)" || return 1
+    external_root="$(_ctx_external_profiles_root)" || return 1
     profile_canonical="$(realpath -m -- "$profile_dir" 2>/dev/null)" || return 1
-    case "$profile_canonical" in
-        "$root_canonical"/*) return 0 ;;
-        *) return 1 ;;
-    esac
+    for root in "$profiles_root" "$external_root"; do
+        [ -n "$root" ] || continue
+        root_canonical="$(realpath -m -- "$root" 2>/dev/null)" || return 1
+        case "$profile_canonical" in
+            "$root_canonical"/*) return 0 ;;
+        esac
+    done
+    return 1
 }
 
 _ctx_in_list() {
@@ -1667,6 +1689,7 @@ _ctx_parse_ctx_file() {
     local ai_context="" first_name="" home_override="" noautoload=0
     local -a dirs=() names=() pairs=()
     local -A seen_labels=() seen_targets=()
+    _ctx_external_profiles_root >/dev/null || return 1
     dir_of_file="$(dirname "$ctx_file")"
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"; [ -z "$line" ] && continue
@@ -1695,7 +1718,7 @@ _ctx_parse_ctx_file() {
         fi
         if [ ! -d "$resolved_path" ]; then printf 'ctx: error: .ctx entry "%s" in %s points to missing directory: %s\n' "$name" "$ctx_file" "$resolved_path" >&2; return 1; fi
         if _ctx_profile_is_canonical "$resolved_path" && ! _ctx_canonical_profile_within_root "$resolved_path"; then
-            printf 'ctx: error: canonical profile "%s" resolves outside the configured profiles root: %s\n' "$name" "$resolved_path" >&2
+            printf 'ctx: error: canonical profile "%s" resolves outside the configured profiles root or trusted external profiles root: %s\n' "$name" "$resolved_path" >&2
             return 1
         fi
         canonical_path="$(realpath -m -- "$resolved_path" 2>/dev/null)" || return 1
@@ -2457,10 +2480,17 @@ _ctx_list_subdirs() {
     find "$base" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null
 }
 
+_ctx_list_profiles() {
+    local external_root="${AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT:-}"
+    {
+        _ctx_list_subdirs "$(_ctx_root)/profiles"
+        [ -n "$external_root" ] && _ctx_list_subdirs "$external_root"
+    } | LC_ALL=C sort -u
+}
+
 if [ -n "${ZSH_VERSION:-}" ]; then
     # zsh completion
     _ctx_zsh_complete() {
-        local root="$(_ctx_root)"
         local -a words_arr
         words_arr=("${words[@]}")
         if [ "${#words_arr[@]}" -eq 3 ] && [ "${words_arr[2]}" = "clear" ]; then
@@ -2469,11 +2499,11 @@ if [ -n "${ZSH_VERSION:-}" ]; then
             _files
         elif [ "${#words_arr[@]}" -le 2 ]; then
             local -a profiles
-            profiles=("${(f)$(_ctx_list_subdirs "$root/profiles")}")
+            profiles=("${(f)$(_ctx_list_profiles)}")
             compadd current clear skills load -- "${profiles[@]}"
         else
             local -a shared
-            shared=("${(f)$(_ctx_list_subdirs "$root/profiles")}")
+            shared=("${(f)$(_ctx_list_profiles)}")
             compadd -- "${shared[@]}"
         fi
     }
@@ -2489,18 +2519,17 @@ if [ -n "${ZSH_VERSION:-}" ]; then
 elif [ -n "${BASH_VERSION:-}" ]; then
     # bash completion
     _ctx_bash_complete() {
-        local root cur
-        root="$(_ctx_root)"
+        local cur
         cur="${COMP_WORDS[COMP_CWORD]}"
 
         if [ "$COMP_CWORD" -eq 1 ]; then
-            mapfile -t COMPREPLY < <(compgen -W "current clear skills load $(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
+            mapfile -t COMPREPLY < <(compgen -W "current clear skills load $(_ctx_list_profiles | tr '\n' ' ')" -- "$cur")
         elif [ "$COMP_CWORD" -eq 2 ] && [ "${COMP_WORDS[1]}" = "clear" ]; then
             mapfile -t COMPREPLY < <(compgen -W "--all" -- "$cur")
         elif [ "$COMP_CWORD" -ge 2 ] && [ "${COMP_WORDS[1]}" = "load" ]; then
             mapfile -t COMPREPLY < <(compgen -f -- "$cur")
         else
-            mapfile -t COMPREPLY < <(compgen -W "$(_ctx_list_subdirs "$root/profiles" | tr '\n' ' ')" -- "$cur")
+            mapfile -t COMPREPLY < <(compgen -W "$(_ctx_list_profiles | tr '\n' ' ')" -- "$cur")
         fi
     }
     complete -F _ctx_bash_complete ctx
