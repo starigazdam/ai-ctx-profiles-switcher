@@ -412,9 +412,10 @@ again rather than suppressing it.
 | Runtime | All-canonical Mode A | Mixed / legacy Mode A |
 |---------|----------------------|------------------------|
 | Bash / zsh | present-empty `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | supported |
-| PowerShell on Windows (Windows PowerShell 5.1 or pwsh) | present-empty | supported |
+| Native-Windows pwsh (the runtime exercised by the repository's Windows Pester CI job; exact PowerShell/.NET version is not logged, so no version-wide PowerShell 7+ claim) | present-empty | supported |
 | Unix pwsh on .NET 9+ | present-empty | supported |
 | Unix pwsh on .NET 8 or earlier | **rejected before mutation** with a pwsh/.NET 9+ requirement | supported |
+| Windows PowerShell 5.1 | **unverified** (tracked by [#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63)) | **not exercised** |
 
 Before .NET 9, Unix PowerShell cannot represent a present-empty environment
 variable (assigning an empty value removes it), so an all-canonical Mode A
@@ -425,6 +426,18 @@ keeps the present-empty contract on every runtime and does not accept
 absent-as-empty. Mixed canonical+legacy and legacy-only selections are
 unaffected because their `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` value is
 non-empty.
+
+All-canonical present-empty success is covered by tests that assert that branch
+when run under Bash/zsh, native-Windows `pwsh` (the runtime exercised by the
+repository's Windows Pester CI job; exact PowerShell/.NET version is not logged,
+so no version-wide PowerShell 7+ claim is made), and Unix pwsh on .NET 9+. The
+Unix .NET 9+ present-empty test path is gated by the runtime check, and the
+hosted Unix pwsh/.NET version is not logged, so the hosted run does not
+establish that branch and no specific host version is claimed. Windows
+PowerShell 5.1 all-canonical present-empty behavior remains unverified and is
+tracked by
+[#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63); the
+repository's CI exercises `pwsh`, not Windows PowerShell 5.1.
 
 ### Integration modes
 

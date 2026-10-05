@@ -4,7 +4,7 @@
 
 ### Requirement: Manual profile activation
 
-The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`) and setting `AI_CTX_PROFILES` to the profile names joined with `+`. In Mode A, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` SHALL contain the resolved directories of selected profiles without a root-level `AGENTS.md`, in invocation order and comma-joined; canonical profile directories SHALL be omitted, and if every selected profile is canonical the variable SHALL be set to the empty string, subject to the runtime guard in `Unix pwsh all-canonical Mode A guard`. Under Modes B and C, canonical selections SHALL be rejected before state changes as specified by `copilot-integration-modes`; successful B/C selections contain only legacy profiles and SHALL list every resolved directory. Each identifier's physical target SHALL be an immediate child of one of the physically resolved trusted roots, and resolution SHALL reject identifiers that escape all trusted roots, such as `.`, `..`, or paths containing separators. When `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is set, it SHALL be an absolute, existing directory other than a filesystem root and adds a second trusted root that is searched only when no matching candidate exists in the primary root; on Unix it SHALL use `/` path separators and SHALL be rejected if it contains a backslash before any path or physical resolution.
+The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`). When `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is set, it SHALL be an absolute, existing directory other than a filesystem root; it adds a second trusted root and is searched only when no matching candidate exists in the primary root; on Unix it SHALL use `/` path separators and SHALL be rejected if it contains a backslash before any path or physical resolution. Each identifier's physical target SHALL be an immediate child of one of the physically resolved trusted roots. The system SHALL set `AI_CTX_PROFILES` to the profile names joined with `+`. In Mode A, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` SHALL contain the resolved directories of selected profiles without a root-level `AGENTS.md`, in invocation order and comma-joined; canonical profile directories SHALL be omitted, and if every selected profile is canonical the variable SHALL be set to the empty string, subject to the runtime guard in `Unix pwsh all-canonical Mode A guard`. Under Modes B and C, canonical selections SHALL be rejected before state changes as specified by `copilot-integration-modes`; successful B/C selections contain only legacy profiles and SHALL list every resolved directory. Resolution SHALL reject identifiers that escape all trusted roots, such as `.`, `..`, or paths containing separators.
 
 #### Scenario: Activate a single profile
 
@@ -58,8 +58,13 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 
 #### Scenario: All-canonical Mode A selection sets custom directories empty
 
-- **WHEN** a user activates only canonical profiles under Mode A on a supported runtime (Bash/zsh, PowerShell on Windows (Windows PowerShell 5.1 or pwsh), or Unix pwsh running .NET 9+)
+- **WHEN** a user activates only canonical profiles under Mode A on a supported runtime (Bash/zsh, native-Windows pwsh (the runtime exercised by PR CI; exact PowerShell/.NET version is not logged, so no version-wide PowerShell 7+ claim), or Unix pwsh running .NET 9+)
 - **THEN** `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is set to the empty string; on Unix pwsh running .NET 8 and earlier the selection instead fails as specified by the `Unix pwsh all-canonical Mode A guard` requirement
+
+#### Scenario: Windows PowerShell 5.1 all-canonical present-empty is unverified
+
+- **WHEN** an all-canonical Mode A selection would run under Windows PowerShell 5.1
+- **THEN** present-empty success is not claimed; the behavior remains unverified and is tracked by issue #63
 
 ## ADDED Requirements
 
@@ -87,7 +92,7 @@ A `.ctx-managed` manifest SHALL contain one projection basename per line. Each b
 
 #### Scenario: Projection bytes and line endings are stable across shells
 
-- **WHEN** Bash/zsh, PowerShell on Windows, or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
+- **WHEN** Bash/zsh, native-Windows pwsh (the runtime exercised by PR CI; exact PowerShell/.NET version is not logged, so no version-wide PowerShell 7+ claim), or Unix pwsh projects an `AGENTS.md` containing CRLF, no trailing newline, a BOM, or a leading YAML-like header
 - **THEN** the output bytes equal the fixed LF header followed by the source bytes unchanged
 
 #### Scenario: Canonical profiles discover only valid canonical skills

@@ -3691,3 +3691,295 @@ _make_canonical_skill() {
     [[ "$(<"$TEST_TMP/external-relative-root.out")" == *"must be an absolute path"* ]]
     [ "$AI_CTX_PROFILES" = previous ]
 }
+
+@test "Issue48: zsh projects mixed canonical/legacy instructions and applies collision skip (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+    _make_profile review dup-skill
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills/keep-skill"
+    printf -- '---\nname: keep-skill\ndescription: test\n---\n' \
+        > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills/keep-skill/SKILL.md"
+    _make_canonical_profile canon $'# canon\n'
+    _make_canonical_skill canon Dup-Skill
+    local log="$TEST_TMP/zsh-mixed-collision.err"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    # Run entirely under zsh -f (no user startup files) to exercise the mixed
+    # ordered projection and case-insensitive collision skip under zsh's
+    # default array indexing. Values are bracketed so the outer assertions
+    # compare them exactly rather than as path prefixes.
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        if ctx review canon 2>"$3"; then
+            printf "ctx_status=0\n"
+        else
+            printf "ctx_status=%s\n" "$?"
+        fi
+        printf "profiles=[%s]\n" "$AI_CTX_PROFILES"
+        printf "customdirs=[%s]\n" "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+        printf "proj2=[%s]\n" "$([[ -f "$COPILOT_HOME/instructions/ctx-profiles/0002-canon.instructions.md" ]] && echo present || echo absent)"
+        printf "proj1=[%s]\n" "$([[ -e "$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md" ]] && echo present || echo absent)"
+        printf "keep_skill=[%s]\n" "$([[ -L "$COPILOT_HOME/skills/keep-skill" ]] && echo linked || echo absent)"
+        printf "legacy_skill=[%s]\n" "$([[ -e "$COPILOT_HOME/skills/dup-skill" ]] && echo present || echo absent)"
+        printf "canon_skill=[%s]\n" "$([[ -e "$COPILOT_HOME/skills/Dup-Skill" ]] && echo present || echo absent)"
+        printf "manifest=[%s]\n" "$(cat "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed")"
+    ' -- "$CTX_SRC" "$AI_CTX_PROFILES_CONFIG_ROOT" "$log"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx_status=0"* ]]
+    [[ "$output" == *"profiles=[review+canon]"* ]]
+    printf '%s\n' "$output" | grep -qxF "customdirs=[$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review]"
+    printf '%s\n' "$output" | grep -qxF "manifest=[0002-canon.instructions.md]"
+    [[ "$output" == *"proj2=[present]"* ]]
+    [[ "$output" == *"proj1=[absent]"* ]]
+    [[ "$output" == *"keep_skill=[linked]"* ]]
+    [[ "$output" == *"legacy_skill=[absent]"* ]]
+    [[ "$output" == *"canon_skill=[absent]"* ]]
+    [[ "$(<"$log")" == *"collision"* ]]
+}
+
+@test "Issue48: zsh Mode B/C canonical preflight rejection leaves state untouched (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+    _make_profile base base-skill
+    _make_canonical_profile review $'# review\n'
+    local logdir="$TEST_TMP/zsh-reject"
+    local privtmp="$TEST_TMP/zsh-priv-tmp"
+    local projdir="$TEST_TMP/zsh-proj"
+    mkdir -p "$logdir" "$privtmp" "$projdir"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    # Establish a valid prior Mode A activation, then prove both B and C reject
+    # the canonical selection before any mutation: the prior environment and
+    # the session-local activation record must survive, TMPDIR must stay empty
+    # (Mode C created no temp home), and each error must name the profile and
+    # require synthetic-home.
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        cd "$5"
+        export TMPDIR="$4"
+        if ! ctx base >/dev/null 2>&1; then
+            printf "prior_activation=failed\n"
+            exit 1
+        fi
+        printf "prior_context=[%s]\n" "$_ctx_active_context"
+        printf "prior_mode=[%s]\n" "$_ctx_active_mode"
+        prior_home="$_ctx_active_home_value"
+        prior_custom="$_ctx_active_custom_dirs"
+        prior_env_home="$COPILOT_HOME"
+        prior_env_custom_state="$([ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS+set}" = set ] && printf 'set:%s' "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" || printf 'unset')"
+        prior_env_skills_state="$([ "${COPILOT_SKILLS_DIRS+set}" = set ] && printf 'set:%s' "$COPILOT_SKILLS_DIRS" || printf 'unset')"
+        for mode in global-user ephemeral-clean; do
+            export AI_CTX_PROFILES_COPILOT_MODE="$mode"
+            if ctx review 2>"${3}/${mode}.err"; then
+                printf "%s_status=unexpected-success\n" "$mode"
+            else
+                printf "%s_status=rejected\n" "$mode"
+            fi
+            printf "%s_record_context=[%s]\n" "$mode" "$_ctx_active_context"
+            printf "%s_record_mode=[%s]\n" "$mode" "$_ctx_active_mode"
+            printf "%s_record_survived=%s\n" "$mode" "$([ "$_ctx_active_context" = base ] && [ "$_ctx_active_mode" = synthetic-home ] && [ "$_ctx_active_home_value" = "$prior_home" ] && [ "$_ctx_active_custom_dirs" = "$prior_custom" ] && printf yes || printf no)"
+            printf "%s_env_context=[%s]\n" "$mode" "$AI_CTX_PROFILES"
+            printf "%s_env_home_unchanged=%s\n" "$mode" "$([ "$COPILOT_HOME" = "$prior_env_home" ] && printf yes || printf no)"
+            curr_env_custom_state="$([ "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS+set}" = set ] && printf 'set:%s' "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" || printf 'unset')"
+            curr_env_skills_state="$([ "${COPILOT_SKILLS_DIRS+set}" = set ] && printf 'set:%s' "$COPILOT_SKILLS_DIRS" || printf 'unset')"
+            printf "%s_env_custom=[%s]\n" "$mode" "${curr_env_custom_state#set:}"
+            printf "%s_env_custom_unchanged=%s\n" "$mode" "$([ "$curr_env_custom_state" = "$prior_env_custom_state" ] && printf yes || printf no)"
+            printf "%s_env_skills=[%s]\n" "$mode" "${curr_env_skills_state#set:}"
+            printf "%s_env_skills_unchanged=%s\n" "$mode" "$([ "$curr_env_skills_state" = "$prior_env_skills_state" ] && printf yes || printf no)"
+            printf "%s_names_profile=%s\n" "$mode" "$(grep -c "review" "${3}/${mode}.err")"
+            printf "%s_names_synthetic=%s\n" "$mode" "$(grep -c "synthetic-home" "${3}/${mode}.err")"
+        done
+        printf "tmpdir_empty=%s\n" "$([ -z "$(ls -A "$4")" ] && printf yes || printf no)"
+    ' -- "$CTX_SRC" "$AI_CTX_PROFILES_CONFIG_ROOT" "$logdir" "$privtmp" "$projdir"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"prior_activation=failed"* ]]
+    [[ "$output" == *"prior_context=[base]"* ]]
+    [[ "$output" == *"prior_mode=[synthetic-home]"* ]]
+    [[ "$output" == *"global-user_status=rejected"* ]]
+    [[ "$output" == *"ephemeral-clean_status=rejected"* ]]
+    [[ "$output" == *"global-user_record_survived=yes"* ]]
+    [[ "$output" == *"ephemeral-clean_record_survived=yes"* ]]
+    [[ "$output" == *"global-user_env_context=[base]"* ]]
+    [[ "$output" == *"ephemeral-clean_env_context=[base]"* ]]
+    [[ "$output" == *"global-user_env_home_unchanged=yes"* ]]
+    [[ "$output" == *"ephemeral-clean_env_home_unchanged=yes"* ]]
+    [[ "$output" == *"global-user_env_custom=[$AI_CTX_PROFILES_CONFIG_ROOT/profiles/base]"* ]]
+    [[ "$output" == *"global-user_env_custom_unchanged=yes"* ]]
+    [[ "$output" == *"global-user_env_skills=[unset]"* ]]
+    [[ "$output" == *"global-user_env_skills_unchanged=yes"* ]]
+    [[ "$output" == *"ephemeral-clean_env_custom=[$AI_CTX_PROFILES_CONFIG_ROOT/profiles/base]"* ]]
+    [[ "$output" == *"ephemeral-clean_env_custom_unchanged=yes"* ]]
+    [[ "$output" == *"ephemeral-clean_env_skills=[unset]"* ]]
+    [[ "$output" == *"ephemeral-clean_env_skills_unchanged=yes"* ]]
+    [[ "$output" == *"global-user_names_profile=1"* ]]
+    [[ "$output" == *"global-user_names_synthetic=1"* ]]
+    [[ "$output" == *"ephemeral-clean_names_profile=1"* ]]
+    [[ "$output" == *"ephemeral-clean_names_synthetic=1"* ]]
+    [[ "$output" == *"tmpdir_empty=yes"* ]]
+    [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review" ]
+}
+
+# --- Issue #48 evidence-map gap coverage -----------------------------------
+
+_setup_check_home() {
+    # $1: canonical profile label. Creates a project .ctx, activates it, and
+    # leaves the shell cwd at the project with a matching Mode A record.
+    local label="$1"
+    _make_canonical_profile "$label" $'# '"$label"$'\n'
+    local proj="$TEST_TMP/project-check-$label"
+    mkdir -p "$proj"
+    printf '%s:@profile\n' "$label" > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+}
+
+@test "Issue48: source YAML-like frontmatter is copied as body bytes after the fixed header" {
+    _make_canonical_profile review $'---\nname: review\n---\n# body\n'
+    local source="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    local before
+    before="$(cksum "$source")"
+
+    ctx review >/dev/null
+    local proj="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+    { printf -- '---\napplyTo: "**"\n---\n\n'; printf -- '---\nname: review\n---\n# body\n'; } > "$TEST_TMP/expected-frontmatter"
+    cmp -s "$proj" "$TEST_TMP/expected-frontmatter"
+    [ "$(cksum "$source")" = "$before" ]
+}
+
+@test "Issue48: a linked ctx-managed manifest fails activation without touching the sentinel" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    local outside="$TEST_TMP/outside-manifest"
+    printf '0001-review.instructions.md\n' > "$outside"
+    local before
+    before="$(cksum "$outside")"
+    mkdir -p "$home/instructions/ctx-profiles"
+    ln -s "$outside" "$home/instructions/ctx-profiles/.ctx-managed"
+    export AI_CTX_PROFILES=previous
+
+    local status=0
+    ctx review >"$TEST_TMP/linked-manifest.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/linked-manifest.out")" == *"malformed projection manifest"* ]]
+    [ "$(cksum "$outside")" = "$before" ]
+    [ -L "$home/instructions/ctx-profiles/.ctx-managed" ]
+    [ ! -e "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ "$AI_CTX_PROFILES" = previous ]
+}
+
+@test "Issue48: ctx check fails on altered canonical instruction bytes without changing them" {
+    _setup_check_home review
+    local target="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+    printf 'tampered bytes\n' > "$target"
+    local before
+    before="$(cksum "$target")"
+
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:0001-review.instructions.md"* ]]
+    [ "$(cksum "$target")" = "$before" ]
+}
+
+@test "Issue48: ctx check fails on an unmanifested desired projection without changing the manifest" {
+    _setup_check_home review
+    local manifest="$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed"
+    local projection="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+    : > "$manifest"
+    local before_manifest before_projection
+    before_manifest="$(cksum "$manifest")"
+    before_projection="$(cksum "$projection")"
+
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:0001-review.instructions.md"* ]]
+    [ "$(cksum "$manifest")" = "$before_manifest" ]
+    [ "$(cksum "$projection")" = "$before_projection" ]
+}
+
+@test "Issue48: ctx check fails read-only on an unsafe instructions directory with canonical entries" {
+    _setup_check_home review
+    local home="$COPILOT_HOME"
+    local outside="$TEST_TMP/outside-check-parent"
+    mkdir -p "$outside"
+    rm -rf "$home/instructions"
+    ln -s "$outside" "$home/instructions"
+
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:0001-review.instructions.md"* ]]
+    [ ! -e "$outside/ctx-profiles" ]
+    [ -z "$(ls -A "$outside")" ]
+    [ -L "$home/instructions" ]
+}
+
+@test "Issue48: ctx check fails read-only on a linked ctx-profiles directory with canonical entries" {
+    _setup_check_home review
+    local home="$COPILOT_HOME"
+    local outside="$TEST_TMP/outside-check-profiles"
+    mkdir -p "$outside"
+    rm -rf "$home/instructions/ctx-profiles"
+    ln -s "$outside" "$home/instructions/ctx-profiles"
+
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:0001-review.instructions.md"* ]]
+    [ -z "$(ls -A "$outside")" ]
+    [ -L "$home/instructions/ctx-profiles" ]
+}
+
+@test "Issue48: ctx check fails read-only on a missing ctx-managed manifest with canonical entries" {
+    _setup_check_home review
+    rm -f "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed"
+
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:manifest"* ]]
+    [ ! -e "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed" ]
+}
+
+@test "Issue48: ctx check fails read-only on a linked ctx-managed manifest without touching the sentinel" {
+    _setup_check_home review
+    local manifest="$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed"
+    local outside="$TEST_TMP/outside-check-manifest"
+    printf '0001-review.instructions.md\n' > "$outside"
+    local before
+    before="$(cksum "$outside")"
+    rm -f "$manifest"
+    ln -s "$outside" "$manifest"
+
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:manifest"* ]]
+    [ "$(cksum "$outside")" = "$before" ]
+    [ -L "$manifest" ]
+}
+
+@test "Issue48: ctx check fails read-only on a malformed ctx-managed manifest with canonical entries" {
+    _setup_check_home review
+    local manifest="$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed"
+    local projection="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+    printf 'bad name\n' > "$manifest"
+    local before_manifest before_projection
+    before_manifest="$(cksum "$manifest")"
+    before_projection="$(cksum "$projection")"
+
+    run ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:manifest"* ]]
+    [ "$(cksum "$manifest")" = "$before_manifest" ]
+    [ "$(cksum "$projection")" = "$before_projection" ]
+}
