@@ -409,6 +409,29 @@ EOF
     cmp -s "$workspace_file" "$TEST_TMP/workspace-link-fail.before"
 }
 
+@test "issue30: auto-load hook does not create a .code-workspace file" {
+    _make_profile "review" "review-skill"
+    local proj="$HOME/project-issue30-autoload"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    cd "$proj"
+    _ctx_auto_load_hook
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [ ! -e "$proj/project-issue30-autoload.code-workspace" ]
+}
+
+@test "issue30: explicit ctx load still creates a .code-workspace file" {
+    _make_profile "review" "review-skill"
+    local proj="$HOME/project-issue30-explicit"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    ctx load "$proj/.ctx"
+    [ "$AI_CTX_PROFILES" = "review" ]
+    [ -f "$proj/project-issue30-explicit.code-workspace" ]
+}
+
 @test "manual ctx activation leaves state untouched when COPILOT_HOME creation fails" {
     _make_profile "review" "review-skill"
     _make_profile "test" "test-skill"
@@ -493,6 +516,10 @@ EOF
     cd "$proj_a"
     _ctx_auto_load_hook
 
+    # Auto-load never writes a workspace file (issue #30); seed one the way
+    # an explicit `ctx load`/activation would, to test that the hook's
+    # later failure elsewhere still leaves a pre-existing workspace intact.
+    _ctx_update_workspace_file "$proj_a" review "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
     local workspace_a="$proj_a/project-hook-link-fail-a.code-workspace"
     [ -f "$workspace_a" ]
     cp "$workspace_a" "$TEST_TMP/workspace-hook-link-fail.before"

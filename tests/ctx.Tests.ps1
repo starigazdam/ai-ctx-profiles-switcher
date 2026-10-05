@@ -444,6 +444,10 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $env:AI_CTX_PROFILES | Should -Be 'review'
         $Script:CtxAutoLoadDir | Should -Be $projA
 
+        # Auto-load never writes a workspace file (issue #30); seed one the
+        # way an explicit Import-CtxFile/activation would, to test that the
+        # hook's later failure elsewhere still leaves a pre-existing one intact.
+        Update-CtxWorkspaceFile -BaseDir $projA -Names @('review') -Dirs @($reviewDir)
         $workspaceA = Join-Path $projA 'project-hook-fail-a.code-workspace'
         $wsBefore = [Convert]::ToBase64String([IO.File]::ReadAllBytes($workspaceA))
 
@@ -1195,6 +1199,33 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
         $env:AI_CTX_PROFILES | Should -BeNullOrEmpty
         $Script:CtxAutoLoadDir | Should -BeNullOrEmpty
+    }
+
+    It "issue30: Invoke-CtxAutoLoad does not create a .code-workspace file" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-issue30-autoload'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        Set-Location $proj
+        Invoke-CtxAutoLoad
+
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        Join-Path $proj 'project-issue30-autoload.code-workspace' | Should -Not -Exist
+    }
+
+    It "issue30: explicit Import-CtxFile still creates a .code-workspace file" {
+        New-CtxTestProfile -Name 'review' -Skill 'review-skill' | Out-Null
+        $proj = Join-Path $env:HOME 'project-issue30-explicit'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx')
+
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        Join-Path $proj 'project-issue30-explicit.code-workspace' | Should -Exist
     }
 
     It "noautoload flag: case-insensitive (NOAUTOLOAD is accepted)" {
