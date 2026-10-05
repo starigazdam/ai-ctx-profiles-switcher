@@ -2726,3 +2726,885 @@ EOF
     run ctx check
     [ "$status" -eq 0 ]
 }
+
+# --- Issue #48: canonical AGENTS.md profiles -------------------------------
+
+_make_canonical_profile() {
+    # _make_canonical_profile <name> [agents-content]
+    local name="$1" content="${2:-# $1 canonical instructions}"
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/$name"
+    printf '%s' "$content" > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/$name/AGENTS.md"
+}
+
+_make_canonical_skill() {
+    # _make_canonical_skill <profile> <skill-name>
+    local profile="$1" skill="$2"
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/$profile/.agents/skills/$skill"
+    printf -- '---\nname: %s\ndescription: test\n---\n' "$skill" \
+        > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/$profile/.agents/skills/$skill/SKILL.md"
+}
+
+@test "Issue48: canonical manual activation projects AGENTS.md bytes and sets custom dirs present-empty" {
+    _make_canonical_profile review $'# hello\n'
+    ctx review
+
+    local proj="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+    [ -f "$proj" ]
+    [ ! -L "$proj" ]
+    printf -- '---\napplyTo: "**"\n---\n\n# hello\n' > "$TEST_TMP/expected"
+    cmp -s "$proj" "$TEST_TMP/expected"
+    [ "$AI_CTX_PROFILES" = review ]
+    [ -n "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS+x}" ]
+    [ -z "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" ]
+    [ -f "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed" ]
+    [ "$(cat "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed")" = "0001-review.instructions.md" ]
+}
+
+@test "Issue48: canonical .ctx activation projects and ctx check passes" {
+    _make_canonical_profile review $'# hello\n'
+    local proj="$TEST_TMP/project-canonical-check"
+    mkdir -p "$proj"
+    printf 'review:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+
+    [ -f "$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ -n "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS+x}" ]
+    [ -z "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" ]
+
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS instruction:0001-review.instructions.md"* ]]
+}
+
+@test "Issue48: mixed selection keeps legacy dirs in order and projects canonical at selection order" {
+    _make_profile review review-skill
+    _make_canonical_profile arch $'# arch\n'
+    _make_profile security security-skill
+
+    ctx review arch security
+
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review,$AI_CTX_PROFILES_CONFIG_ROOT/profiles/security" ]
+    [ -f "$COPILOT_HOME/instructions/ctx-profiles/0002-arch.instructions.md" ]
+    [ ! -e "$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ ! -e "$COPILOT_HOME/instructions/ctx-profiles/0003-security.instructions.md" ]
+}
+
+@test "Issue48: projection filename sanitizes labels and stays filesystem-safe" {
+    _make_canonical_profile "my profile" $'# spaced\n'
+    ctx "my profile"
+
+    [ -f "$COPILOT_HOME/instructions/ctx-profiles/0001-my_profile.instructions.md" ]
+    local fname
+    fname="$(basename "$COPILOT_HOME/instructions/ctx-profiles/"*.instructions.md)"
+    case "$fname" in
+        0001-my_profile.instructions.md) : ;;
+        *) false ;;
+    esac
+}
+
+@test "Issue48: non-ASCII label yields a safe filename matching the grammar" {
+    _make_canonical_profile "café" $'# accented\n'
+    ctx "café"
+
+    local fname
+    fname="$(basename "$COPILOT_HOME/instructions/ctx-profiles/"*.instructions.md)"
+    [ "$fname" = "0001-caf_.instructions.md" ]
+    printf '%s' "$fname" | LC_ALL=C grep -Eq '^[0-9]{4,}-[A-Za-z0-9+._-]+\.instructions\.md$'
+}
+
+@test "Issue48: CRLF, BOM, and missing final newline are preserved byte-for-byte" {
+    _make_canonical_profile review $'# a\r\n# b'
+    ctx review
+    local proj="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+    { printf -- '---\napplyTo: "**"\n---\n\n'; printf '# a\r\n# b'; } > "$TEST_TMP/expected-crlf"
+    cmp -s "$proj" "$TEST_TMP/expected-crlf"
+
+    ctx clear >/dev/null
+    _make_canonical_profile bom $'\xef\xbb\xbf# bom\n'
+    ctx bom
+    local proj2="$COPILOT_HOME/instructions/ctx-profiles/0001-bom.instructions.md"
+    { printf -- '---\napplyTo: "**"\n---\n\n'; printf '\xef\xbb\xbf# bom\n'; } > "$TEST_TMP/expected-bom"
+    cmp -s "$proj2" "$TEST_TMP/expected-bom"
+}
+
+@test "Issue48: canonical profiles use .agents/skills and ignore co-located .github/skills" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review good-skill
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/no-skill"
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills/legacy-skill"
+    printf -- '---\nname: legacy\n---\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.github/skills/legacy-skill/SKILL.md"
+    local proj="$TEST_TMP/project-canonical-skills"
+    mkdir -p "$proj"
+    printf 'review:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+
+    [ -L "$COPILOT_HOME/skills/good-skill" ]
+    [ ! -e "$COPILOT_HOME/skills/no-skill" ]
+    [ ! -e "$COPILOT_HOME/skills/legacy-skill" ]
+
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS skill:good-skill"* ]]
+}
+
+@test "Issue48: canonical/legacy skill collisions reuse warn-and-skip and check FAIL" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review dup-skill
+    _make_profile security Dup-Skill
+    local proj="$TEST_TMP/project-canonical-collision"
+    mkdir -p "$proj"
+    printf 'review:@profile\nsecurity:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/collide.out" 2>&1
+    [[ "$(<"$TEST_TMP/collide.out")" == *"collision"* ]]
+    [ ! -e "$COPILOT_HOME/skills/dup-skill" ]
+    [ ! -e "$COPILOT_HOME/skills/Dup-Skill" ]
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL skill:dup-skill"* ]]
+    [[ "$output" == *"collision"* ]]
+}
+
+@test "Issue48: Mode B and C reject canonical selections before any mutation" {
+    _make_canonical_profile review $'# review\n'
+    for mode in global-user ephemeral-clean; do
+        export AI_CTX_PROFILES_COPILOT_MODE="$mode"
+        export AI_CTX_PROFILES=previous
+        export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+        export COPILOT_HOME=previous-home
+
+        local status=0
+        ctx review >"$TEST_TMP/mode-reject.out" 2>&1 || status=$?
+        [ "$status" -ne 0 ]
+        [[ "$(<"$TEST_TMP/mode-reject.out")" == *"canonical"* ]]
+        [[ "$(<"$TEST_TMP/mode-reject.out")" == *"synthetic-home"* ]]
+        [ "$AI_CTX_PROFILES" = previous ]
+        [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+        [ "$COPILOT_HOME" = previous-home ]
+        [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review" ]
+    done
+}
+
+@test "Issue48: .ctx auto-load rejects canonical entries under Mode B before mutation" {
+    _make_canonical_profile review $'# review\n'
+    local proj="$TEST_TMP/project-canon-mode-b"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/canon-load-b.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/canon-load-b.out")" == *"canonical"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ ! -e "$proj/project-canon-mode-b.code-workspace" ]
+}
+
+@test "Issue48: actual .ctx auto-load rejects canonical entries under Modes B and C, repeatedly" {
+    _make_canonical_profile review $'# review\n'
+    local proj="$TEST_TMP/project-canon-autoload-bc"
+    mkdir -p "$proj"
+    printf 'review:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    local mode
+    for mode in global-user ephemeral-clean; do
+        export AI_CTX_PROFILES_COPILOT_MODE="$mode"
+        export AI_CTX_PROFILES=previous
+        export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+        export COPILOT_HOME=previous-home
+        export COPILOT_SKILLS_DIRS=previous-skills
+        _ctx_auto_load_dir=""
+        _ctx_reset_active_record
+
+        local prev_mode="$_ctx_active_mode"
+        local prev_context="$_ctx_active_context"
+        local prev_custom_dirs="$_ctx_active_custom_dirs"
+        local prev_home_was_set="$_ctx_active_home_was_set"
+        local prev_home_value="$_ctx_active_home_value"
+
+        cd "$proj"
+
+        local status=0
+        _ctx_auto_load_hook >"$TEST_TMP/canon-autoload-$mode-1.out" 2>&1 || status=$?
+        [ "$status" -ne 0 ]
+        [[ "$(<"$TEST_TMP/canon-autoload-$mode-1.out")" == *"canonical"* ]]
+        [[ "$(<"$TEST_TMP/canon-autoload-$mode-1.out")" == *"synthetic-home"* ]]
+        [ "$AI_CTX_PROFILES" = previous ]
+        [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+        [ "$COPILOT_HOME" = previous-home ]
+        [ "$COPILOT_SKILLS_DIRS" = previous-skills ]
+        [ "$_ctx_active_mode" = "$prev_mode" ]
+        [ "$_ctx_active_context" = "$prev_context" ]
+        [ "$_ctx_active_custom_dirs" = "$prev_custom_dirs" ]
+        [ "$_ctx_active_home_was_set" = "$prev_home_was_set" ]
+        [ "$_ctx_active_home_value" = "$prev_home_value" ]
+        [ ! -e "$proj/project-canon-autoload-bc.code-workspace" ]
+
+        status=0
+        _ctx_auto_load_hook >"$TEST_TMP/canon-autoload-$mode-2.out" 2>&1 || status=$?
+        [ "$status" -ne 0 ]
+        [[ "$(<"$TEST_TMP/canon-autoload-$mode-2.out")" == *"canonical"* ]]
+        [ "$AI_CTX_PROFILES" = previous ]
+        [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+        [ "$COPILOT_HOME" = previous-home ]
+        [ "$COPILOT_SKILLS_DIRS" = previous-skills ]
+        [ "$_ctx_active_mode" = "$prev_mode" ]
+        [ ! -e "$proj/project-canon-autoload-bc.code-workspace" ]
+    done
+}
+
+@test "Issue48: unmanifested desired projection is not overwritten" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    mkdir -p "$home/instructions/ctx-profiles"
+    printf 'user data\n' > "$home/instructions/ctx-profiles/0001-review.instructions.md"
+    export AI_CTX_PROFILES=previous
+
+    local status=0
+    ctx review >"$TEST_TMP/unmanaged.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/unmanaged.out")" == *"unmanaged projection"* ]]
+    [ "$(cat "$home/instructions/ctx-profiles/0001-review.instructions.md")" = "user data" ]
+    [ "$AI_CTX_PROFILES" = previous ]
+}
+
+@test "Issue48: manifest-listed desired projection as symlink to outside sentinel fails closed" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    local outside="$TEST_TMP/outside-sentinel"
+    printf 'outside data\n' > "$outside"
+    mkdir -p "$home/instructions/ctx-profiles"
+    ln -s "$outside" "$home/instructions/ctx-profiles/0001-review.instructions.md"
+    printf '0001-review.instructions.md\n' > "$home/instructions/ctx-profiles/.ctx-managed"
+    export AI_CTX_PROFILES=previous
+
+    local status=0
+    ctx review >"$TEST_TMP/linked-proj.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/linked-proj.out")" == *"unsafe managed projection target"* ]]
+    [ "$(cat "$outside")" = "outside data" ]
+    [ -L "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ -z "${COPILOT_HOME:-}" ]
+    [ "$AI_CTX_PROFILES" = previous ]
+}
+
+@test "Issue48: directory at manifest-listed desired projection name fails closed" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    mkdir -p "$home/instructions/ctx-profiles/0001-review.instructions.md"
+    printf '0001-review.instructions.md\n' > "$home/instructions/ctx-profiles/.ctx-managed"
+    export AI_CTX_PROFILES=previous
+
+    local status=0
+    ctx review >"$TEST_TMP/dir-proj.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/dir-proj.out")" == *"unsafe managed projection target"* ]]
+    [ -d "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ -z "${COPILOT_HOME:-}" ]
+    [ "$AI_CTX_PROFILES" = previous ]
+}
+
+@test "Issue48: linked projection directory fails without writing outside the home" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    local outside="$TEST_TMP/outside-instructions"
+    mkdir -p "$home" "$outside"
+    ln -s "$outside" "$home/instructions"
+
+    local status=0
+    ctx review >"$TEST_TMP/linked.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/linked.out")" == *"unsafe projection directory"* ]]
+    [ ! -e "$outside/ctx-profiles" ]
+}
+
+@test "Issue48: malformed manifest fails closed without changing projections" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    mkdir -p "$home/instructions/ctx-profiles"
+    printf '../escape.instructions.md\n' > "$home/instructions/ctx-profiles/.ctx-managed"
+
+    local status=0
+    ctx review >"$TEST_TMP/malformed.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/malformed.out")" == *"malformed projection manifest"* ]]
+    [ ! -e "$TEST_TMP/escape.instructions.md" ]
+}
+
+@test "Issue48: removing AGENTS.md from a canonical profile cleans its stale projection on reactivation" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+    local home="$COPILOT_HOME"
+    local proj="$home/instructions/ctx-profiles/0001-review.instructions.md"
+    [ -f "$proj" ]
+
+    # The profile becomes legacy while the same context (and home) stays
+    # selected, so the now-unwanted managed projection must be cleaned.
+    rm -f "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    ctx review >/dev/null
+    [ ! -e "$proj" ]
+    [ ! -e "$home/instructions/ctx-profiles/.ctx-managed" ]
+}
+
+@test "Issue48: ctx clear preserves the cached projection and clear --all removes the home" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+    local home="$COPILOT_HOME"
+    local proj="$home/instructions/ctx-profiles/0001-review.instructions.md"
+    [ -f "$proj" ]
+
+    ctx clear >/dev/null
+    [ -f "$proj" ]
+
+    ctx review >/dev/null
+    ctx clear --all >/dev/null
+    [ ! -d "$home" ]
+}
+
+@test "Issue48: check uses the recorded Mode A despite a selector mismatch" {
+    _make_canonical_profile review $'# review\n'
+    local proj="$TEST_TMP/project-canonical-mismatch"
+    mkdir -p "$proj"
+    printf 'review:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    export AI_CTX_PROFILES_COPILOT_MODE=global-user
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK PASS instruction:0001-review.instructions.md"* ]]
+    [[ "$output" == *"does not match recorded active mode"* ]]
+}
+
+@test "Issue48: no activation record skips canonical instruction checks" {
+    _make_canonical_profile review $'# review\n'
+    local proj="$TEST_TMP/project-canonical-norecord"
+    mkdir -p "$proj"
+    printf 'review:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    _ctx_reset_active_record
+
+    run ctx check
+    [[ "$output" == *"CHECK SKIP instruction:0001-review.instructions.md"* ]]
+}
+
+@test "Issue48: all-canonical Mode A check requires present-empty custom dirs" {
+    _make_canonical_profile review $'# review\n'
+    local proj="$TEST_TMP/project-canonical-empty"
+    mkdir -p "$proj"
+    printf 'review:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+
+    [ -n "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS+x}" ]
+    [ -z "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" ]
+
+    run ctx check
+    [ "$status" -eq 0 ]
+
+    unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS"* ]]
+}
+
+@test "Issue48: ctx current does not add projection listings" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"instructions.md"* ]]
+}
+
+@test "Issue48: ctx current distinguishes present-empty from unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"COPILOT_CUSTOM_INSTRUCTIONS_DIRS="*"<present-empty>"* ]]
+
+    unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    run ctx current
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"COPILOT_CUSTOM_INSTRUCTIONS_DIRS="*"<unset>"* ]]
+}
+
+@test "Issue48: legacy-only activation preserves an empty user instructions directory" {
+    _make_profile security security-skill
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/security"
+    mkdir -p "$home/instructions"
+
+    ctx security >/dev/null
+    [ -d "$home/instructions" ]
+}
+
+@test "Issue48: legacy-only activation does not reject an unrelated linked instructions path without a manifest" {
+    _make_profile security security-skill
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/security"
+    local outside="$TEST_TMP/outside-instructions"
+    mkdir -p "$home" "$outside"
+    ln -s "$outside" "$home/instructions"
+
+    ctx security >/dev/null
+    [ -L "$home/instructions" ]
+}
+
+@test "Issue48: legacy-only activation with an existing ctx manifest removes only stale managed projections" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+    local home="$COPILOT_HOME"
+    local proj="$home/instructions/ctx-profiles/0001-review.instructions.md"
+    [ -f "$proj" ]
+
+    # A legacy-only .ctx selection that reuses the same home must drop the
+    # now-stale managed projection and manifest while keeping the shared home.
+    _make_profile security security-skill
+    local pdir="$TEST_TMP/project-legacy-reuse"
+    mkdir -p "$pdir"
+    printf 'security:@profile\nhome:%s\n' "$home" > "$pdir/.ctx"
+    cd "$pdir"
+    _ctx_load_ctx_file "$pdir/.ctx" >/dev/null
+
+    [ ! -e "$proj" ]
+    [ ! -e "$home/instructions/ctx-profiles/.ctx-managed" ]
+    [ -d "$home/skills" ]
+}
+
+@test "Issue48: ctx check skips projections when no canonical entries and no manifest exist" {
+    _make_profile security security-skill
+    local proj="$TEST_TMP/project-legacy-check"
+    mkdir -p "$proj"
+    printf 'security:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+
+    run ctx check
+    [ "$status" -eq 0 ]
+}
+
+@test "Issue48: ctx check fails on a malformed ctx-managed manifest with zero canonical entries" {
+    _make_profile security security-skill
+    local proj="$TEST_TMP/project-legacy-check-malformed"
+    mkdir -p "$proj"
+    printf 'security:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    mkdir -p "$COPILOT_HOME/instructions/ctx-profiles"
+    printf 'bad name\n' > "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed"
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL instruction:manifest"* ]]
+}
+
+@test "Issue48: ctx check fails on a stale ctx-managed manifest with zero canonical entries" {
+    _make_profile security security-skill
+    local proj="$TEST_TMP/project-legacy-check-stale"
+    mkdir -p "$proj"
+    printf 'security:@profile\n' > "$proj/.ctx"
+    cd "$proj"
+    _ctx_load_ctx_file "$proj/.ctx" >/dev/null
+    mkdir -p "$COPILOT_HOME/instructions/ctx-profiles"
+    printf '0001-review.instructions.md\n' > "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed"
+
+    run ctx check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"stale projection"* ]]
+}
+
+@test "Issue48: projection transaction fails closed when a later source is missing" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review+arch"
+    local missing="$TEST_TMP/missing-source"
+    mkdir -p "$missing"
+
+    local status=0
+    _ctx_project_instructions "$home" \
+        1 review "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" \
+        2 arch "$missing" >"$TEST_TMP/b1-fail.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/b1-fail.out")" == *"could not read projection source"* ]]
+    [ ! -e "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ ! -e "$home/instructions/ctx-profiles/0002-arch.instructions.md" ]
+    [ ! -e "$home/instructions/ctx-profiles/.ctx-managed" ]
+    [ -z "$(find "$home/instructions/ctx-profiles" -mindepth 1 -maxdepth 1 -name '.ctx-txn.*' -print 2>/dev/null)" ]
+}
+
+@test "Issue48: projection transaction retry succeeds after the source is fixed" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review+arch"
+    local missing="$TEST_TMP/missing-source"
+    mkdir -p "$missing"
+
+    local status=0
+    _ctx_project_instructions "$home" 1 review "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" 2 arch "$missing" >/dev/null 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+
+    printf '# arch\n' > "$missing/AGENTS.md"
+    _ctx_project_instructions "$home" 1 review "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" 2 arch "$missing"
+
+    [ -f "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ -f "$home/instructions/ctx-profiles/0002-arch.instructions.md" ]
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx-managed")" = "0001-review.instructions.md
+0002-arch.instructions.md" ]
+    [ -z "$(find "$home/instructions/ctx-profiles" -mindepth 1 -maxdepth 1 -name '.ctx-txn.*' -print 2>/dev/null)" ]
+}
+
+@test "Issue48: an interrupted projection transaction is recoverable on retry" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review+arch"
+    mkdir -p "$home/instructions/ctx-profiles"
+
+    # Simulate a crash after the union manifest was written and one target
+    # replaced: the manifest still covers the old stale name plus both desired
+    # names, and a leftover per-transaction staging directory remains.
+    printf '0001-review.instructions.md\n0001-old.instructions.md\n0002-arch.instructions.md\n' > "$home/instructions/ctx-profiles/.ctx-managed"
+    printf 'old review\n' > "$home/instructions/ctx-profiles/0001-review.instructions.md"
+    printf 'old stale\n' > "$home/instructions/ctx-profiles/0001-old.instructions.md"
+    printf 'old arch\n' > "$home/instructions/ctx-profiles/0002-arch.instructions.md"
+    mkdir -p "$home/instructions/ctx-profiles/.ctx-txn.crashed"
+    printf 'partial\n' > "$home/instructions/ctx-profiles/.ctx-txn.crashed/0001-review.instructions.md"
+
+    ctx review arch >/dev/null
+    cmp -s <(printf -- '---\napplyTo: "**"\n---\n\n# review\n') "$home/instructions/ctx-profiles/0001-review.instructions.md"
+    cmp -s <(printf -- '---\napplyTo: "**"\n---\n\n# arch\n') "$home/instructions/ctx-profiles/0002-arch.instructions.md"
+    [ ! -e "$home/instructions/ctx-profiles/0001-old.instructions.md" ]
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx-managed")" = "0001-review.instructions.md
+0002-arch.instructions.md" ]
+    # A crashed transaction directory is never swept; it is ignored safely.
+    [ -d "$home/instructions/ctx-profiles/.ctx-txn.crashed" ]
+}
+
+@test "Issue48: an unrelated .ctx.tmp.keep file survives activation and retry" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    mkdir -p "$home/instructions/ctx-profiles"
+    printf 'keep me\n' > "$home/instructions/ctx-profiles/.ctx.tmp.keep"
+
+    ctx review >/dev/null
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx.tmp.keep")" = "keep me" ]
+
+    printf '# review v2\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    ctx review >/dev/null
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx.tmp.keep")" = "keep me" ]
+    [ -z "$(find "$home/instructions/ctx-profiles" -mindepth 1 -maxdepth 1 -name '.ctx-txn.*' -print 2>/dev/null)" ]
+}
+
+@test "Issue48: stale prune failure retains the expanded manifest and never deletes directory contents" {
+    _make_canonical_profile review $'# review\n'
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review"
+    mkdir -p "$home/instructions/ctx-profiles/0001-old.instructions.md"
+    printf 'precious\n' > "$home/instructions/ctx-profiles/0001-old.instructions.md/inner.txt"
+    printf '0001-old.instructions.md\n0001-review.instructions.md\n' > "$home/instructions/ctx-profiles/.ctx-managed"
+    printf 'old review\n' > "$home/instructions/ctx-profiles/0001-review.instructions.md"
+
+    local status=0
+    ctx review >"$TEST_TMP/prune-fail.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/prune-fail.out")" == *"refusing to remove non-regular stale projection"* ]]
+    # The expanded union manifest is retained so a retry remains possible.
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx-managed")" = "0001-old.instructions.md
+0001-review.instructions.md" ]
+    # Directory contents were never recursively deleted.
+    [ "$(cat "$home/instructions/ctx-profiles/0001-old.instructions.md/inner.txt")" = "precious" ]
+    # No transaction staging directory is left behind.
+    [ -z "$(find "$home/instructions/ctx-profiles" -mindepth 1 -maxdepth 1 -name '.ctx-txn.*' -print 2>/dev/null)" ]
+}
+
+@test "Issue48: case-only projection label transition under a shared home removes the stale old-case projection" {
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/Review"
+    printf '# review\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/Review/AGENTS.md"
+    local home="$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/case-home"
+    local pdir="$TEST_TMP/project-case-home"
+    mkdir -p "$pdir" "$home"
+
+    printf 'Review:@profile\nhome:%s\n' "$home" > "$pdir/.ctx"
+    cd "$pdir"
+    _ctx_load_ctx_file "$pdir/.ctx" >/dev/null
+    [ -f "$home/instructions/ctx-profiles/0001-Review.instructions.md" ]
+
+    # On a case-sensitive filesystem the old-case projection is a distinct
+    # stale file that must be removed, not orphaned, when the label case flips.
+    mv "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/Review" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"
+    printf 'review:@profile\nhome:%s\n' "$home" > "$pdir/.ctx"
+    _ctx_load_ctx_file "$pdir/.ctx" >/dev/null
+    [ -f "$home/instructions/ctx-profiles/0001-review.instructions.md" ]
+    [ ! -e "$home/instructions/ctx-profiles/0001-Review.instructions.md" ]
+    [ "$(cat "$home/instructions/ctx-profiles/.ctx-managed")" = "0001-review.instructions.md" ]
+}
+
+@test "Issue48: ordinary managed projection files update on reactivation" {
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+    local proj="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+
+    printf '# review v2\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    ctx review >/dev/null
+    cmp -s <(printf -- '---\napplyTo: "**"\n---\n\n# review v2\n') "$proj"
+    [ ! -L "$proj" ]
+}
+
+@test "Issue48: projection activation works with noclobber set" {
+    set -o noclobber
+    _make_canonical_profile review $'# review\n'
+    ctx review >/dev/null
+    local proj="$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md"
+    [ -f "$proj" ]
+
+    # Reactivation must also work: no transaction step clobbers an existing
+    # file with `>` (temps are new files, targets/manifest are renamed).
+    printf '# review v2\n' > "$TEST_TMP/agents-v2"
+    mv -f "$TEST_TMP/agents-v2" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    ctx review >/dev/null
+    cmp -s <(printf -- '---\napplyTo: "**"\n---\n\n# review v2\n') "$proj"
+    set +o noclobber
+}
+
+@test "Issue48: sanitizer replaces each disallowed Unicode character once across locales" {
+    local saved_lc_all="${LC_ALL-}" lc_all_set=0
+    [ -n "${LC_ALL+x}" ] && lc_all_set=1
+    restore_lc_all() {
+        if [ "$lc_all_set" -eq 1 ]; then export LC_ALL="$saved_lc_all"; else unset LC_ALL; fi
+    }
+    trap restore_lc_all EXIT
+
+    export LC_ALL=en_US.UTF-8
+    [ "$(_ctx_sanitize_context_name 'café')" = 'caf_' ]
+    [ "$(_ctx_sanitize_context_name 'caféñ')" = 'caf__' ]
+    [ "$(_ctx_sanitize_context_name 'a𝄞b')" = 'a_b' ]
+    export LC_ALL=C
+    [ "$(_ctx_sanitize_context_name 'café')" = 'caf_' ]
+    [ "$(_ctx_sanitize_context_name 'caféñ')" = 'caf__' ]
+    [ "$(_ctx_sanitize_context_name 'a𝄞b')" = 'a_b' ]
+    restore_lc_all
+    trap - EXIT
+}
+
+@test "Issue48: non-ASCII manifest names are rejected under a UTF-8 locale" {
+    local saved_lc_all="${LC_ALL-}" lc_all_set=0
+    [ -n "${LC_ALL+x}" ] && lc_all_set=1
+    restore_lc_all() {
+        if [ "$lc_all_set" -eq 1 ]; then export LC_ALL="$saved_lc_all"; else unset LC_ALL; fi
+    }
+    trap restore_lc_all EXIT
+
+    export LC_ALL=en_US.UTF-8
+    # A collation range like [a-z] must not admit accented letters in the
+    # manifest grammar; the ASCII-stable check runs under LC_ALL=C internally.
+    _ctx_valid_projection_name '0001-café.instructions.md' && return 1
+    _ctx_valid_projection_name '0001-ok.instructions.md' || return 1
+    _ctx_valid_projection_name '1-short.instructions.md' && return 1
+    _ctx_valid_projection_name '0001-bad/name.instructions.md' && return 1
+    restore_lc_all
+    trap - EXIT
+}
+
+@test "Issue48: direct .ctx canonical profile outside the configured profiles root fails atomically" {
+    local outside="$TEST_TMP/outside-canonical"
+    mkdir -p "$outside"
+    printf '# outside canonical\n' > "$outside/AGENTS.md"
+    local sentinel="$outside/AGENTS.md" before
+    before="$(cksum "$sentinel")"
+
+    local proj="$TEST_TMP/project-canon-outside"
+    mkdir -p "$proj"
+    printf 'outside:%s\n' "$outside" > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+    export COPILOT_SKILLS_DIRS=previous-skills
+    _ctx_auto_load_dir=""
+    _ctx_reset_active_record
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/canon-outside.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/canon-outside.out")" == *"outside the configured profiles root"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ "$COPILOT_SKILLS_DIRS" = previous-skills ]
+    [ ! -e "$proj/project-canon-outside.code-workspace" ]
+    [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/outside" ]
+    [ "$(cksum "$sentinel")" = "$before" ]
+}
+
+@test "Issue48: in-root canonical profile symlink whose target escapes the profiles root fails atomically" {
+    local outside="$TEST_TMP/outside-symlink-target"
+    mkdir -p "$outside"
+    printf '# outside symlink target\n' > "$outside/AGENTS.md"
+    local sentinel="$outside/AGENTS.md" before
+    before="$(cksum "$sentinel")"
+    ln -s "$outside" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/evil"
+
+    local proj="$TEST_TMP/project-canon-symlink-escape"
+    mkdir -p "$proj"
+    printf 'evil:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/evil" > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+    _ctx_auto_load_dir=""
+    _ctx_reset_active_record
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/canon-symlink.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/canon-symlink.out")" == *"outside the configured profiles root"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ ! -e "$proj/project-canon-symlink-escape.code-workspace" ]
+    [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/evil" ]
+    [ "$(cksum "$sentinel")" = "$before" ]
+}
+
+@test "Issue48: direct .ctx canonical profile inside the configured root still activates and identifier activation remains compatible" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    _make_canonical_profile ghost $'# ghost unselected\n'
+    _make_canonical_skill review review-skill
+    _make_canonical_skill arch arch-skill
+    _make_canonical_skill ghost ghost-skill
+
+    # Capture every source so activation can be proven read-only.
+    local review_agents="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    local arch_agents="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch/AGENTS.md"
+    local ghost_agents="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/ghost/AGENTS.md"
+    local review_skill_md="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/review-skill/SKILL.md"
+    local arch_skill_md="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch/.agents/skills/arch-skill/SKILL.md"
+    local ghost_skill_md="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/ghost/.agents/skills/ghost-skill/SKILL.md"
+    local review_agents_sum arch_agents_sum ghost_agents_sum
+    local review_skill_sum arch_skill_sum ghost_skill_sum
+    review_agents_sum="$(cksum "$review_agents")"
+    arch_agents_sum="$(cksum "$arch_agents")"
+    ghost_agents_sum="$(cksum "$ghost_agents")"
+    review_skill_sum="$(cksum "$review_skill_md")"
+    arch_skill_sum="$(cksum "$arch_skill_md")"
+    ghost_skill_sum="$(cksum "$ghost_skill_md")"
+
+    local proj="$TEST_TMP/project-canon-inroot"
+    mkdir -p "$proj"
+    printf 'review:%s\narch:@profile\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review" > "$proj/.ctx"
+
+    ctx load "$proj/.ctx" >/dev/null
+
+    # Mixed direct-path + identifier compatibility is preserved.
+    [ "$AI_CTX_PROFILES" = "review+arch" ]
+
+    # Projections are deterministic and keyed to selected entry order; only the
+    # selected canonical entries appear, never the unselected ghost profile.
+    local projections
+    projections="$(cd "$COPILOT_HOME/instructions/ctx-profiles" && ls -1 *.instructions.md | sort)"
+    [ "$projections" = "$(printf '0001-review.instructions.md\n0002-arch.instructions.md')" ]
+    [ "$(cat "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed")" = "$(printf '0001-review.instructions.md\n0002-arch.instructions.md')" ]
+    [ ! -e "$COPILOT_HOME/instructions/ctx-profiles/0003-ghost.instructions.md" ]
+
+    # Only the selected profiles' distinct skills are linked; ghost is absent.
+    local links
+    links="$(cd "$COPILOT_HOME/skills" && ls -1 | sort)"
+    [ "$links" = "$(printf 'arch-skill\nreview-skill')" ]
+    [ "$(readlink -f "$COPILOT_HOME/skills/review-skill")" = "$(readlink -f "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/review-skill")" ]
+    [ "$(readlink -f "$COPILOT_HOME/skills/arch-skill")" = "$(readlink -f "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch/.agents/skills/arch-skill")" ]
+    [ ! -e "$COPILOT_HOME/skills/ghost-skill" ]
+
+    # Sources are byte-identical after activation.
+    [ "$(cksum "$review_agents")" = "$review_agents_sum" ]
+    [ "$(cksum "$arch_agents")" = "$arch_agents_sum" ]
+    [ "$(cksum "$ghost_agents")" = "$ghost_agents_sum" ]
+    [ "$(cksum "$review_skill_md")" = "$review_skill_sum" ]
+    [ "$(cksum "$arch_skill_md")" = "$arch_skill_sum" ]
+    [ "$(cksum "$ghost_skill_md")" = "$ghost_skill_sum" ]
+}
+
+@test "Issue48: intermediate in-root symlink followed by .. cannot escape the profiles root" {
+    local outside_dir="$TEST_TMP/outside-escape/dir"
+    local outside_profile="$TEST_TMP/outside-escape/outside-profile"
+    mkdir -p "$outside_dir" "$outside_profile"
+    printf '# outside\n' > "$outside_profile/AGENTS.md"
+    ln -s "$outside_dir" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/escape-link"
+
+    # Filesystem order resolves escape-link -> outside/dir, then .. -> the
+    # outside parent; realpath -m follows that order, so this canonical
+    # profile is outside the root and must be rejected.
+    local crafted="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/escape-link/../outside-profile"
+    ! _ctx_canonical_profile_within_root "$crafted"
+
+    local proj="$TEST_TMP/project-canon-symlink-dotdot"
+    mkdir -p "$proj"
+    printf 'evil:%s\n' "$crafted" > "$proj/.ctx"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+    _ctx_auto_load_dir=""
+    _ctx_reset_active_record
+
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/canon-dotdot.out" 2>&1 || status=$?
+
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/canon-dotdot.out")" == *"outside the configured profiles root"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+    [ ! -e "$proj/project-canon-symlink-dotdot.code-workspace" ]
+}
+
+@test "Issue48: zsh sanitizer emits ASCII names without escape text and survives reactivation + ctx check (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+    _make_canonical_profile review $'# review\n'
+    local pdir="$TEST_TMP/project-zsh"
+    mkdir -p "$pdir"
+    printf 'review:@profile\n' > "$pdir/.ctx"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    # Run entirely under zsh -f (no user startup files) so the sanitizer's
+    # printf '%b' octal decoding is exercised in zsh (which leaves the bare
+    # \NNN form literal). A broken sanitizer corrupts home/projection/manifest
+    # names, either activation fails, and ctx check fails.
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        printf "a=%s\n" "$(_ctx_sanitize_context_name review)"
+        printf "c=%s\n" "$(_ctx_sanitize_context_name café)"
+        ctx review >/dev/null 2>&1
+        printf "act1=%s\n" "$?"
+        ctx review >/dev/null 2>&1
+        printf "act2=%s\n" "$?"
+        cd "$2"
+        ctx check >/dev/null 2>&1
+        printf "check=%s\n" "$?"
+        printf "proj=%s\n" "$(basename "$COPILOT_HOME"/instructions/ctx-profiles/*.instructions.md)"
+        printf "manifest=%s\n" "$(<"$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed")"
+    ' -- "$CTX_SRC" "$pdir"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"a=review"* ]]
+    [[ "$output" == *"c=caf_"* ]]
+    [[ "$output" == *"act1=0"* ]]
+    [[ "$output" == *"act2=0"* ]]
+    [[ "$output" == *"check=0"* ]]
+    [[ "$output" == *"proj=0001-review.instructions.md"* ]]
+    [[ "$output" == *"manifest=0001-review.instructions.md"* ]]
+    [[ "$output" != *"\\"* ]]
+}

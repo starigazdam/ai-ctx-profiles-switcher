@@ -229,20 +229,26 @@ security:./local-instructions
 
 When your shell prompt renders after a `cd` / `Set-Location` into that
 directory (or any descendant of it), `AI_CTX_PROFILES` (the names joined by `+`)
-and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` (the paths joined by `,`) are set,
-overwriting any previous value. Leaving the directory tree (into a location
-with no `.ctx` file anywhere in its ancestry) automatically clears the
-context.
+is set, overwriting any previous value. `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+contains only the *legacy* roots of the selection in order — canonical
+`AGENTS.md` roots are omitted — so it is set to the present-empty value when
+every selected entry is canonical (see
+[Canonical profiles](#canonical-profiles-agentsmd)). Leaving the directory tree
+(into a location with no `.ctx` file anywhere in its ancestry) automatically
+clears the context.
 
 ### Skill discovery
 
 Setting `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` makes Copilot CLI load custom
 instructions from your `.ctx` entries, but it does **not** make it discover
 [agent skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
-stored in those directories on its own. Mode A projects the selected profiles'
-`.github/skills` directories into the synthetic `<COPILOT_HOME>/skills` tree so
-those skills are what Copilot CLI — which respects `COPILOT_HOME` as a full
-replacement for `~/.copilot` — sees under this context. That projection is not
+stored in those directories on its own. Mode A projects each selected
+profile's contracted skill source — `.github/skills` for legacy profiles and
+`.agents/skills` for canonical `AGENTS.md` profiles (see
+[Canonical profiles](#canonical-profiles-agentsmd)) — into the synthetic
+`<COPILOT_HOME>/skills` tree so those skills are what Copilot CLI — which
+respects `COPILOT_HOME` as a full replacement for `~/.copilot` — sees under
+this context. That projection is not
 a complete skill-discovery or security sandbox: other built-in or configured
 discovery locations (personal `~/.agents/skills`, repository `.github/skills` /
 `.claude/skills`, `COPILOT_SKILLS_DIRS`, or configured `skillDirectories`) may
@@ -300,6 +306,87 @@ diagnostic cannot observe (notably another Copilot process's command-line
 arguments and plugin-internal skill locations beyond detectable
 `skills`/`.github/skills` subdirectories).
 
+### Canonical profiles (AGENTS.md)
+
+A resolved profile directory that has a root-level `AGENTS.md` is a
+**canonical** profile; one without it keeps the legacy behavior described
+above. Canonical and legacy profiles can be mixed in one ordered Mode A
+activation. Canonical profiles are a Mode A (`synthetic-home`) feature only.
+
+#### Instruction projection
+
+Under Mode A, each selected canonical profile's `AGENTS.md` is projected into
+the synthetic home as
+`<COPILOT_HOME>/instructions/ctx-profiles/<order>-<label>.instructions.md`,
+where:
+
+- `<order>` is the profile's one-based position in the selection, zero-padded
+  to at least four ASCII digits (`0001`, `0002`, ...), so distinct selections
+  never collide.
+- `<label>` is the manual profile identifier or `.ctx` entry label passed
+  through the same cross-shell sanitizer used for home directory names: ASCII
+  letters, digits, `+`, `.`, `_`, and `-` are kept and every other character is
+  replaced with `_`.
+
+The projected file is the exact UTF-8/LF header
+`---\napplyTo: "**"\n---\n\n` followed by the source `AGENTS.md` bytes
+unchanged. Source line endings (CRLF/LF), an optional BOM, and the
+final-newline state are preserved byte-for-byte; an existing YAML-like header
+in `AGENTS.md` is copied as body content and is not parsed or merged. Keep
+canonical instructions self-contained — relative `@file` imports are not
+expanded or rewritten.
+
+`ctx` tracks the generated basenames in a
+`<COPILOT_HOME>/instructions/ctx-profiles/.ctx-managed` manifest. A later
+activation removes only managed projections that are no longer selected and
+never overwrites an unmanaged file; a linked or malformed manifest, an unsafe
+`instructions/` or `instructions/ctx-profiles/` component, and an unmanifested
+desired file all fail the activation before any projection is changed. `ctx
+clear` leaves the cached projections in place; `ctx clear --all` removes the
+selected synthetic home under the existing safety rules.
+
+#### Custom-instruction directories
+
+Canonical roots are omitted from `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`; the
+variable lists only the legacy roots in selection order. When every selected
+profile is canonical the variable is set to the present-empty value (present
+and equal to the empty string, not unset).
+
+#### Skills
+
+Canonical profiles discover skills only from `.agents/skills/<name>`
+directories that contain a regular (non-link) `SKILL.md`. A co-located
+`.github/skills` tree in a canonical profile is ignored. Legacy profiles keep
+using `.github/skills`. Both sources feed the same case-insensitive
+warn-and-skip collision policy: colliding names are skipped on activation and
+reported as `CHECK FAIL` by `ctx check`.
+
+#### Mode B/C and the Unix PowerShell runtime guard
+
+Canonical selections require Mode A. Any selection containing a canonical
+profile under `global-user` or `ephemeral-clean` fails before any environment
+export, workspace write, or Copilot-home creation, naming the profile(s) and
+requiring `synthetic-home`. This applies to manual activation, explicit
+`ctx load`, and `.ctx` auto-loading; a repeated auto-load reports the error
+again rather than suppressing it.
+
+| Runtime | All-canonical Mode A | Mixed / legacy Mode A |
+|---------|----------------------|------------------------|
+| Bash / zsh | present-empty `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | supported |
+| PowerShell on Windows (Windows PowerShell 5.1 or pwsh) | present-empty | supported |
+| Unix pwsh on .NET 9+ | present-empty | supported |
+| Unix pwsh on .NET 8 or earlier | **rejected before mutation** with a pwsh/.NET 9+ requirement | supported |
+
+Before .NET 9, Unix PowerShell cannot represent a present-empty environment
+variable (assigning an empty value removes it), so an all-canonical Mode A
+selection on Unix pwsh/.NET 8 and earlier fails before any environment export,
+workspace write, Copilot-home setup/creation, projection write, or
+session-record change, and the previous context stays active. `ctx check`
+keeps the present-empty contract on every runtime and does not accept
+absent-as-empty. Mixed canonical+legacy and legacy-only selections are
+unaffected because their `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` value is
+non-empty.
+
 ### Integration modes
 
 `ctx` supports three Copilot integration modes, selected by the exact,
@@ -355,8 +442,12 @@ The existing default: `ctx` builds a synthetic per-context `COPILOT_HOME` at
 `~/.config/ctx/homes/<context>/`, symlinks the shared files/directories back
 to the real Copilot home so auth, settings, MCP servers, and session history
 keep working identically across contexts, and populates the per-context
-`skills/` tree from each resolved entry's `.github/skills`. Known risks remain;
-this feature does not fix them:
+`skills/` tree from each resolved entry's contracted skill source
+(`.github/skills` for legacy profiles, `.agents/skills` for canonical
+profiles). Canonical profiles additionally project their `AGENTS.md` into
+`instructions/ctx-profiles/` (see
+[Canonical profiles](#canonical-profiles-agentsmd)). Known risks remain; this
+feature does not fix them:
 
 - Copilot's atomic temp-file+rename writes can replace a symlinked file
   (empirically confirmed for `settings.json`), so that context can diverge
@@ -455,8 +546,9 @@ and exports `COPILOT_HOME` to point at it:
   settings, MCP servers, and session history all keep working identically
   to today, shared across every context.
 - **`skills/`** is context-local and populated only with symlinks to each
-  resolved directory's `.github/skills/*` subfolders, so this context projects
-  exactly the selected profiles' skills. This controls the synthetic
+  resolved directory's contracted skill source (`.github/skills/*` for legacy
+  profiles, `.agents/skills/*` for canonical profiles), so this context
+  projects exactly the selected profiles' skills. This controls the synthetic
   `COPILOT_HOME` view only — it does not hide or block other built-in or
   configured skill locations Copilot may discover, and it is not a security
   sandbox.

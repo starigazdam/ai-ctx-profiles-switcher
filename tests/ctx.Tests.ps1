@@ -36,6 +36,43 @@ BeforeAll {
         }
         return $profileDir
     }
+
+    function Script:Test-CtxOldUnixDotnet {
+        $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
+        return ((-not $isWindowsLike) -and ([System.Environment]::Version.Major -lt 9))
+    }
+
+    function Script:New-CtxTestCanonicalProfile {
+        param([string]$Name, [byte[]]$AgentsBytes)
+        $profileDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT "profiles/$Name"
+        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+        if ($null -eq $AgentsBytes) {
+            $AgentsBytes = [System.Text.Encoding]::UTF8.GetBytes("# $Name canonical instructions")
+        }
+        [System.IO.File]::WriteAllBytes((Join-Path $profileDir 'AGENTS.md'), $AgentsBytes)
+        return $profileDir
+    }
+
+    function Script:New-CtxTestCanonicalSkill {
+        param([string]$Profile, [string]$Skill)
+        $skillDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT "profiles/$Profile/.agents/skills/$Skill"
+        New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $skillDir 'SKILL.md'), "---`nname: $Skill`ndescription: test`n---`n")
+    }
+
+    function Script:Get-CtxProjectionBytes {
+        param([byte[]]$Body)
+        $header = [System.Text.Encoding]::UTF8.GetBytes("---`napplyTo: `"**`"`n---`n`n")
+        $out = New-Object byte[] ($header.Length + $Body.Length)
+        [Array]::Copy($header, 0, $out, 0, $header.Length)
+        [Array]::Copy($Body, 0, $out, $header.Length, $Body.Length)
+        return ,$out
+    }
+
+    function Script:Assert-CtxFileBytes {
+        param([string]$Path, [byte[]]$Expected)
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -Be ([Convert]::ToBase64String($Expected))
+    }
 }
 
 Describe 'ctx.ps1 COPILOT_HOME isolation' {
@@ -2600,6 +2637,999 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         @($skillNames | Where-Object { $_ -ceq 'Foo-Skill' }).Count | Should -Be 0
 
         (ctx check) | Should -BeTrue
+    }
+
+    # --- Issue #48: canonical AGENTS.md profiles ---------------------------
+
+    It 'Issue48: canonical detection projects AGENTS.md bytes and sets custom dirs present-empty' {
+        if (Test-CtxOldUnixDotnet) {
+            Set-ItResult -Skipped -Because 'all-canonical Mode A requires pwsh/.NET 9+ on Unix'
+            return
+        }
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# hello`n")) | Out-Null
+        ctx review | Out-Null
+
+        $proj = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0001-review.instructions.md'
+        Test-Path -LiteralPath $proj -PathType Leaf | Should -BeTrue
+        Test-CtxIsLink -Path $proj | Should -BeFalse
+        Assert-CtxFileBytes -Path $proj -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# hello`n")))
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        Test-Path Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -BeTrue
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be ''
+        $manifest = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/.ctx-managed'
+        (Get-Content -LiteralPath $manifest -Raw).Trim() | Should -Be '0001-review.instructions.md'
+    }
+
+    It 'Issue48: old Unix pwsh/.NET <=8 rejects all-canonical Mode A before mutation' {
+        if (-not (Test-CtxOldUnixDotnet)) {
+            Set-ItResult -Skipped -Because 'requires Unix pwsh/.NET 8 or earlier'
+            return
+        }
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# hello`n")) | Out-Null
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { ctx review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+        ($out -join "`n") | Should -Match 'all-canonical Mode A requires pwsh/\.NET 9\+ on Unix'
+        # A failed Mode A manual activation returns $false (README contract).
+        $out[-1] | Should -BeFalse
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review/instructions') | Should -BeFalse
+        $Script:CtxActiveMode | Should -BeNullOrEmpty
+    }
+
+    It 'Issue48: mixed canonical+legacy Mode A keeps legacy dirs in order and projects at selection order' {
+        $reviewDir = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+        New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n")) | Out-Null
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'security-skill'
+
+        ctx review arch security | Out-Null
+
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be ($reviewDir + ',' + $securityDir)
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0002-arch.instructions.md') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0001-review.instructions.md') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0003-security.instructions.md') | Should -BeFalse
+    }
+
+    It 'Issue48: projection filename sanitizes labels and stays filesystem-safe' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'my profile' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# spaced`n")) | Out-Null
+
+        ctx base 'my profile' | Out-Null
+
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0002-my_profile.instructions.md') | Should -BeTrue
+    }
+
+    It 'Issue48: non-ASCII label yields a safe filename matching the grammar' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'café' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# accented`n")) | Out-Null
+
+        ctx base 'café' | Out-Null
+
+        $files = @(Get-ChildItem -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles') -File -Filter '*.instructions.md')
+        $files.Count | Should -Be 1
+        $files[0].Name | Should -Be '0002-caf_.instructions.md'
+        $files[0].Name | Should -Match '^[0-9]{4,}-[A-Za-z0-9+._-]+\.instructions\.md$'
+    }
+
+    It 'Issue48: CRLF, BOM, and missing final newline are preserved byte-for-byte' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# a`r`n# b")) | Out-Null
+        ctx base review | Out-Null
+        $proj = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0002-review.instructions.md'
+        Test-Path -LiteralPath $proj -PathType Leaf | Should -BeTrue
+        Assert-CtxFileBytes -Path $proj -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# a`r`n# b")))
+
+        Clear-CtxContext | Out-Null
+        $bomBytes = [byte[]](@([byte]0xEF, [byte]0xBB, [byte]0xBF) + [System.Text.Encoding]::UTF8.GetBytes("# bom`n"))
+        New-CtxTestCanonicalProfile -Name 'bom' -AgentsBytes $bomBytes | Out-Null
+        ctx base bom | Out-Null
+        $proj2 = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0002-bom.instructions.md'
+        Test-Path -LiteralPath $proj2 -PathType Leaf | Should -BeTrue
+        Assert-CtxFileBytes -Path $proj2 -Expected (Get-CtxProjectionBytes $bomBytes)
+    }
+
+    It 'Issue48: canonical profiles use .agents/skills and ignore co-located .github/skills' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        New-CtxTestCanonicalSkill -Profile 'review' -Skill 'good-skill'
+        New-Item -ItemType Directory -Path (Join-Path $reviewDir '.agents/skills/no-skill') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $reviewDir '.github/skills/legacy-skill') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $reviewDir '.github/skills/legacy-skill/SKILL.md') -Value "---`nname: legacy`n---`n"
+        $proj = Join-Path $Script:TestTmp 'project-canonical-skills'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "base:@profile`nreview:@profile"
+        Set-Location $proj
+
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+
+        Test-CtxIsLink -Path (Join-Path $env:COPILOT_HOME 'skills/good-skill') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/no-skill') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/legacy-skill') | Should -BeFalse
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK PASS skill:good-skill'
+        (ctx check) | Should -BeTrue
+    }
+
+    It 'Issue48: canonical skill detection accepts hard-linked SKILL.md like Bash while rejecting symlinks (where supported)' {
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        New-Item -ItemType Directory -Path (Join-Path $reviewDir '.agents/skills/hard-skill') -Force | Out-Null
+        $skillMd = Join-Path $reviewDir '.agents/skills/hard-skill/SKILL.md'
+        Set-Content -LiteralPath $skillMd -Value "---`nname: hard`n---`n"
+        try {
+            # A second hard link raises the link count above 1.
+            New-Item -ItemType HardLink -Path (Join-Path $reviewDir '.agents/skills/hard-skill/SKILL.hard') -Target $skillMd -ErrorAction Stop | Out-Null
+        } catch {
+            Set-ItResult -Skipped -Because 'hard links not supported on this platform'
+            return
+        }
+        # Shared-file semantics preserved: Test-CtxIsLink still treats a
+        # multi-link file as a link.
+        Test-CtxIsLink -Path $skillMd | Should -BeTrue
+        Test-CtxRegularFile -Path $skillMd | Should -BeFalse
+        # But canonical skill validation matches Bash `[ -f ] && [ ! -L ]`.
+        Test-CtxRegularFile -Path $skillMd -AllowHardLinks | Should -BeTrue
+        @(Get-CtxSkillSourceDirs -ResolvedDir $reviewDir | ForEach-Object { $_.Name }) | Should -Contain 'hard-skill'
+
+        # A symlinked SKILL.md is still rejected.
+        $symDir = Join-Path $reviewDir '.agents/skills/sym-skill'
+        New-Item -ItemType Directory -Path $symDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $symDir 'SKILL.real') -Value "---`nname: sym`n---`n"
+        New-Item -ItemType SymbolicLink -Path (Join-Path $symDir 'SKILL.md') -Target (Join-Path $symDir 'SKILL.real') | Out-Null
+        @(Get-CtxSkillSourceDirs -ResolvedDir $reviewDir | ForEach-Object { $_.Name }) | Should -Not -Contain 'sym-skill'
+    }
+
+    It 'Issue48: canonical/legacy skill collisions reuse warn-and-skip and check FAIL' {
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        New-CtxTestCanonicalSkill -Profile 'review' -Skill 'dup-skill'
+        $securityDir = New-CtxTestProfile -Name 'security' -Skill 'Dup-Skill'
+        $proj = Join-Path $Script:TestTmp 'project-canonical-collision'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $reviewDir = Join-Path (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles') 'review'
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir`nsecurity:$securityDir"
+        Set-Location $proj
+
+        $activation = @(& { Import-CtxFile -CtxFile $ctxFile } 3>&1 6>&1)
+        ($activation -join "`n") | Should -Match 'collision'
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/dup-skill') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/Dup-Skill') | Should -BeFalse
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL skill:dup-skill'
+        ($check -join "`n") | Should -Match 'collision'
+        (ctx check) | Should -BeFalse
+    }
+
+    It 'Issue48: Mode B and C manual activation rejects canonical selections before any mutation' {
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        foreach ($mode in @('global-user', 'ephemeral-clean')) {
+            $env:AI_CTX_PROFILES_COPILOT_MODE = $mode
+            $env:AI_CTX_PROFILES = 'previous'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+            $env:COPILOT_HOME = 'previous-home'
+            $env:COPILOT_SKILLS_DIRS = 'previous-skills'
+
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { $out = @(& { ctx review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+            ($out -join "`n") | Should -Match 'canonical'
+            ($out -join "`n") | Should -Match 'synthetic-home'
+            $env:AI_CTX_PROFILES | Should -Be 'previous'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+            $env:COPILOT_HOME | Should -Be 'previous-home'
+            $env:COPILOT_SKILLS_DIRS | Should -Be 'previous-skills'
+            Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review') | Should -BeFalse
+            $Script:CtxActiveMode | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'Issue48: explicit .ctx load rejects canonical entries under Mode B and C before mutation' {
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $proj = Join-Path $Script:TestTmp 'project-canon-load-bc'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        foreach ($mode in @('global-user', 'ephemeral-clean')) {
+            $env:AI_CTX_PROFILES_COPILOT_MODE = $mode
+            $env:AI_CTX_PROFILES = 'previous'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+            $env:COPILOT_HOME = 'previous-home'
+            $env:COPILOT_SKILLS_DIRS = 'previous-skills'
+
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { $out = @(& { Import-CtxFile -CtxFile (Join-Path $proj '.ctx') } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+            ($out -join "`n") | Should -Match 'canonical'
+            $env:AI_CTX_PROFILES | Should -Be 'previous'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+            $env:COPILOT_HOME | Should -Be 'previous-home'
+            $env:COPILOT_SKILLS_DIRS | Should -Be 'previous-skills'
+            Test-Path -LiteralPath (Join-Path $proj 'project-canon-load-bc.code-workspace') | Should -BeFalse
+            $Script:CtxActiveMode | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'Issue48: actual auto-load rejects canonical entries under Mode B and C, and repeats' {
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $proj = Join-Path $Script:TestTmp 'project-canon-autoload-bc'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:$reviewDir"
+
+        foreach ($mode in @('global-user', 'ephemeral-clean')) {
+            $env:AI_CTX_PROFILES_COPILOT_MODE = $mode
+            $env:AI_CTX_PROFILES = 'previous'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+            $env:COPILOT_HOME = 'previous-home'
+            $env:COPILOT_SKILLS_DIRS = 'previous-skills'
+            $Script:CtxAutoLoadDir = $null
+            Set-Location $proj
+
+            foreach ($attempt in @(1, 2)) {
+                $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                try { $out = @(& { Invoke-CtxAutoLoad } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+                ($out -join "`n") | Should -Match 'canonical'
+                $env:AI_CTX_PROFILES | Should -Be 'previous'
+                $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+                $env:COPILOT_HOME | Should -Be 'previous-home'
+                $env:COPILOT_SKILLS_DIRS | Should -Be 'previous-skills'
+                Test-Path -LiteralPath (Join-Path $proj 'project-canon-autoload-bc.code-workspace') | Should -BeFalse
+                $Script:CtxActiveMode | Should -BeNullOrEmpty
+            }
+        }
+    }
+
+    It 'Issue48: unmanifested desired projection is not overwritten' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review'
+        New-Item -ItemType Directory -Path (Join-Path $syntheticHome 'instructions/ctx-profiles') -Force | Out-Null
+        $proj = Join-Path $syntheticHome 'instructions/ctx-profiles/0002-review.instructions.md'
+        Set-Content -LiteralPath $proj -Value 'user data' -NoNewline
+        $env:AI_CTX_PROFILES = 'previous'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { ctx base review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+        ($out -join "`n") | Should -Match 'unmanaged projection'
+        (Get-Content -LiteralPath $proj -Raw) | Should -Be 'user data'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+    }
+
+    It 'Issue48: manifest-listed desired projection as symlink to outside sentinel fails closed' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review'
+        $outside = Join-Path $Script:TestTmp 'outside-sentinel'
+        Set-Content -LiteralPath $outside -Value 'outside data' -NoNewline
+        New-Item -ItemType Directory -Path (Join-Path $syntheticHome 'instructions/ctx-profiles') -Force | Out-Null
+        $proj = Join-Path $syntheticHome 'instructions/ctx-profiles/0002-review.instructions.md'
+        New-Item -ItemType SymbolicLink -Path $proj -Target $outside | Out-Null
+        Set-Content -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') -Value '0002-review.instructions.md'
+        $env:AI_CTX_PROFILES = 'previous'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { ctx base review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+        ($out -join "`n") | Should -Match 'unsafe managed projection target'
+        (Get-Content -LiteralPath $outside -Raw) | Should -Be 'outside data'
+        (Get-Item -LiteralPath $proj -Force).LinkType | Should -Not -BeNullOrEmpty
+        $env:COPILOT_HOME | Should -BeNullOrEmpty
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+    }
+
+    It 'Issue48: directory at manifest-listed desired projection name fails closed' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review'
+        $projDir = Join-Path $syntheticHome 'instructions/ctx-profiles/0002-review.instructions.md'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') -Value '0002-review.instructions.md'
+        $env:AI_CTX_PROFILES = 'previous'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { ctx base review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+        ($out -join "`n") | Should -Match 'unsafe managed projection target'
+        $env:COPILOT_HOME | Should -BeNullOrEmpty
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        Test-Path -LiteralPath $projDir -PathType Container | Should -BeTrue
+    }
+
+    It 'Issue48: linked projection directory fails without writing outside the home' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review'
+        $outside = Join-Path $Script:TestTmp 'outside-instructions'
+        New-Item -ItemType Directory -Path $syntheticHome, $outside -Force | Out-Null
+        New-CtxLink -LinkPath (Join-Path $syntheticHome 'instructions') -RealTarget $outside -Kind 'dir' | Out-Null
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { ctx base review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+        ($out -join "`n") | Should -Match 'unsafe projection directory'
+        Test-Path -LiteralPath (Join-Path $outside 'ctx-profiles') | Should -BeFalse
+    }
+
+    It 'Issue48: malformed manifest fails closed without changing projections' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review'
+        New-Item -ItemType Directory -Path (Join-Path $syntheticHome 'instructions/ctx-profiles') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') -Value '../escape.instructions.md'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { ctx base review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+        ($out -join "`n") | Should -Match 'malformed projection manifest'
+        Test-Path -LiteralPath (Join-Path $Script:TestTmp 'escape.instructions.md') | Should -BeFalse
+    }
+
+    It 'Issue48: stale managed projection is removed on switch to legacy' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        ctx base review | Out-Null
+        $proj = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0002-review.instructions.md'
+        Test-Path -LiteralPath $proj | Should -BeTrue
+
+        # The profile becomes legacy while the same context (and home) stays
+        # selected, so the now-unwanted managed projection must be removed.
+        Remove-Item -LiteralPath (Join-Path $reviewDir 'AGENTS.md') -Force
+        ctx base review | Out-Null
+        Test-Path -LiteralPath $proj | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/.ctx-managed') | Should -BeFalse
+    }
+
+    It 'Issue48: ctx clear preserves the cached projection and clear --all removes the home' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        ctx base review | Out-Null
+        $syntheticHome = $env:COPILOT_HOME
+        $proj = Join-Path $syntheticHome 'instructions/ctx-profiles/0002-review.instructions.md'
+        Test-Path -LiteralPath $proj | Should -BeTrue
+
+        Clear-CtxContext | Out-Null
+        Test-Path -LiteralPath $proj | Should -BeTrue
+
+        ctx base review | Out-Null
+        Clear-CtxContext -All | Out-Null
+        Test-Path -LiteralPath $syntheticHome | Should -BeFalse
+    }
+
+    It 'Issue48: check uses the recorded Mode A despite a selector mismatch' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-canonical-mismatch'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:@profile`nbase:@profile"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'global-user'
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK PASS instruction:0001-review.instructions.md'
+        ($check -join "`n") | Should -Match 'does not match recorded active mode'
+        (ctx check) | Should -BeFalse
+    }
+
+    It 'Issue48: no activation record skips canonical instruction checks' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-canonical-norecord'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "review:@profile`nbase:@profile"
+        Set-Location $proj
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        Reset-CtxActiveRecord
+
+        $check = @(& { ctx check } 3>&1 6>&1)
+        ($check -join "`n") | Should -Match 'CHECK SKIP instruction:0001-review.instructions.md'
+    }
+
+    It 'Issue48: all-canonical Mode A check requires present-empty custom dirs' {
+        if (Test-CtxOldUnixDotnet) {
+            Set-ItResult -Skipped -Because 'all-canonical Mode A requires pwsh/.NET 9+ on Unix'
+            return
+        }
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-canonical-empty'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value 'review:@profile'
+        Set-Location $proj
+        (Import-CtxFile -CtxFile (Join-Path $proj '.ctx')) | Should -BeTrue
+
+        Test-Path Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -BeTrue
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be ''
+        (ctx check) | Should -BeTrue
+        Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
+        $check = @(& { ctx check } *>&1)
+        ($check -join "`n") | Should -Match 'CHECK FAIL COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+    }
+
+    It 'Issue48: ctx current does not add projection listings' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        ctx base review | Out-Null
+
+        $out = @(& { Show-CtxCurrent } 3>&1 6>&1)
+        ($out -join "`n") | Should -Not -Match 'instructions\.md'
+    }
+
+    It 'Issue48: ctx current distinguishes present-empty from unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS' {
+        if (Test-CtxOldUnixDotnet) {
+            Set-ItResult -Skipped -Because 'all-canonical Mode A requires pwsh/.NET 9+ on Unix'
+            return
+        }
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        ctx review | Out-Null
+
+        $out = @(& { Show-CtxCurrent } 6>&1)
+        ($out -join "`n") | Should -Match 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS='
+        ($out -join "`n") | Should -Match '<present-empty>'
+
+        Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
+        $out = @(& { Show-CtxCurrent } 6>&1)
+        ($out -join "`n") | Should -Match '<unset>'
+    }
+
+    It 'Issue48: legacy-only activation preserves an empty user instructions directory' {
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'security'
+        New-Item -ItemType Directory -Path (Join-Path $syntheticHome 'instructions') -Force | Out-Null
+
+        ctx security | Out-Null
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions') -PathType Container | Should -BeTrue
+    }
+
+    It 'Issue48: legacy-only activation does not reject an unrelated linked instructions path without a manifest' {
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'security'
+        $outside = Join-Path $Script:TestTmp 'outside-instructions'
+        New-Item -ItemType Directory -Path $syntheticHome, $outside -Force | Out-Null
+        New-CtxLink -LinkPath (Join-Path $syntheticHome 'instructions') -RealTarget $outside -Kind 'dir' | Out-Null
+
+        ctx security | Out-Null
+        Test-CtxIsLink -Path (Join-Path $syntheticHome 'instructions') | Should -BeTrue
+    }
+
+    It 'Issue48: legacy-only activation with an existing ctx manifest removes only stale managed projections' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        ctx base review | Out-Null
+        $syntheticHome = $env:COPILOT_HOME
+        $proj = Join-Path $syntheticHome 'instructions/ctx-profiles/0002-review.instructions.md'
+        Test-Path -LiteralPath $proj | Should -BeTrue
+
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $pdir = Join-Path $Script:TestTmp 'project-legacy-reuse'
+        New-Item -ItemType Directory -Path $pdir -Force | Out-Null
+        $securityDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/security'
+        Set-Content -LiteralPath (Join-Path $pdir '.ctx') -Value "security:$securityDir`nhome:$syntheticHome"
+        Import-CtxFile -CtxFile (Join-Path $pdir '.ctx') | Out-Null
+
+        Test-Path -LiteralPath $proj | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'skills') -PathType Container | Should -BeTrue
+    }
+
+    It 'Issue48: ctx check skips projections when no canonical entries and no manifest exist' {
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-legacy-check'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $securityDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/security'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "security:$securityDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        Set-Location $proj
+
+        $out = @(& { Test-CtxActivation } 6>&1)
+        $out[-1] | Should -BeTrue
+    }
+
+    It 'Issue48: ctx check fails on a malformed ctx-managed manifest with zero canonical entries' {
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-legacy-check-malformed'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $securityDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/security'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "security:$securityDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/.ctx-managed') -Value 'bad name'
+        Set-Location $proj
+
+        $out = @(& { Test-CtxActivation } 6>&1)
+        $out[-1] | Should -BeFalse
+        ($out -join "`n") | Should -Match 'CHECK FAIL instruction:manifest'
+    }
+
+    It 'Issue48: ctx check fails on a stale ctx-managed manifest with zero canonical entries' {
+        New-CtxTestProfile -Name 'security' -Skill 'security-skill' | Out-Null
+        $proj = Join-Path $Script:TestTmp 'project-legacy-check-stale'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $securityDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/security'
+        Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value "security:$securityDir"
+        Import-CtxFile -CtxFile (Join-Path $proj '.ctx') | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/.ctx-managed') -Value '0001-review.instructions.md'
+        Set-Location $proj
+
+        $out = @(& { Test-CtxActivation } 6>&1)
+        $out[-1] | Should -BeFalse
+        ($out -join "`n") | Should -Match 'stale projection'
+    }
+
+    It 'Issue48: projection transaction fails closed when a later source is missing' {
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $missing = Join-Path $Script:TestTmp 'missing-source'
+        New-Item -ItemType Directory -Path $missing -Force | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review+arch'
+        $entries = @(
+            [PSCustomObject]@{ Order = 1; Label = 'review'; Path = $reviewDir },
+            [PSCustomObject]@{ Order = 2; Label = 'arch'; Path = $missing }
+        )
+
+        $caught = $null
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            $null = @(& { Set-CtxCanonicalInstructions -HomeDir $syntheticHome -Entries $entries } *>&1)
+        } catch {
+            $caught = $_
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+
+        $caught.Exception.Message | Should -Match 'could not read projection source'
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0001-review.instructions.md') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0002-arch.instructions.md') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles') -Force -Filter '.ctx-txn.*' -ErrorAction SilentlyContinue).Count | Should -Be 0
+    }
+
+    It 'Issue48: projection transaction retry succeeds after the source is fixed' {
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $missing = Join-Path $Script:TestTmp 'missing-source'
+        New-Item -ItemType Directory -Path $missing -Force | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review+arch'
+        $entries = @(
+            [PSCustomObject]@{ Order = 1; Label = 'review'; Path = $reviewDir },
+            [PSCustomObject]@{ Order = 2; Label = 'arch'; Path = $missing }
+        )
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            $null = @(& { Set-CtxCanonicalInstructions -HomeDir $syntheticHome -Entries $entries } *>&1)
+        } catch {
+            # Expected: the second source is still missing.
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+
+        Set-Content -LiteralPath (Join-Path $missing 'AGENTS.md') -Value '# arch'
+        Set-CtxCanonicalInstructions -HomeDir $syntheticHome -Entries $entries
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0001-review.instructions.md') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0002-arch.instructions.md') | Should -BeTrue
+        ((Get-Content -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') -Raw).Trim() -replace "`r`n", "`n") | Should -Be "0001-review.instructions.md`n0002-arch.instructions.md"
+        @(Get-ChildItem -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles') -Force -Filter '.ctx-txn.*' -ErrorAction SilentlyContinue).Count | Should -Be 0
+    }
+
+    It 'Issue48: an interrupted projection transaction is recoverable on retry' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n")) | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review+arch'
+        $projDir = Join-Path $syntheticHome 'instructions/ctx-profiles'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+
+        # Simulate a crash after the union manifest was written and one target
+        # replaced: the manifest still covers the old stale name plus both
+        # desired names, and a leftover per-transaction staging directory
+        # remains.
+        Set-Content -LiteralPath (Join-Path $projDir '.ctx-managed') -Value "0002-review.instructions.md`n0001-old.instructions.md`n0003-arch.instructions.md"
+        Set-Content -LiteralPath (Join-Path $projDir '0002-review.instructions.md') -Value 'old review'
+        Set-Content -LiteralPath (Join-Path $projDir '0001-old.instructions.md') -Value 'old stale'
+        Set-Content -LiteralPath (Join-Path $projDir '0003-arch.instructions.md') -Value 'old arch'
+        New-Item -ItemType Directory -Path (Join-Path $projDir '.ctx-txn.crashed') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $projDir '.ctx-txn.crashed/0002-review.instructions.md') -Value 'partial'
+
+        ctx base review arch | Out-Null
+        Assert-CtxFileBytes -Path (Join-Path $projDir '0002-review.instructions.md') -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")))
+        Assert-CtxFileBytes -Path (Join-Path $projDir '0003-arch.instructions.md') -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n")))
+        Test-Path -LiteralPath (Join-Path $projDir '0001-old.instructions.md') | Should -BeFalse
+        ((Get-Content -LiteralPath (Join-Path $projDir '.ctx-managed') -Raw).Trim() -replace "`r`n", "`n") | Should -Be "0002-review.instructions.md`n0003-arch.instructions.md"
+        # A crashed transaction directory is never swept; it is ignored safely.
+        Test-Path -LiteralPath (Join-Path $projDir '.ctx-txn.crashed') -PathType Container | Should -BeTrue
+    }
+
+    It 'Issue48: ordinary managed projection files update on reactivation' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        ctx base review | Out-Null
+        $proj = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles/0002-review.instructions.md'
+        Assert-CtxFileBytes -Path $proj -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")))
+
+        $reviewDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review'
+        Set-Content -LiteralPath (Join-Path $reviewDir 'AGENTS.md') -Value '# review v2' -NoNewline
+        ctx base review | Out-Null
+        Assert-CtxFileBytes -Path $proj -Expected (Get-CtxProjectionBytes ([System.Text.Encoding]::UTF8.GetBytes("# review v2")))
+        Test-CtxIsLink -Path $proj | Should -BeFalse
+    }
+
+    It 'Issue48: an unrelated .ctx.tmp.keep file survives activation and retry' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review'
+        $projDir = Join-Path $syntheticHome 'instructions/ctx-profiles'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $projDir '.ctx.tmp.keep') -Value 'keep me' -NoNewline
+
+        ctx base review | Out-Null
+        (Get-Content -LiteralPath (Join-Path $projDir '.ctx.tmp.keep') -Raw) | Should -Be 'keep me'
+
+        $reviewDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review'
+        Set-Content -LiteralPath (Join-Path $reviewDir 'AGENTS.md') -Value '# review v2' -NoNewline
+        ctx base review | Out-Null
+        (Get-Content -LiteralPath (Join-Path $projDir '.ctx.tmp.keep') -Raw) | Should -Be 'keep me'
+        @(Get-ChildItem -LiteralPath $projDir -Force -Filter '.ctx-txn.*' -ErrorAction SilentlyContinue).Count | Should -Be 0
+    }
+
+    It 'Issue48: stale prune failure retains the expanded manifest and never deletes directory contents' {
+        New-CtxTestProfile -Name 'base' | Out-Null
+        New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n")) | Out-Null
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review'
+        $projDir = Join-Path $syntheticHome 'instructions/ctx-profiles'
+        New-Item -ItemType Directory -Path (Join-Path $projDir '0001-old.instructions.md') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $projDir '0001-old.instructions.md/inner.txt') -Value 'precious' -NoNewline
+        Set-Content -LiteralPath (Join-Path $projDir '.ctx-managed') -Value "0001-old.instructions.md`n0002-review.instructions.md"
+        Set-Content -LiteralPath (Join-Path $projDir '0002-review.instructions.md') -Value 'old review'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { ctx base review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+
+        ($out -join "`n") | Should -Match 'refusing to remove non-regular stale projection'
+        # The expanded union manifest is retained so a retry remains possible.
+        ((Get-Content -LiteralPath (Join-Path $projDir '.ctx-managed') -Raw).Trim() -replace "`r`n", "`n") | Should -Be "0001-old.instructions.md`n0002-review.instructions.md"
+        # Directory contents were never recursively deleted.
+        (Get-Content -LiteralPath (Join-Path $projDir '0001-old.instructions.md/inner.txt') -Raw) | Should -Be 'precious'
+        # No transaction staging directory is left behind.
+        @(Get-ChildItem -LiteralPath $projDir -Force -Filter '.ctx-txn.*' -ErrorAction SilentlyContinue).Count | Should -Be 0
+    }
+
+    It 'Issue48: case-only projection label transition under a shared home removes the stale old-case projection' {
+        if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+            Set-ItResult -Skipped -Because 'case-insensitive filesystem: covered by the dedicated Windows alias test'
+            return
+        }
+        New-CtxTestProfile -Name 'base' | Out-Null
+        $reviewDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/Review'
+        New-Item -ItemType Directory -Path $reviewDir -Force | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $reviewDir 'AGENTS.md'), [System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'case-home'
+        New-Item -ItemType Directory -Path $syntheticHome -Force | Out-Null
+        $pdir = Join-Path $Script:TestTmp 'project-case-home'
+        New-Item -ItemType Directory -Path $pdir -Force | Out-Null
+
+        Set-Content -LiteralPath (Join-Path $pdir '.ctx') -Value "base:@profile`nReview:@profile`nhome:$syntheticHome"
+        Import-CtxFile -CtxFile (Join-Path $pdir '.ctx') | Out-Null
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0002-Review.instructions.md') | Should -BeTrue
+
+        # On a case-sensitive filesystem the old-case projection is a distinct
+        # stale file that must be removed, not orphaned, when the label case flips.
+        Rename-Item -LiteralPath $reviewDir -NewName 'review'
+        Set-Content -LiteralPath (Join-Path $pdir '.ctx') -Value "base:@profile`nreview:@profile`nhome:$syntheticHome"
+        Import-CtxFile -CtxFile (Join-Path $pdir '.ctx') | Out-Null
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0002-review.instructions.md') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0002-Review.instructions.md') | Should -BeFalse
+        (Get-Content -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') -Raw).Trim() | Should -Be '0002-review.instructions.md'
+        $env:AI_CTX_PROFILES | Should -Be 'base+review'
+    }
+
+    It 'Issue48: case-only projection label alias on a case-insensitive filesystem stays managed (Windows)' {
+        if (-not $IsWindows) {
+            Set-ItResult -Skipped -Because 'requires a case-insensitive filesystem (Windows CI)'
+            return
+        }
+        New-CtxTestProfile -Name 'base' | Out-Null
+        $reviewDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/Review'
+        New-Item -ItemType Directory -Path $reviewDir -Force | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $reviewDir 'AGENTS.md'), [System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'case-home-win'
+        New-Item -ItemType Directory -Path $syntheticHome -Force | Out-Null
+        $pdir = Join-Path $Script:TestTmp 'project-case-home-win'
+        New-Item -ItemType Directory -Path $pdir -Force | Out-Null
+
+        Set-Content -LiteralPath (Join-Path $pdir '.ctx') -Value "base:@profile`nReview:@profile`nhome:$syntheticHome"
+        Import-CtxFile -CtxFile (Join-Path $pdir '.ctx') | Out-Null
+
+        Rename-Item -LiteralPath $reviewDir -NewName 'review'
+        Set-Content -LiteralPath (Join-Path $pdir '.ctx') -Value "base:@profile`nreview:@profile`nhome:$syntheticHome"
+        Import-CtxFile -CtxFile (Join-Path $pdir '.ctx') | Out-Null
+
+        # On a case-insensitive filesystem the desired name is a case-alias of
+        # the existing managed file: it must remain managed (never rejected as
+        # unmanaged) and the stale spelling must not delete the projection.
+        Test-Path -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/0002-review.instructions.md') | Should -BeTrue
+        (Get-Content -LiteralPath (Join-Path $syntheticHome 'instructions/ctx-profiles/.ctx-managed') -Raw).Trim() | Should -Be '0002-review.instructions.md'
+        $env:AI_CTX_PROFILES | Should -Be 'base+review'
+    }
+
+    It 'Issue48: sanitizer replaces each disallowed Unicode character once (café, supplementary)' {
+        Get-CtxSanitizedContextName -Name 'café' | Should -Be 'caf_'
+        Get-CtxSanitizedContextName -Name 'caféñ' | Should -Be 'caf__'
+        Get-CtxSanitizedContextName -Name 'a𝄞b' | Should -Be 'a_b'
+        Get-CtxSanitizedContextName -Name 'my profile' | Should -Be 'my_profile'
+        Get-CtxSanitizedContextName -Name 'hello/world' | Should -Be 'hello_world'
+    }
+
+    It 'Issue48: sanitizer replaces culture-case-folded Unicode letters with _ (Kelvin, dotted I)' {
+        $savedCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        $savedUiCulture = [System.Threading.Thread]::CurrentThread.CurrentUICulture
+        try {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('tr-TR')
+            # Case-sensitive replacement must not let case-folding (Kelvin sign
+            # -> k, dotted capital I -> i) smuggle characters through [A-Za-z].
+            Get-CtxSanitizedContextName -Name "Kſİ" | Should -Be '___'
+            Get-CtxSanitizedContextName -Name "K" | Should -Be '_'
+            Get-CtxSanitizedContextName -Name "İ" | Should -Be '_'
+            Get-CtxSanitizedContextName -Name 'review' | Should -Be 'review'
+        } finally {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $savedCulture
+            [System.Threading.Thread]::CurrentThread.CurrentUICulture = $savedUiCulture
+        }
+    }
+
+    It 'Issue48: canonical detection rejects a FIFO AGENTS.md without blocking (Unix)' {
+        if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+            Set-ItResult -Skipped -Because 'requires mkfifo (Unix)'
+            return
+        }
+        $profileDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/fifo-profile'
+        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+        $fifo = Join-Path $profileDir 'AGENTS.md'
+        & mkfifo $fifo
+
+        # A FIFO AGENTS.md must not make a profile canonical (Bash `[ -f ]` is
+        # false for a FIFO) and must never be opened (reading it would block).
+        Test-CtxProfileCanonical -ProfileDir $profileDir | Should -BeFalse
+        Test-CtxFollowedRegularFile -Path $fifo | Should -BeFalse
+
+        # A symlink to a regular AGENTS.md is still canonical (Bash follows
+        # links); a symlink to a FIFO is not.
+        $symProfile = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/symlink-profile'
+        New-Item -ItemType Directory -Path $symProfile -Force | Out-Null
+        $real = Join-Path $Script:TestTmp 'real-agents.md'
+        Set-Content -LiteralPath $real -Value '# x' -NoNewline
+        New-Item -ItemType SymbolicLink -Path (Join-Path $symProfile 'AGENTS.md') -Target $real | Out-Null
+        Test-CtxProfileCanonical -ProfileDir $symProfile | Should -BeTrue
+
+        $symFifoProfile = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/symfifo-profile'
+        New-Item -ItemType Directory -Path $symFifoProfile -Force | Out-Null
+        $realFifo = Join-Path $Script:TestTmp 'real-fifo'
+        & mkfifo $realFifo
+        New-Item -ItemType SymbolicLink -Path (Join-Path $symFifoProfile 'AGENTS.md') -Target $realFifo | Out-Null
+        Test-CtxProfileCanonical -ProfileDir $symFifoProfile | Should -BeFalse
+
+        # A regular AGENTS.md is canonical.
+        $regProfile = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/reg-profile'
+        New-Item -ItemType Directory -Path $regProfile -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $regProfile 'AGENTS.md') -Value '# x' -NoNewline
+        Test-CtxProfileCanonical -ProfileDir $regProfile | Should -BeTrue
+    }
+
+    It 'Issue48: a FIFO manifest is rejected without blocking (Unix regular-file predicate)' {
+        if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+            Set-ItResult -Skipped -Because 'requires mkfifo (Unix)'
+            return
+        }
+        New-CtxTestProfile -Name 'base' | Out-Null
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $syntheticHome = Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'base+review'
+        $projDir = Join-Path $syntheticHome 'instructions/ctx-profiles'
+        New-Item -ItemType Directory -Path $projDir -Force | Out-Null
+        $fifo = Join-Path $projDir '.ctx-managed'
+        & mkfifo $fifo
+
+        # The predicate must reject a FIFO (Get-Item reports FileInfo/Normal,
+        # which alone would be indistinguishable from a regular file), and the
+        # manifest must never be opened (reading a FIFO would block).
+        Test-CtxRegularFile -Path $fifo | Should -BeFalse
+        Test-CtxRegularFile -Path $projDir | Should -BeFalse
+        Test-CtxRegularFile -Path (Join-Path $reviewDir 'AGENTS.md') | Should -BeTrue
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { ctx base review } *>&1) } finally { $ErrorActionPreference = $prevEap }
+        ($out -join "`n") | Should -Match 'malformed projection manifest'
+
+        # ctx check also fails closed on the FIFO manifest without blocking.
+        $checkOut = @(& { Write-CtxCheckInstructions -ExpectedHome $syntheticHome -RecordedMode 'synthetic-home' -Entries @([PSCustomObject]@{ Name = '0002-review.instructions.md'; Source = $reviewDir }) } 6>&1)
+        ($checkOut -join "`n") | Should -Match 'CHECK FAIL instruction:manifest'
+    }
+
+    It 'Issue48: old Unix rejects all-canonical Mode A load and repeated auto-load before mutation' {
+        if (-not (Test-CtxOldUnixDotnet)) {
+            Set-ItResult -Skipped -Because 'requires Unix pwsh/.NET 8 or earlier'
+            return
+        }
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $proj = Join-Path $Script:TestTmp 'project-canon-old-unix'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "review:$reviewDir"
+        $env:AI_CTX_PROFILES_COPILOT_MODE = 'synthetic-home'
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $out = @(& { Import-CtxFile -CtxFile $ctxFile } *>&1) } finally { $ErrorActionPreference = $prevEap }
+        ($out -join "`n") | Should -Match 'pwsh/\.NET 9\+ on Unix'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        Test-Path -LiteralPath (Join-Path $proj 'project-canon-old-unix.code-workspace') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review/instructions') | Should -BeFalse
+
+        $Script:CtxAutoLoadDir = $null
+        Set-Location $proj
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $first = @(& { Invoke-CtxAutoLoad } *>&1) } finally { $ErrorActionPreference = $prevEap }
+        ($first -join "`n") | Should -Match 'pwsh/\.NET 9\+ on Unix'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $Script:CtxActiveMode | Should -BeNullOrEmpty
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $second = @(& { Invoke-CtxAutoLoad } *>&1) } finally { $ErrorActionPreference = $prevEap }
+        ($second -join "`n") | Should -Match 'pwsh/\.NET 9\+ on Unix'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        Test-Path -LiteralPath (Join-Path $proj 'project-canon-old-unix.code-workspace') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'review/instructions') | Should -BeFalse
+    }
+
+    It 'Issue48: direct .ctx canonical profile outside the configured profiles root fails atomically' {
+        $outside = Join-Path $Script:TestTmp 'outside-canonical'
+        New-Item -ItemType Directory -Path $outside -Force | Out-Null
+        $sentinel = Join-Path $outside 'AGENTS.md'
+        [System.IO.File]::WriteAllText($sentinel, "# outside canonical`n")
+        $before = [System.IO.File]::ReadAllBytes($sentinel)
+
+        $proj = Join-Path $Script:TestTmp 'project-canon-outside'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "outside:$outside"
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+        $env:COPILOT_SKILLS_DIRS = 'previous-skills'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile $ctxFile } finally { $ErrorActionPreference = $prevEap }
+
+        $result | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'outside the configured profiles root'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        $env:COPILOT_SKILLS_DIRS | Should -Be 'previous-skills'
+        Test-Path -LiteralPath (Join-Path $proj 'project-canon-outside.code-workspace') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'outside') | Should -BeFalse
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($sentinel)) | Should -Be ([Convert]::ToBase64String($before))
+    }
+
+    It 'Issue48: in-root canonical profile symlink whose target escapes the profiles root fails atomically' {
+        $outside = Join-Path $Script:TestTmp 'outside-symlink-target'
+        New-Item -ItemType Directory -Path $outside -Force | Out-Null
+        $sentinel = Join-Path $outside 'AGENTS.md'
+        [System.IO.File]::WriteAllText($sentinel, "# outside symlink target`n")
+        $before = [System.IO.File]::ReadAllBytes($sentinel)
+        $link = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/evil'
+        New-Item -ItemType SymbolicLink -Path $link -Target $outside | Out-Null
+
+        $proj = Join-Path $Script:TestTmp 'project-canon-symlink-escape'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "evil:$link"
+        $env:AI_CTX_PROFILES = 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+        $env:COPILOT_HOME = 'previous-home'
+
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+        try { $result = Import-CtxFile -CtxFile $ctxFile } finally { $ErrorActionPreference = $prevEap }
+
+        $result | Should -BeFalse
+        ($Error | Select-Object -First 1).ToString() | Should -Match 'outside the configured profiles root'
+        $env:AI_CTX_PROFILES | Should -Be 'previous'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+        $env:COPILOT_HOME | Should -Be 'previous-home'
+        Test-Path -LiteralPath (Join-Path $proj 'project-canon-symlink-escape.code-workspace') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $env:AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT 'evil') | Should -BeFalse
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($sentinel)) | Should -Be ([Convert]::ToBase64String($before))
+    }
+
+    It 'Issue48: direct .ctx canonical profile inside the configured root still activates and identifier activation remains compatible' {
+        $baseDir = New-CtxTestProfile -Name 'base'
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        $archDir = New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n"))
+        $ghostDir = New-CtxTestCanonicalProfile -Name 'ghost' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# ghost unselected`n"))
+        New-CtxTestCanonicalSkill -Profile 'review' -Skill 'review-skill'
+        New-CtxTestCanonicalSkill -Profile 'arch' -Skill 'arch-skill'
+        New-CtxTestCanonicalSkill -Profile 'ghost' -Skill 'ghost-skill'
+
+        # Capture every source so activation can be proven read-only.
+        $sources = @(
+            (Join-Path $reviewDir 'AGENTS.md'),
+            (Join-Path $archDir 'AGENTS.md'),
+            (Join-Path $ghostDir 'AGENTS.md'),
+            (Join-Path $reviewDir '.agents/skills/review-skill/SKILL.md'),
+            (Join-Path $archDir '.agents/skills/arch-skill/SKILL.md'),
+            (Join-Path $ghostDir '.agents/skills/ghost-skill/SKILL.md')
+        )
+        $before = @{}
+        foreach ($s in $sources) { $before[$s] = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($s)) }
+
+        $proj = Join-Path $Script:TestTmp 'project-canon-inroot'
+        New-Item -ItemType Directory -Path $proj -Force | Out-Null
+        $ctxFile = Join-Path $proj '.ctx'
+        Set-Content -LiteralPath $ctxFile -Value "base:@profile`nreview:$reviewDir`narch:@profile"
+
+        ctx load $ctxFile | Out-Null
+
+        # Mixed legacy/identifier compatibility is preserved.
+        $env:AI_CTX_PROFILES | Should -Be 'base+review+arch'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $baseDir
+
+        # Projections are deterministic and keyed to selected entry order (base
+        # is legacy, so the canonical entries keep indexes 2 and 3); only the
+        # selected canonical entries appear, never the unselected ghost profile.
+        $projDir = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles'
+        ((@(Get-ChildItem -LiteralPath $projDir -File -Filter '*.instructions.md').Name | Sort-Object) -join "`n") | Should -Be "0002-review.instructions.md`n0003-arch.instructions.md"
+        ((Get-Content -LiteralPath (Join-Path $projDir '.ctx-managed')) -join "`n") | Should -Be "0002-review.instructions.md`n0003-arch.instructions.md"
+        Test-Path -LiteralPath (Join-Path $projDir '0004-ghost.instructions.md') | Should -BeFalse
+
+        # Only the selected profiles' distinct skills are linked; ghost is absent.
+        $skillsHome = Join-Path $env:COPILOT_HOME 'skills'
+        ((@(Get-ChildItem -LiteralPath $skillsHome).Name | Sort-Object) -join "`n") | Should -Be "arch-skill`nreview-skill"
+        (Get-CtxLinkTarget -Path (Join-Path $skillsHome 'review-skill') -Target $null) | Should -Be (Join-Path $reviewDir '.agents/skills/review-skill')
+        (Get-CtxLinkTarget -Path (Join-Path $skillsHome 'arch-skill') -Target $null) | Should -Be (Join-Path $archDir '.agents/skills/arch-skill')
+        Test-Path -LiteralPath (Join-Path $skillsHome 'ghost-skill') | Should -BeFalse
+
+        # Sources are byte-identical after activation.
+        foreach ($s in $sources) {
+            [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($s)) | Should -Be $before[$s]
+        }
+    }
+
+    It 'Issue48: an intermediate in-root symlink followed by .. is not approved as in-root (filesystem order)' {
+        $outsideDir = Join-Path $Script:TestTmp 'outside-escape/dir'
+        $outsideProfile = Join-Path $Script:TestTmp 'outside-escape/outside-profile'
+        New-Item -ItemType Directory -Path $outsideDir, $outsideProfile -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $outsideProfile 'AGENTS.md'), "# outside`n")
+        $link = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/escape-link'
+        New-Item -ItemType SymbolicLink -Path $link -Target $outsideDir | Out-Null
+
+        # Filesystem order resolves escape-link -> outside/dir, then .. -> the
+        # outside parent; the lexical collapse would wrongly land back in root.
+        $crafted = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/escape-link/../outside-profile'
+        Test-CtxCanonicalProfileWithinRoot -ProfileDir $crafted | Should -BeFalse
+        (Get-CtxPhysicalPath -Path $crafted) | Should -Be $outsideProfile
+
+        # Control: a legitimate in-root canonical profile is still approved.
+        $reviewDir = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+        Test-CtxCanonicalProfileWithinRoot -ProfileDir $reviewDir | Should -BeTrue
+    }
+
+    It 'Issue48: a symlink loop in the profile path fails closed without recursing indefinitely' {
+        $linkA = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/loop-a'
+        $linkB = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/loop-b'
+        New-Item -ItemType SymbolicLink -Path $linkA -Target $linkB | Out-Null
+        New-Item -ItemType SymbolicLink -Path $linkB -Target $linkA | Out-Null
+
+        (Get-CtxPhysicalPath -Path $linkA) | Should -BeNullOrEmpty
+        Test-CtxCanonicalProfileWithinRoot -ProfileDir $linkA | Should -BeFalse
     }
 
 }
