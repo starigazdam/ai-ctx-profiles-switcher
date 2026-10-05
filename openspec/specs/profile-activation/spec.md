@@ -2,13 +2,13 @@
 
 ## Purpose
 
-`ctx <profile> [profile...]` activates one or more named profiles into the current shell session by setting `AI_CTX_PROFILES` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. `ctx clear` / `ctx clear --all` tear that activation down (and optionally remove the generated artifacts), and `ctx current` reports what is active. All profile names resolve against the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles`), never against arbitrary paths.
+`ctx <profile> [profile...]` activates one or more named profiles into the current shell session by setting `AI_CTX_PROFILES` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. `ctx clear` / `ctx clear --all` tear that activation down (and optionally remove the generated artifacts), and `ctx current` reports what is active. Profile names resolve beneath `$AI_CTX_PROFILES_CONFIG_ROOT/profiles`; an explicitly configured `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` may add one more trusted physical root. Names never resolve against arbitrary paths.
 
 ## Requirements
 
 ### Requirement: Manual profile activation
 
-The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`) and setting `AI_CTX_PROFILES` to the profile names joined with `+` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` to the resolved profile directories joined with `,`. Resolution SHALL reject identifiers that escape the profiles root, such as `.`, `..`, or paths containing separators.
+The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`). When `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is set, it SHALL be an absolute, existing directory other than a filesystem root; it adds a second trusted root and is searched only when no matching candidate exists in the primary root. Each identifier's physical target SHALL be an immediate child of one of the physically resolved trusted roots. The system SHALL set `AI_CTX_PROFILES` to profile names joined with `+` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` to resolved profile directories joined with `,`. Resolution SHALL reject identifiers that escape all trusted roots, such as `.`, `..`, or paths containing separators.
 
 #### Scenario: Activate a single profile
 
@@ -20,15 +20,30 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 - **WHEN** a user runs `ctx coding azure` and both `coding` and `azure` directories exist under the profiles root
 - **THEN** `AI_CTX_PROFILES` is set to `coding+azure` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` lists both resolved directories in invocation order, joined with `,`
 
+#### Scenario: Profile under an opted-in external root is activated
+
+- **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` names an existing absolute directory and a requested profile exists only as an immediate child of that physical root
+- **THEN** the profile is activated using its physical directory, while the configured profiles root remains available and takes precedence for same-name profiles
+
+#### Scenario: Invalid external root is rejected before state changes
+
+- **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is relative, missing, not a directory, or resolves to the filesystem root
+- **THEN** activation errors before changing the active context
+
+#### Scenario: Profile symlink outside all trusted roots is rejected
+
+- **WHEN** a profile entry beneath either configured root physically resolves outside every trusted root
+- **THEN** activation errors before changing the active context
+
 #### Scenario: Unknown profile is rejected
 
-- **WHEN** a user runs `ctx nonexistent` and no `nonexistent` directory exists under the profiles root
+- **WHEN** a user runs `ctx nonexistent` and no `nonexistent` directory exists under either the configured or opted-in external profiles root
 - **THEN** activation errors with a non-zero exit and a message that names the unknown profile, and does not set `AI_CTX_PROFILES` or `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
 
 #### Scenario: Traversal identifier is rejected
 
 - **WHEN** a user runs `ctx ../escape` (or any identifier containing a path separator, `.`, or `..`)
-- **THEN** activation errors with a non-zero exit and does not resolve a directory outside the profiles root
+- **THEN** activation errors with a non-zero exit and does not resolve a directory outside any trusted profiles root
 
 #### Scenario: Case-insensitive duplicate profiles are rejected before any state change
 

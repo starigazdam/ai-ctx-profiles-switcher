@@ -20,10 +20,15 @@ The system SHALL parse a `.ctx` file as lines of the form `<name>:<path>`. Blank
 - **WHEN** a `.ctx` entry has a relative path and a user loads the file
 - **THEN** the path resolves against the directory containing the `.ctx` file, not the current working directory
 
-#### Scenario: @profile resolves the name under the profiles root
+#### Scenario: @profile resolves the name under a trusted profiles root
 
 - **WHEN** a `.ctx` entry uses the value `@profile`
-- **THEN** the entry name is resolved under the profiles root with the same identifier rules and traversal/symlink-escape protection as manual profile activation
+- **THEN** the entry name is resolved under the configured profiles root, or the explicitly configured external profiles root, with the same identifier rules and physical traversal/symlink protection as manual profile activation
+
+#### Scenario: Canonical direct path requires a trusted physical root
+
+- **WHEN** a `.ctx` entry points directly to a canonical profile outside the configured profiles root
+- **THEN** it is accepted only when `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is configured and the physically resolved target is beneath that trusted root; an absolute path alone does not bypass containment, and legacy direct-path behavior remains unchanged
 
 #### Scenario: Duplicate entry labels are rejected case-insensitively
 

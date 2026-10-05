@@ -150,6 +150,8 @@ Examples:
 Environment:
   AI_CTX_PROFILES_CONFIG_ROOT      Root directory containing profiles\
                        (default: $HOME\work\ai-config)
+  AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT
+                       Optional absolute path to a trusted external profiles directory
   CTX_AUTO_LOAD        Set to 0 to disable automatic .ctx loading on cd
 '@ | Write-Host
 }
@@ -375,23 +377,30 @@ function Clear-CtxContext {
 }
 
 function Resolve-CtxProfileIdentifier {
-    # Profiles are identifiers, not paths. The canonical target must remain an
-    # immediate child of the canonical profiles root, including through links.
+    # Profiles are identifiers, not paths. Resolve only immediate children of
+    # the configured root or the explicitly trusted external profiles root.
     param([string]$Name)
     if ([string]::IsNullOrWhiteSpace($Name) -or $Name -in @('.', '..') -or $Name -match '[\\/]') {
         throw "invalid profile identifier `"$Name`""
     }
     $profilesRoot = Join-Path (Get-CtxRoot) 'profiles'
-    $rootCanonical = [System.IO.Path]::GetFullPath($profilesRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-    $candidate = Join-Path $profilesRoot $Name
-    if (-not (Test-Path -LiteralPath $candidate -PathType Container)) {
-        throw "unknown profile `"$Name`" (looked in $profilesRoot)"
-    }
-    $canonical = (Resolve-Path -LiteralPath $candidate).Path.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-    if (-not ([string]::Equals((Split-Path -Parent $canonical), $rootCanonical, [System.StringComparison]::OrdinalIgnoreCase))) {
+    $externalRoot = Get-CtxExternalProfilesRoot
+    $searchRoots = @($profilesRoot)
+    if ($externalRoot) { $searchRoots += $externalRoot }
+    $trustedRoots = @(Get-CtxTrustedProfileRoots)
+    $comparison = if ($IsWindows -or $env:OS -ceq 'Windows_NT') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    foreach ($searchRoot in $searchRoots) {
+        $candidate = Join-Path $searchRoot $Name
+        if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { continue }
+        $canonical = Get-CtxPhysicalPath -Path $candidate
+        if (-not $canonical) { throw "invalid profile identifier `"$Name`"" }
+        $parent = Split-Path -Parent $canonical
+        foreach ($trustedRoot in $trustedRoots) {
+            if ([string]::Equals($parent, $trustedRoot, $comparison)) { return $canonical }
+        }
         throw "invalid profile identifier `"$Name`""
     }
-    return $canonical
+    throw "unknown profile `"$Name`" (looked in $($searchRoots -join ', '))"
 }
 
 function ctx {
@@ -779,22 +788,57 @@ function Get-CtxPhysicalPath {
     return $current
 }
 
-function Test-CtxCanonicalProfileWithinRoot {
-    # Returns $true only when $ProfileDir physically resolves to a strict
-    # descendant of the configured profiles root. Symlinks are followed in
-    # both paths, so an in-root link whose target escapes the root is
-    # rejected; the separator-safe comparison rejects textual-prefix sibling
-    # paths. Case-insensitive on Windows, ordinal elsewhere (issue #48).
-    param([string]$ProfileDir)
+function Get-CtxExternalProfilesRoot {
+    if (-not $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT) { return $null }
+    $configured = $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT
+    $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
+    $isAbsolute = [System.IO.Path]::IsPathRooted($configured)
+    if ($isWindowsLike) {
+        $isAbsolute = ($configured -match '^[A-Za-z]:[\\/]') -or ($configured -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+')
+    }
+    if (-not $isAbsolute) {
+        throw 'AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT must be an absolute path'
+    }
+    if (-not (Test-Path -LiteralPath $configured -PathType Container)) {
+        throw "external profiles root is not a directory: $configured"
+    }
+    $canonical = Get-CtxPhysicalPath -Path $configured
+    if (-not $canonical) { throw "external profiles root cannot be physically resolved: $configured" }
+    $filesystemRoot = [System.IO.Path]::GetPathRoot($canonical)
+    if ([string]::Equals($canonical, $filesystemRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'external profiles root cannot be the filesystem root'
+    }
+    return $canonical
+}
+
+function Get-CtxTrustedProfileRoots {
+    $roots = @()
     $profilesRoot = Join-Path (Get-CtxRoot) 'profiles'
-    $rootResolved = Get-CtxPhysicalPath -Path $profilesRoot
+    if (Test-Path -LiteralPath $profilesRoot -PathType Container) {
+        $canonical = Get-CtxPhysicalPath -Path $profilesRoot
+        if (-not $canonical) { throw "configured profiles root cannot be physically resolved: $profilesRoot" }
+        $roots += $canonical
+    }
+    $externalRoot = Get-CtxExternalProfilesRoot
+    if ($externalRoot) { $roots += $externalRoot }
+    return $roots
+}
+
+function Test-CtxCanonicalProfileWithinRoot {
+    # Canonical targets must physically resolve beneath the configured or
+    # explicitly trusted external profiles root. Path-prefix siblings are not
+    # contained; physical resolution follows symlinks and junctions.
+    param([string]$ProfileDir)
     $dirResolved = Get-CtxPhysicalPath -Path $ProfileDir
-    if (-not $rootResolved -or -not $dirResolved) { return $false }
-    $rootTrimmed = $rootResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-    $dirTrimmed = $dirResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    if (-not $dirResolved) { return $false }
     $comparison = if ($IsWindows -or $env:OS -ceq 'Windows_NT') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
-    if ([string]::Equals($dirTrimmed, $rootTrimmed, $comparison)) { return $false }
-    return $dirTrimmed.StartsWith($rootTrimmed + [System.IO.Path]::DirectorySeparatorChar, $comparison)
+    foreach ($rootResolved in @(Get-CtxTrustedProfileRoots)) {
+        $rootTrimmed = $rootResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        $dirTrimmed = $dirResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        if ([string]::Equals($dirTrimmed, $rootTrimmed, $comparison)) { continue }
+        if ($dirTrimmed.StartsWith($rootTrimmed + [System.IO.Path]::DirectorySeparatorChar, $comparison)) { return $true }
+    }
+    return $false
 }
 
 function Test-CtxValidProjectionName {
@@ -1862,6 +1906,7 @@ function Parse-CtxFile {
     # Side-effect-free .ctx parser shared by Import-CtxFile and Test-CtxActivation.
     # It validates all labels/targets before either caller changes state.
     param([string]$CtxFile)
+    $null = Get-CtxExternalProfilesRoot
     $dirOfFile = Split-Path -Parent $CtxFile
     $names = @(); $dirs = @(); $seenLabels = @{}; $seenTargets = @{}; $homeOverride = $null; $noAutoLoad = $false
     foreach ($rawLine in Get-Content -LiteralPath $CtxFile) {
@@ -2523,16 +2568,22 @@ function Get-CtxSubdirName {
     }
 }
 
+function Get-CtxProfileName {
+    $names = @(Get-CtxSubdirName (Join-Path (Get-CtxRoot) 'profiles'))
+    $externalRoot = Get-CtxExternalProfilesRoot
+    if ($externalRoot) { $names += Get-CtxSubdirName $externalRoot }
+    return $names | Sort-Object -Unique
+}
+
 Register-ArgumentCompleter -CommandName ctx -ScriptBlock {
     param($wordToComplete, $commandAst)
 
-    $root = Get-CtxRoot
     $elements = $commandAst.CommandElements
     # elements[0] is 'ctx' itself; count how many positional args precede current one.
     $argIndex = $elements.Count - 1
 
     if ($argIndex -le 1) {
-        $candidates = @('current', 'clear', 'skills', 'load') + (Get-CtxSubdirName (Join-Path $root 'profiles'))
+        $candidates = @('current', 'clear', 'skills', 'load') + (Get-CtxProfileName)
     } elseif ($argIndex -eq 2 -and $elements[1].Extent.Text -eq 'clear') {
         $candidates = @('--all')
     } elseif ($argIndex -ge 2 -and $elements[1].Extent.Text -eq 'load') {
@@ -2549,7 +2600,7 @@ Register-ArgumentCompleter -CommandName ctx -ScriptBlock {
         }
         return
     } else {
-        $candidates = Get-CtxSubdirName (Join-Path $root 'profiles')
+        $candidates = Get-CtxProfileName
     }
 
     $candidates |

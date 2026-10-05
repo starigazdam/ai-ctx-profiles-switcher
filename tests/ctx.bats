@@ -20,7 +20,7 @@ setup() {
     # Repo root, for fixtures under examples/.
     export REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
 
-    unset AI_CTX_PROFILES AI_CONTEXT AI_CONFIG_ROOT CTX_HOMES_ROOT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME COPILOT_SKILLS_DIRS CTX_AUTO_LOAD
+    unset AI_CTX_PROFILES AI_CONTEXT AI_CONFIG_ROOT CTX_HOMES_ROOT COPILOT_CUSTOM_INSTRUCTIONS_DIRS COPILOT_HOME COPILOT_SKILLS_DIRS CTX_AUTO_LOAD AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT
     unset AI_CTX_PROFILES_COPILOT_MODE
     unset _ctx_auto_load_dir
     unset _ctx_skills_dirs_owned
@@ -1320,6 +1320,8 @@ EOF
 @test "manual and @profile traversal cannot escape profiles before state changes" {
     _make_profile review
     mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/escaped"
+    mkdir -p "$TEST_TMP/trusted-external-profiles"
+    export AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT="$TEST_TMP/trusted-external-profiles"
     export AI_CTX_PROFILES=previous
     export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
 
@@ -3607,4 +3609,85 @@ _make_canonical_skill() {
     [[ "$output" == *"proj=0001-review.instructions.md"* ]]
     [[ "$output" == *"manifest=0001-review.instructions.md"* ]]
     [[ "$output" != *"\\"* ]]
+}
+
+@test "opt-in external profile root accepts canonical aliases and direct paths" {
+    _make_profile team
+    local external_root="$TEST_TMP/external-profiles"
+    local external_profile="$external_root/task-scaffold"
+    mkdir -p "$external_profile"
+    printf '# task scaffold instructions\n' > "$external_profile/AGENTS.md"
+    ln -s "$external_profile" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/task-scaffold"
+    export AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT="$external_root"
+
+    local proj="$TEST_TMP/project-external-profile"
+    mkdir -p "$proj"
+    printf 'team:@profile\ntask-scaffold:@profile\n' > "$proj/.ctx"
+    local status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/external-alias.out" 2>&1 || status=$?
+    [ "$status" -eq 0 ]
+    [ "$AI_CTX_PROFILES" = "team+task-scaffold" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/team" ]
+    [ -f "$COPILOT_HOME/instructions/ctx-profiles/0002-task-scaffold.instructions.md" ]
+    cd "$proj"
+    status=0
+    ctx check >"$TEST_TMP/external-check.out" 2>&1 || status=$?
+    [ "$status" -eq 0 ]
+    [[ "$(<"$TEST_TMP/external-check.out")" == *"ctx check: PASS"* ]]
+
+    local direct_proj="$TEST_TMP/project-external-direct-path"
+    mkdir -p "$direct_proj"
+    printf 'team:%s\ntask-scaffold:%s\n' "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/team" "$external_profile" > "$direct_proj/.ctx"
+    status=0
+    _ctx_load_ctx_file "$direct_proj/.ctx" >"$TEST_TMP/external-direct.out" 2>&1 || status=$?
+    [ "$status" -eq 0 ]
+    [ "$AI_CTX_PROFILES" = "team+task-scaffold" ]
+}
+
+@test "external profile allowlist rejects untrusted links and invalid roots without mutation" {
+    _make_profile review
+    local trusted_root="$TEST_TMP/trusted-profiles"
+    local untrusted_profile="$TEST_TMP/untrusted/task-scaffold"
+    mkdir -p "$trusted_root" "$untrusted_profile"
+    printf '# untrusted\n' > "$untrusted_profile/AGENTS.md"
+    ln -s "$untrusted_profile" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/evil"
+    export AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT="$trusted_root"
+    export AI_CTX_PROFILES=previous
+    export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    export COPILOT_HOME=previous-home
+
+    local status=0
+    ctx evil >"$TEST_TMP/external-untrusted.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/external-untrusted.out")" == *"invalid profile identifier"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+
+    local proj="$TEST_TMP/project-untrusted-direct-canonical"
+    mkdir -p "$proj"
+    printf 'evil:%s\n' "$untrusted_profile" > "$proj/.ctx"
+    status=0
+    _ctx_load_ctx_file "$proj/.ctx" >"$TEST_TMP/external-untrusted-direct.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/external-untrusted-direct.out")" == *"outside the configured profiles root"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+
+    export AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT="$TEST_TMP/missing-profiles-root"
+    status=0
+    ctx review >"$TEST_TMP/external-missing-root.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/external-missing-root.out")" == *"external profiles root"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ "$COPILOT_HOME" = previous-home ]
+
+    export AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT="relative/profiles"
+    status=0
+    ctx review >"$TEST_TMP/external-relative-root.out" 2>&1 || status=$?
+    [ "$status" -ne 0 ]
+    [[ "$(<"$TEST_TMP/external-relative-root.out")" == *"must be an absolute path"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
 }
