@@ -3983,3 +3983,35 @@ _setup_check_home() {
     [ "$(cksum "$manifest")" = "$before_manifest" ]
     [ "$(cksum "$projection")" = "$before_projection" ]
 }
+
+@test "Issue67: ctx current fails when the missing .NET engine DLL path does not exist" {
+    # The shell adapter must delegate `current` to the .NET 10 engine named by
+    # CTX_ENGINE_DLL. A missing DLL is a hard failure with no old-shell
+    # fallback, even when no profile is active.
+    local missing_dll="$TEST_TMP/missing-engine/no-such-ctx-engine.dll"
+    [ ! -e "$missing_dll" ]
+
+    local prior_set=0 prior_value=""
+    if [ -n "${CTX_ENGINE_DLL+x}" ]; then
+        prior_set=1
+        prior_value="$CTX_ENGINE_DLL"
+    fi
+    export CTX_ENGINE_DLL="$missing_dll"
+
+    local status=0
+    ctx current >"$TEST_TMP/engine-missing.out" 2>&1 || status=$?
+
+    if [ "$prior_set" -eq 1 ]; then
+        export CTX_ENGINE_DLL="$prior_value"
+    else
+        unset CTX_ENGINE_DLL
+    fi
+
+    local out
+    out="$(<"$TEST_TMP/engine-missing.out")"
+
+    [ "$status" -ne 0 ]
+    [[ "$out" != *"No active AI context."* ]]
+    [[ "$out" == *"$missing_dll"* ]]
+    [[ "${out,,}" == *"engine"* ]]
+}
