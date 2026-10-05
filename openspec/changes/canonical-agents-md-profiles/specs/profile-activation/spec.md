@@ -4,7 +4,7 @@
 
 ### Requirement: Manual profile activation
 
-The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`) and setting `AI_CTX_PROFILES` to the profile names joined with `+`. In Mode A, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` SHALL contain the resolved directories of selected profiles without a root-level `AGENTS.md`, in invocation order and comma-joined; canonical profile directories SHALL be omitted, and if every selected profile is canonical the variable SHALL be set to the empty string, subject to the runtime guard in `Unix pwsh all-canonical Mode A guard`. Under Modes B and C, canonical selections SHALL be rejected before state changes as specified by `copilot-integration-modes`; successful B/C selections contain only legacy profiles and SHALL list every resolved directory. Resolution SHALL reject identifiers that escape the profiles root, such as `.`, `..`, or paths containing separators.
+The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`) and setting `AI_CTX_PROFILES` to the profile names joined with `+`. In Mode A, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` SHALL contain the resolved directories of selected profiles without a root-level `AGENTS.md`, in invocation order and comma-joined; canonical profile directories SHALL be omitted, and if every selected profile is canonical the variable SHALL be set to the empty string, subject to the runtime guard in `Unix pwsh all-canonical Mode A guard`. Under Modes B and C, canonical selections SHALL be rejected before state changes as specified by `copilot-integration-modes`; successful B/C selections contain only legacy profiles and SHALL list every resolved directory. Each identifier's physical target SHALL be an immediate child of one of the physically resolved trusted roots, and resolution SHALL reject identifiers that escape all trusted roots, such as `.`, `..`, or paths containing separators. When `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is set, it SHALL be an absolute, existing directory other than a filesystem root and adds a second trusted root that is searched only when no matching candidate exists in the primary root; on Unix it SHALL use `/` path separators and SHALL be rejected if it contains a backslash before any path or physical resolution.
 
 #### Scenario: Activate a single profile
 
@@ -15,6 +15,26 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 
 - **WHEN** a user runs `ctx coding azure` and both directories exist under the profiles root without root-level `AGENTS.md` files
 - **THEN** `AI_CTX_PROFILES` is set to `coding+azure` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` lists both resolved directories in invocation order, joined with `,`
+
+#### Scenario: Profile under an opted-in external root is activated
+
+- **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` names an existing absolute directory and a requested profile exists only as an immediate child of that physical root
+- **THEN** the profile is activated using its physical directory, while the configured profiles root remains available and takes precedence for same-name profiles
+
+#### Scenario: Invalid external root is rejected before state changes
+
+- **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is relative, missing, not a directory, or resolves to the filesystem root
+- **THEN** activation errors before changing the active context
+
+#### Scenario: External root containing backslash is rejected on Unix
+
+- **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` contains a backslash and the host is Unix
+- **THEN** activation errors before changing the active context with a message stating that the external root must use `/` separators
+
+#### Scenario: Profile symlink outside all trusted roots is rejected
+
+- **WHEN** a profile entry beneath either configured root physically resolves outside every trusted root
+- **THEN** activation errors before changing the active context
 
 #### Scenario: Unknown profile is rejected
 
