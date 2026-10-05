@@ -38,8 +38,13 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 
 #### Scenario: All-canonical Mode A selection sets custom directories empty
 
-- **WHEN** a user activates only canonical profiles under Mode A on a supported runtime (Bash/zsh, PowerShell on Windows (Windows PowerShell 5.1 or pwsh), or Unix pwsh running .NET 9+)
+- **WHEN** a user activates only canonical profiles under Mode A on a supported runtime (Bash/zsh, Windows pwsh (PowerShell 7+), or Unix pwsh running .NET 9+)
 - **THEN** `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` is set to the empty string; on Unix pwsh running .NET 8 and earlier the selection instead fails as specified by the `Unix pwsh all-canonical Mode A guard` requirement
+
+#### Scenario: Windows PowerShell 5.1 all-canonical present-empty is unverified
+
+- **WHEN** an all-canonical Mode A selection would run under Windows PowerShell 5.1
+- **THEN** present-empty success is not claimed; the behavior remains unverified and is tracked by issue #63
 
 ## ADDED Requirements
 

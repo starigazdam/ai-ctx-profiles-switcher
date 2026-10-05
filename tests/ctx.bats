@@ -3608,3 +3608,87 @@ _make_canonical_skill() {
     [[ "$output" == *"manifest=0001-review.instructions.md"* ]]
     [[ "$output" != *"\\"* ]]
 }
+
+@test "Issue48: zsh projects mixed canonical/legacy instructions and applies collision skip (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+    _make_profile review dup-skill
+    _make_canonical_profile canon $'# canon\n'
+    _make_canonical_skill canon Dup-Skill
+    local log="$TEST_TMP/zsh-mixed-collision.err"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    # Run entirely under zsh -f (no user startup files) to exercise the mixed
+    # ordered projection and case-insensitive collision skip under zsh's
+    # default array indexing.
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        ctx review canon 2>"$3"
+        printf "profiles=%s\n" "$AI_CTX_PROFILES"
+        printf "customdirs=%s\n" "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+        printf "proj2=%s\n" "$([[ -f "$COPILOT_HOME/instructions/ctx-profiles/0002-canon.instructions.md" ]] && echo yes || echo no)"
+        printf "proj1=%s\n" "$([[ -e "$COPILOT_HOME/instructions/ctx-profiles/0001-review.instructions.md" ]] && echo present || echo absent)"
+        printf "legacy_skill=%s\n" "$([[ -e "$COPILOT_HOME/skills/dup-skill" ]] && echo present || echo absent)"
+        printf "canon_skill=%s\n" "$([[ -e "$COPILOT_HOME/skills/Dup-Skill" ]] && echo present || echo absent)"
+        printf "manifest=%s\n" "$(cat "$COPILOT_HOME/instructions/ctx-profiles/.ctx-managed")"
+    ' -- "$CTX_SRC" "$AI_CTX_PROFILES_CONFIG_ROOT" "$log"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"profiles=review+canon"* ]]
+    [[ "$output" == *"customdirs=$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"* ]]
+    [[ "$output" == *"proj2=yes"* ]]
+    [[ "$output" == *"proj1=absent"* ]]
+    [[ "$output" == *"legacy_skill=absent"* ]]
+    [[ "$output" == *"canon_skill=absent"* ]]
+    [[ "$output" == *"manifest=0002-canon.instructions.md"* ]]
+    [[ "$(<"$log")" == *"collision"* ]]
+}
+
+@test "Issue48: zsh Mode B/C canonical preflight rejection leaves state untouched (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+    _make_canonical_profile review $'# review\n'
+    local logbase="$TEST_TMP/zsh-reject"
+
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    # Both B and C must reject canonical selections before any environment
+    # export, workspace write, or home creation, leaving prior state intact.
+    run env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        source "$1"
+        for mode in global-user ephemeral-clean; do
+            export AI_CTX_PROFILES_COPILOT_MODE="$mode"
+            export AI_CTX_PROFILES=previous
+            export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+            export COPILOT_HOME=previous-home
+            export COPILOT_SKILLS_DIRS=previous-skills
+            if ctx review 2>"${3}.${mode}"; then
+                printf "%s_status=unexpected-success\n" "$mode"
+            else
+                printf "%s_status=rejected\n" "$mode"
+            fi
+            printf "%s_profiles=%s\n" "$mode" "$AI_CTX_PROFILES"
+            printf "%s_custom=%s\n" "$mode" "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+            printf "%s_home=%s\n" "$mode" "$COPILOT_HOME"
+            printf "%s_skills=%s\n" "$mode" "$COPILOT_SKILLS_DIRS"
+        done
+    ' -- "$CTX_SRC" "$AI_CTX_PROFILES_CONFIG_ROOT" "$logbase"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"global-user_status=rejected"* ]]
+    [[ "$output" == *"ephemeral-clean_status=rejected"* ]]
+    [[ "$output" == *"global-user_profiles=previous"* ]]
+    [[ "$output" == *"global-user_custom=previous-dirs"* ]]
+    [[ "$output" == *"global-user_home=previous-home"* ]]
+    [[ "$output" == *"global-user_skills=previous-skills"* ]]
+    [[ "$output" == *"ephemeral-clean_profiles=previous"* ]]
+    [[ "$output" == *"ephemeral-clean_custom=previous-dirs"* ]]
+    [[ "$output" == *"ephemeral-clean_home=previous-home"* ]]
+    [[ "$output" == *"ephemeral-clean_skills=previous-skills"* ]]
+    [[ "$(<"$logbase.global-user")" == *"canonical"* ]]
+    [[ "$(<"$logbase.ephemeral-clean")" == *"canonical"* ]]
+    [ ! -d "$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT/review" ]
+}
