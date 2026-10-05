@@ -4,7 +4,7 @@
 
 ### Requirement: Manual profile activation
 
-The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`) and setting `AI_CTX_PROFILES` to the profile names joined with `+`. In Mode A, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` SHALL contain the resolved directories of selected profiles without a root-level `AGENTS.md`, in invocation order and comma-joined; canonical profile directories SHALL be omitted, and if every selected profile is canonical the variable SHALL be set to the empty string, subject to the runtime guard in `Unix pwsh all-canonical Mode A guard`. Under Modes B and C, canonical selections SHALL be rejected before state changes as specified by `copilot-integration-modes`; successful B/C selections contain only legacy profiles and SHALL list every resolved directory. Resolution SHALL reject identifiers that escape the profiles root, such as `.`, `..`, or paths containing separators.
+The system SHALL activate one or more profiles given as `ctx <profile> [profile...]` by resolving each name under the profiles root (`$AI_CTX_PROFILES_CONFIG_ROOT/profiles/<name>`) and setting `AI_CTX_PROFILES` to the profile names joined with `+`. In Mode A, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` SHALL contain the resolved directories of selected profiles without a root-level `AGENTS.md`, in invocation order and comma-joined; canonical profile directories SHALL be omitted, and if every selected profile is canonical the variable SHALL be set to the empty string, subject to the runtime guard in `Unix pwsh all-canonical Mode A guard`. Under Modes B and C, canonical selections SHALL be rejected before state changes as specified by `copilot-integration-modes`; successful B/C selections contain only legacy profiles and SHALL list every resolved directory. Resolution SHALL reject identifiers that escape the profiles root, such as `.`, `..`, or paths containing separators. When `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is configured, on Unix it SHALL use `/` path separators and SHALL be rejected if it contains a backslash before any path or physical resolution.
 
 #### Scenario: Activate a single profile
 
@@ -25,6 +25,11 @@ The system SHALL activate one or more profiles given as `ctx <profile> [profile.
 
 - **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` is relative, missing, not a directory, or resolves to the filesystem root
 - **THEN** activation errors before changing the active context
+
+#### Scenario: External root containing backslash is rejected on Unix
+
+- **WHEN** `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` contains a backslash and the host is Unix
+- **THEN** activation errors before changing the active context with a message stating that the external root must use `/` separators
 
 #### Scenario: Profile symlink outside all trusted roots is rejected
 

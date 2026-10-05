@@ -131,7 +131,10 @@ $env:AI_CTX_PROFILES_CONFIG_ROOT = "C:\path\to\ai-config"      # PowerShell
 Canonical profiles normally must physically resolve beneath
 `$AI_CTX_PROFILES_CONFIG_ROOT/profiles`. To trust canonical profiles from one
 additional location, set `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` to the
-**absolute path of the directory containing those profile directories**:
+**absolute path of the directory containing those profile directories**. On
+Unix the path must use `/` separators; a value containing a backslash is
+rejected, because a backslash is an ordinary filename character rather than a
+separator there:
 
 ```sh
 export AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT="$HOME/src/ai-task-scaffold/profiles"
@@ -342,7 +345,8 @@ activation. Canonical profiles are a Mode A (`synthetic-home`) feature only.
 By default, canonical profiles must physically resolve beneath
 `$AI_CTX_PROFILES_CONFIG_ROOT/profiles`. Set
 `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` to an existing absolute directory to
-explicitly trust one additional set of profile directories. `ctx` still
+explicitly trust one additional set of profile directories. On Unix that path
+must use `/` separators; a backslash-containing value is rejected. `ctx` still
 resolves symlinks physically and rejects traversal or any target outside the
 configured and explicitly trusted roots; an absolute `.ctx` path alone does
 not widen the boundary. Manual profile names are immediate children of one of
