@@ -6,12 +6,14 @@ on:
       - 'ctx.sh'
       - 'ctx.ps1'
       - 'tests/**'
+      - 'openspec/**'
       - '.github/workflows/test.yml'
   pull_request:
     paths:
       - 'ctx.sh'
       - 'ctx.ps1'
       - 'tests/**'
+      - 'openspec/**'
       - '.github/workflows/test.yml'
 
 jobs:
@@ -61,3 +63,17 @@ jobs:
           $cfg.Run.Exit = $true
           $cfg.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $cfg
+
+  openspec-validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate OpenSpec proposals
+        run: npm exec --yes --package=@fission-ai/openspec@1.13.2 -- openspec validate --all --strict

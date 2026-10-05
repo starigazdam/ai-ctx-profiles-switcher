@@ -20,8 +20,10 @@ into the `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` environment variable for the
 current shell session, and exposes the active selection as `AI_CTX_PROFILES`
 (e.g. `review+dotnet+security`).
 
-Available for **bash**, **zsh**, and **PowerShell** (Windows PowerShell 5.1+
-and PowerShell 7+ / pwsh).
+Available for **bash 4+**, **zsh**, and **PowerShell** (Windows PowerShell
+5.1+ and PowerShell 7+ / pwsh). `ctx.sh` already relies on Bash 4+ features
+(`local -A` associative arrays, `mapfile`), so the stock macOS Bash 3.2 is
+not supported — use a newer bash, zsh, or pwsh.
 
 ## Requirements
 
@@ -124,6 +126,31 @@ export AI_CTX_PROFILES_CONFIG_ROOT="/path/to/ai-config"       # bash/zsh
 $env:AI_CTX_PROFILES_CONFIG_ROOT = "C:\path\to\ai-config"      # PowerShell
 ```
 
+### Opt in to an external canonical profiles root
+
+Canonical profiles normally must physically resolve beneath
+`$AI_CTX_PROFILES_CONFIG_ROOT/profiles`. To trust canonical profiles from one
+additional location, set `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` to the
+**absolute path of the directory containing those profile directories**. On
+Unix the path must use `/` separators; a value containing a backslash is
+rejected, because a backslash is an ordinary filename character rather than a
+separator there:
+
+```sh
+export AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT="$HOME/src/ai-task-scaffold/profiles"
+```
+```powershell
+$env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = "C:\path\to\ai-task-scaffold\profiles"
+```
+
+The root must exist and cannot be a filesystem root. `ctx` physically resolves
+both configured roots and profile targets; named profile links and canonical
+`.ctx` targets are accepted only when their targets remain beneath either
+trusted root. Traversal and links outside both roots still fail before context
+state changes. Leaving this variable unset preserves the default root-only
+behavior. A direct `.ctx` path does not bypass this check for canonical
+profiles.
+
 ## Usage
 
 ```sh
@@ -132,6 +159,7 @@ ctx coding azure                # "coding" profile + "azure" profile
 ctx review dotnet security      # profile + multiple profiles
 ctx current                   # show the active profile/profiles/env vars
 ctx check                     # read-only audit against the nearest .ctx file
+ctx skills                    # read-only potential-Copilot-skill discovery inventory
 ctx clear                     # unset AI_CTX_PROFILES / COPILOT_CUSTOM_INSTRUCTIONS_DIRS / COPILOT_HOME
 ctx clear --all                 # remove the current context home and generated artifacts
 ctx load /path/to/.ctx          # explicitly load any .ctx file (bypasses noautoload)
@@ -147,7 +175,7 @@ Profile : review
 Profiles: dotnet, security
 
 AI_CTX_PROFILES=review+dotnet+security
-Mode: synthetic-home
+Mode: A — synthetic-home
 
 COPILOT_HOME=/home/user/.config/ctx/homes/review+dotnet+security
 
@@ -216,6 +244,10 @@ security:./local-instructions
   under `AI_CTX_PROFILES_CONFIG_ROOT/profiles` — the path on each line is used
   directly, so you can point at any folder (including project-local
   instructions that live outside your `ai-config` repo).
+- Canonical `AGENTS.md` profiles are still physically constrained to the
+  configured profiles roots; use the opt-in external root above when that
+  canonical directory lives elsewhere. Legacy direct-path entries are
+  unaffected.
 - Every path is validated to exist; an invalid `.ctx` file leaves the
   previously active context untouched and prints a clear error.
 - An optional `home:<path>` line is a reserved directive, not a
@@ -226,26 +258,31 @@ security:./local-instructions
 
 When your shell prompt renders after a `cd` / `Set-Location` into that
 directory (or any descendant of it), `AI_CTX_PROFILES` (the names joined by `+`)
-and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` (the paths joined by `,`) are set,
-overwriting any previous value. Leaving the directory tree (into a location
-with no `.ctx` file anywhere in its ancestry) automatically clears the
-context.
+is set, overwriting any previous value. `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
+contains only the *legacy* roots of the selection in order — canonical
+`AGENTS.md` roots are omitted — so it is set to the present-empty value when
+every selected entry is canonical (see
+[Canonical profiles](#canonical-profiles-agentsmd)). Leaving the directory tree
+(into a location with no `.ctx` file anywhere in its ancestry) automatically
+clears the context.
 
 ### Skill discovery
 
 Setting `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` makes Copilot CLI load custom
 instructions from your `.ctx` entries, but it does **not** make it discover
 [agent skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills)
-stored in those directories on its own. `ctx` therefore projects a per-context
-`skills/` tree: in Mode A that is the synthetic `COPILOT_HOME` tree below, and
-Modes B/C instead export `COPILOT_SKILLS_DIRS` (see
-[Integration modes](#integration-modes)). Neither mechanism gives *complete* or
-*isolated* skill discovery. `ctx` controls only the `skills/` subtree it
-projects, and `COPILOT_SKILLS_DIRS` is additive to Copilot's built-in
-locations, not an exclusion list. One ancestor `.agents/skills` source was
-verified to keep loading under a `COPILOT_HOME` set outside that ancestor tree
-(below); every documented root loading under a custom `COPILOT_HOME` is not
-claimed.
+stored in those directories on its own. Mode A projects each selected
+profile's contracted skill source — `.github/skills` for legacy profiles and
+`.agents/skills` for canonical `AGENTS.md` profiles (see
+[Canonical profiles](#canonical-profiles-agentsmd)) — into the synthetic
+`<COPILOT_HOME>/skills` tree so those skills are what Copilot CLI — which
+respects `COPILOT_HOME` as a full replacement for `~/.copilot` — sees under
+this context. That projection is not
+a complete skill-discovery or security sandbox: other built-in or configured
+discovery locations (personal `~/.agents/skills`, repository `.github/skills` /
+`.claude/skills`, `COPILOT_SKILLS_DIRS`, or configured `skillDirectories`) may
+still be discovered by Copilot and are not blocked. Modes B/C instead export
+`COPILOT_SKILLS_DIRS` (see [Integration modes](#integration-modes)).
 
 Per the
 [official add-skills docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills)
@@ -299,6 +336,161 @@ the home is recreated on every activation, so the disable would have to be
 repeated each time and is never automated or persisted by `ctx`. In short:
 there is no negative skill-root filter and no ctx-managed durable exclusion.
 
+#### Inspecting potential skill discovery with `ctx skills`
+
+`ctx skills` is a strictly read-only, filesystem/configuration-based inventory
+of the skill directories Copilot *might* discover in the current shell and
+project. It never claims a skill is loaded or invoked — discovering a
+directory is not the same as Copilot loading it — and it never modifies
+settings, files, or the environment, and it never invokes the Copilot CLI
+(no probe is performed). Each candidate is reported once with its normalized,
+deduplicated path, a single classification, and a deterministic,
+deduplicated, comma-joined list of the distinct sources ("origins") that
+yielded it:
+
+The **classification** is the single highest-precedence origin class, chosen
+by `ctx-profile > expected-home > external`:
+
+- **`ctx-profile`** — `.github/skills` of the active context/profile entries
+  (attributable only while the session activation record matches; otherwise
+  attribution is reported as unknown and ctx-owned paths are not guessed).
+- **`expected-home`** — the expected `<COPILOT_HOME>/skills` directory when
+  `COPILOT_HOME` is set.
+- **`external`** — every other source below.
+
+The **origins** list keeps each source distinct (alphabetically sorted), so a
+path found via several sources reports them all rather than collapsing to one
+generic label:
+
+- **`ctx-profile`** — `.github/skills` of the active context/profile entries
+  (as above).
+- **`expected-home`** — the expected `<COPILOT_HOME>/skills` directory (as
+  above).
+- **`copilot-skill-dirs`** — a `COPILOT_SKILLS_DIRS` entry.
+- **`settings-skill-dirs`** — a configured `skillDirectories` entry in a
+  relevant Copilot settings file.
+- **`personal-copilot`** — the personal `~/.copilot/skills` (or
+  `$CTX_COPILOT_DIR/skills`).
+- **`personal-agents`** — the personal `~/.agents/skills`.
+- **`repo-github-skills`** — repository `.github/skills` in the current
+  directory or an ancestor.
+- **`repo-agents-skills`** — repository `.agents/skills` in the current
+  directory or an ancestor.
+- **`repo-claude-skills`** — repository `.claude/skills` in the current
+  directory or an ancestor.
+- **`plugin-skills`** — a detectable `skills` / `.github/skills` directory
+  under an installed Copilot plugin.
+
+Configured-but-missing or inaccessible paths are reported cleanly
+without failing. The inventory explicitly discloses what a filesystem/config
+diagnostic cannot observe (notably another Copilot process's command-line
+arguments and plugin-internal skill locations beyond detectable
+`skills`/`.github/skills` subdirectories).
+
+### Canonical profiles (AGENTS.md)
+
+A resolved profile directory that has a root-level `AGENTS.md` is a
+**canonical** profile; one without it keeps the legacy behavior described
+above. Canonical and legacy profiles can be mixed in one ordered Mode A
+activation. Canonical profiles are a Mode A (`synthetic-home`) feature only.
+
+By default, canonical profiles must physically resolve beneath
+`$AI_CTX_PROFILES_CONFIG_ROOT/profiles`. Set
+`AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` to an existing absolute directory to
+explicitly trust one additional set of profile directories. On Unix that path
+must use `/` separators; a backslash-containing value is rejected. `ctx` still
+resolves symlinks physically and rejects traversal or any target outside the
+configured and explicitly trusted roots; an absolute `.ctx` path alone does
+not widen the boundary. Manual profile names are immediate children of one of
+the trusted roots.
+
+#### Instruction projection
+
+Under Mode A, each selected canonical profile's `AGENTS.md` is projected into
+the synthetic home as
+`<COPILOT_HOME>/instructions/ctx-profiles/<order>-<label>.instructions.md`,
+where:
+
+- `<order>` is the profile's one-based position in the selection, zero-padded
+  to at least four ASCII digits (`0001`, `0002`, ...), so distinct selections
+  never collide.
+- `<label>` is the manual profile identifier or `.ctx` entry label passed
+  through the same cross-shell sanitizer used for home directory names: ASCII
+  letters, digits, `+`, `.`, `_`, and `-` are kept and every other character is
+  replaced with `_`.
+
+The projected file is the exact UTF-8/LF header
+`---\napplyTo: "**"\n---\n\n` followed by the source `AGENTS.md` bytes
+unchanged. Source line endings (CRLF/LF), an optional BOM, and the
+final-newline state are preserved byte-for-byte; an existing YAML-like header
+in `AGENTS.md` is copied as body content and is not parsed or merged. Keep
+canonical instructions self-contained — relative `@file` imports are not
+expanded or rewritten.
+
+`ctx` tracks the generated basenames in a
+`<COPILOT_HOME>/instructions/ctx-profiles/.ctx-managed` manifest. A later
+activation removes only managed projections that are no longer selected and
+never overwrites an unmanaged file; a linked or malformed manifest, an unsafe
+`instructions/` or `instructions/ctx-profiles/` component, and an unmanifested
+desired file all fail the activation before any projection is changed. `ctx
+clear` leaves the cached projections in place; `ctx clear --all` removes the
+selected synthetic home under the existing safety rules.
+
+#### Custom-instruction directories
+
+Canonical roots are omitted from `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`; the
+variable lists only the legacy roots in selection order. When every selected
+profile is canonical the variable is set to the present-empty value (present
+and equal to the empty string, not unset).
+
+#### Skills
+
+Canonical profiles discover skills only from `.agents/skills/<name>`
+directories that contain a regular (non-link) `SKILL.md`. A co-located
+`.github/skills` tree in a canonical profile is ignored. Legacy profiles keep
+using `.github/skills`. Both sources feed the same case-insensitive
+warn-and-skip collision policy: colliding names are skipped on activation and
+reported as `CHECK FAIL` by `ctx check`.
+
+#### Mode B/C and the Unix PowerShell runtime guard
+
+Canonical selections require Mode A. Any selection containing a canonical
+profile under `global-user` or `ephemeral-clean` fails before any environment
+export, workspace write, or Copilot-home creation, naming the profile(s) and
+requiring `synthetic-home`. This applies to manual activation, explicit
+`ctx load`, and `.ctx` auto-loading; a repeated auto-load reports the error
+again rather than suppressing it.
+
+| Runtime | All-canonical Mode A | Mixed / legacy Mode A |
+|---------|----------------------|------------------------|
+| Bash / zsh | present-empty `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | supported |
+| Native-Windows pwsh (the runtime exercised by the repository's Windows Pester CI job; exact PowerShell/.NET version is not logged, so no version-wide PowerShell 7+ claim) | present-empty | supported |
+| Unix pwsh on .NET 9+ | present-empty | supported |
+| Unix pwsh on .NET 8 or earlier | **rejected before mutation** with a pwsh/.NET 9+ requirement | supported |
+| Windows PowerShell 5.1 | **unverified** (tracked by [#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63)) | **not exercised** |
+
+Before .NET 9, Unix PowerShell cannot represent a present-empty environment
+variable (assigning an empty value removes it), so an all-canonical Mode A
+selection on Unix pwsh/.NET 8 and earlier fails before any environment export,
+workspace write, Copilot-home setup/creation, projection write, or
+session-record change, and the previous context stays active. `ctx check`
+keeps the present-empty contract on every runtime and does not accept
+absent-as-empty. Mixed canonical+legacy and legacy-only selections are
+unaffected because their `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` value is
+non-empty.
+
+All-canonical present-empty success is covered by tests that assert that branch
+when run under Bash/zsh, native-Windows `pwsh` (the runtime exercised by the
+repository's Windows Pester CI job; exact PowerShell/.NET version is not logged,
+so no version-wide PowerShell 7+ claim is made), and Unix pwsh on .NET 9+. The
+Unix .NET 9+ present-empty test path is gated by the runtime check, and the
+hosted Unix pwsh/.NET version is not logged, so the hosted run does not
+establish that branch and no specific host version is claimed. Windows
+PowerShell 5.1 all-canonical present-empty behavior remains unverified and is
+tracked by
+[#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63); the
+repository's CI exercises `pwsh`, not Windows PowerShell 5.1.
+
 ### Integration modes
 
 `ctx` supports three Copilot integration modes, selected by the exact,
@@ -306,7 +498,10 @@ case-sensitive `AI_CTX_PROFILES_COPILOT_MODE` environment variable. There is
 no CLI flag and no `.ctx` mode line. The selector is read once per actual
 activation (manual `ctx <profile>...`, `ctx load`, or a real `.ctx`
 auto-load); an invalid non-empty value errors out before any state change.
-Unset or empty means Mode A — today's behavior:
+Unset or empty means Mode A — today's behavior. The selector values are
+unchanged; `ctx current` and `ctx check` report the active mode using the
+consistent letter/name labels `A — synthetic-home`, `B — global-user`, and
+`C — ephemeral-clean`:
 
 | Selector | Mode | `COPILOT_HOME` |
 |----------|------|----------------|
@@ -351,11 +546,15 @@ The existing default: `ctx` builds a synthetic per-context `COPILOT_HOME` at
 `~/.config/ctx/homes/<context>/`, symlinks the shared files/directories back
 to the real Copilot home so auth, settings, MCP servers, and session history
 keep working identically across contexts, and populates the per-context
-`skills/` tree from each resolved entry's `.github/skills`. That projection is
+`skills/` tree from each resolved entry's contracted skill source
+(`.github/skills` for legacy profiles, `.agents/skills` for canonical
+profiles). Canonical profiles additionally project their `AGENTS.md` into
+`instructions/ctx-profiles/` (see
+[Canonical profiles](#canonical-profiles-agentsmd)). That skills projection is
 additive, not exclusive: Copilot CLI also loads personal, project, inherited,
 and plugin/custom skill roots (see [Skill discovery](#skill-discovery)), so a
-context may see more skills than its own. Three limitations are retained —
-this feature does not fix them:
+context may see more skills than its own. Known risks remain; this
+feature does not fix them:
 
 - Copilot's atomic temp-file+rename writes can replace a symlinked file
   (empirically confirmed for `settings.json`), so that context can diverge
@@ -366,6 +565,18 @@ this feature does not fix them:
   `copilot skill disable` is shared across every Mode A context via the single
   `settings.json` symlink, and neither Mode A nor Modes B/C offers a negative
   skill-root filter (see [Skill discovery](#skill-discovery)).
+- **Local TOCTOU gap:** Mode A path checks, including rechecks before creating
+  the synthetic home and before `ctx clear --all` recursively deletes it, are
+  preflight validation only—not race protection. A different local user who
+  can modify an ancestor directory could replace a path component with a
+  symlink/junction after validation and redirect the later creation or
+  deletion. This is a conditional local risk, not a remote attack; same-user
+  and administrator attackers are out of scope. Until this gap is resolved,
+  avoid Mode A when its home path (including a `.ctx` `home:` override) is
+  beneath an ancestor writable by an untrusted user. Modes B/C avoid this
+  specific Mode A create/delete path but are not equivalent replacements: B
+  leaves `COPILOT_HOME` untouched; C uses a unique temporary home and retains
+  it after clear, and is not a security sandbox.
 
 #### Mode B — global-user
 
@@ -379,6 +590,20 @@ unset COPILOT_HOME            # bash/zsh
 ```powershell
 Remove-Item Env:COPILOT_HOME  # PowerShell
 ```
+
+After each successful Mode B activation (manual `ctx <profile>...`, explicit
+`ctx load`, or a real `.ctx` auto-load), if `COPILOT_HOME` is present in the
+environment (including when it is empty), `ctx` prints a warning on stderr
+naming the preserved value — the value itself is never changed:
+
+```
+ctx: warning: global-user mode preserves the existing COPILOT_HOME: "/path/to/home". This may point to a synthetic home from a previous ctx activation.
+```
+
+The warning is informational only: Mode B reads `COPILOT_HOME` to report and
+warn about it, but never modifies it. No warning is emitted when the variable
+is absent, in Modes A/C, on a failed activation, or from read-only commands
+such as `ctx current` / `ctx check`.
 
 Mode B sets/replaces `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` and
 `COPILOT_SKILLS_DIRS` from the active resolved directories.
@@ -431,11 +656,14 @@ and exports `COPILOT_HOME` to point at it:
   symlinked back to the real `~/.copilot`, so authentication, model
   settings, MCP servers, and session history all keep working identically
   to today, shared across every context.
-- **`skills/`** is context-local and populated with symlinks to each
-  resolved directory's `.github/skills/*` subfolders. This is the subtree
-  `ctx` projects; it does **not** restrict what Copilot CLI discovers, which
-  also includes personal, project, inherited, and plugin/custom skill roots
-  (see [Skill discovery](#skill-discovery)).
+- **`skills/`** is context-local and populated only with symlinks to each
+  resolved directory's contracted skill source (`.github/skills/*` for legacy
+  profiles, `.agents/skills/*` for canonical profiles), so this context
+  projects exactly the selected profiles' skills. This controls the synthetic
+  `COPILOT_HOME` view only — it does not hide or block other built-in or
+  configured skill locations Copilot may discover (see
+  [Skill discovery](#skill-discovery)), and it is not a security
+  sandbox.
 - Reactivating a context (re-`cd`-ing into a `.ctx` dir, or re-running
   `ctx <profile>`) is idempotent: unchanged symlinks are left alone, stale
   skill symlinks (from a profile's skill set that has since changed) are
@@ -469,16 +697,18 @@ review:/home/user/work/ai-config/profiles/review
   the directory containing the `.ctx` file unless it's absolute. It does
   **not** need to already exist — `ctx` creates it on demand, exactly like
   the centralized default.
-- For deletion safety, the resolved `home:` path must be a non-root
+- To constrain deletion targets, the resolved `home:` path must be a non-root
   descendant of the user's home directory or `$AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT`. Paths that
   are empty, escape with `..`, point outside those roots, or contain an
-  existing symlink/junction component are rejected before activation. This
-  intentionally means a project tree outside those roots cannot be selected
-  as a custom home; keep the project under `$HOME` if colocating is desired.
+  existing symlink/junction component are rejected during preflight
+  validation. See [Operational notes](#operational-notes) for its TOCTOU
+  limitation. This intentionally means a project tree outside those roots
+  cannot be selected as a custom home; keep the project under `$HOME` if
+  colocating is desired.
 - `ctx clear --all` deletes only the exact `COPILOT_HOME` selected for the
   active context, after repeating the same validation. It refuses empty,
-  root, unselected, or symlink/junction targets and never recursively
-  follows an unsafe path.
+  root, unselected, or symlink/junction targets. These checks are preflight,
+  not race protection; see [Operational notes](#operational-notes).
 - Add the custom directory to that project's `.gitignore` (e.g.
   `.copilot-ctx/`) so the synthetic home never gets committed.
 - This only applies to `.ctx`-file activation. Manually invoking
@@ -497,7 +727,8 @@ tree to repair (see [Integration modes](#integration-modes)).
 
 `ctx` reconciles the context home on every Mode A activation and repairs
 managed links that were replaced by the CLI, protecting shared configuration
-from the CLI's file-replacement behavior. Two Mode A hazards are retained and
+from the CLI's file-replacement behavior. The two reconciliation hazards
+below, as well as the local TOCTOU gap described in the Mode A summary above,
 are **not** fixed by the integration-modes feature:
 
 - Copilot's atomic temp-file+rename writes can replace a symlinked file
@@ -630,17 +861,37 @@ only the first context name plus a `(+2)` suffix for the rest (e.g.
 
 ## Notes
 
-- `ctx.sh` targets bash and zsh; it uses POSIX-compatible constructs (`[ ]`,
-  `local`, `printf`) and passes `shellcheck` with default rules (two
-  intentional `shellcheck disable` comments are documented inline for
-  word-splitting that is required by design).
+- `ctx.sh` targets bash 4+ and zsh; it uses POSIX-compatible constructs (`[ ]`,
+  `local`, `printf`) alongside Bash 4+ features and passes `shellcheck` with
+  default rules (two intentional `shellcheck disable` comments are documented
+  inline for word-splitting that is required by design).
 - `ctx.ps1` passes `PSScriptAnalyzer` with default rules, aside from
   `PSAvoidUsingWriteHost`, which is intentional: `ctx` is an interactive
   status-display command, not a value-returning function meant for pipeline
   composition.
 - Both implementations validate that the AI config root and every profile
   directory exist before exporting anything, and leave any
-  previously active context untouched if validation fails.
+  previously active context untouched if validation fails. A `COPILOT_HOME`
+  setup failure during Mode A (synthetic-home) activation — home creation or
+  shared-link reconciliation — leaves the activation environment and
+  session-record state and (for `.ctx` auto-load) the `.code-workspace` file
+  unchanged, and the failure status is returned through the currently
+  documented Bash/PowerShell paths: a non-zero exit status from `ctx.sh` on
+  any failed activation (manual `ctx <profile>...`, explicit `ctx load`, or
+  `.ctx` auto-load), and a Boolean from `ctx.ps1` — `$false` on a failed
+  Mode A manual activation, failed explicit `ctx load`, or failed `.ctx`
+  auto-load; `$true` only on a successful Mode A manual activation and a
+  successful Mode A explicit `ctx load`. Successful Modes B/C manual
+  activation and `ctx load` keep their old behavior of emitting no Boolean
+  pipeline value, and the `ctx.ps1` startup/prompt hooks suppress the
+  auto-load's return value so no stray `True`/`False` text appears at the
+  shell prompt. This atomicity covers the activation environment and session
+  record, not the bytes of shared `~/.copilot` files: `_ctx_reconcile_symlink`
+  / `Resolve-CtxLink` may intentionally transfer an already-written regular
+  file/directory from the synthetic home into the shared target before a
+  later reconciliation step fails. Making shared-target data atomic across a
+  failed activation is tracked in
+  [issue #51](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/51).
 - `COPILOT_HOME` is managed automatically by `ctx` whenever a context is
   active (see [Skill discovery](#skill-discovery)); it is exported/unset
   alongside `AI_CTX_PROFILES` and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, and shown
