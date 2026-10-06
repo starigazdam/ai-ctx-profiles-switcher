@@ -68,11 +68,15 @@ internal static class Program
 
     private static int RunProtocol(string[] args)
     {
-        if (args.Length < 2 || args[1] != "probe")
+        if (args.Length < 2)
         {
-            return ProtocolFail(args.Length < 2
-                ? "missing protocol subcommand"
-                : $"unknown protocol subcommand \"{args[1]}\"");
+            return ProtocolFail("missing protocol subcommand");
+        }
+
+        var subcommand = args[1];
+        if (subcommand != "probe" && subcommand != "clear")
+        {
+            return ProtocolFail($"unknown protocol subcommand \"{subcommand}\"");
         }
 
         string? protocolDir = null;
@@ -107,7 +111,15 @@ internal static class Program
         try
         {
             var fields = ProtocolFile.ReadRequest(protocolDir);
-            ProtocolFile.WriteResponse(protocolDir, fields);
+            if (subcommand == "probe")
+            {
+                ProtocolFile.WriteResponse(protocolDir, fields);
+            }
+            else
+            {
+                ProtocolFile.WriteResponseBody(protocolDir, BuildClearResponse(fields));
+            }
+
             return 0;
         }
         catch (ProtocolException ex)
@@ -118,6 +130,94 @@ internal static class Program
         {
             return ProtocolFail(ex.Message);
         }
+    }
+
+    // `protocol clear` decision table: the non-`--all` ctx clear mutation
+    // surface. It must match _ctx_clear / Clear-CtxContext byte-for-byte: the
+    // engine only decides which allowlisted variables to unset and which flat
+    // outcome records to emit; the shell prints the human-readable text.
+    private static string BuildClearResponse(List<KeyValuePair<string, string>> fields)
+    {
+        var mode = GetField(fields, "active.mode");
+        var activeHomeValue = GetField(fields, "active.home_value");
+        var liveHomeWasSet = GetField(fields, "live.home_was_set") == "1";
+        var liveHomeValue = GetField(fields, "live.home_value");
+
+        var skillsOwned = GetField(fields, "skills.owned") == "1";
+        var skillsWasSet = GetField(fields, "skills.was_set") == "1";
+        var skillsValue = GetField(fields, "skills.value");
+        var liveSkillsWasSet = GetField(fields, "live.skills_was_set") == "1";
+        var liveSkillsValue = GetField(fields, "live.skills_value");
+
+        var builder = new StringBuilder();
+        builder.Append("UNSET AI_CTX_PROFILES\n");
+        builder.Append("UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS\n");
+
+        if (mode == SyntheticHome)
+        {
+            builder.Append("UNSET COPILOT_HOME\n");
+        }
+        else if (mode == EphemeralClean)
+        {
+            if (liveHomeWasSet && liveHomeValue == activeHomeValue)
+            {
+                builder.Append("UNSET COPILOT_HOME\n");
+            }
+
+            if (activeHomeValue.Length > 0)
+            {
+                AppendRecord(builder, "outcome.retained_ephemeral_home", activeHomeValue);
+            }
+
+            if (liveHomeWasSet && liveHomeValue != activeHomeValue)
+            {
+                AppendRecord(builder, "outcome.warn_home_changed", liveHomeValue);
+            }
+        }
+        else if (mode == GlobalUser)
+        {
+            // Mode B never touches COPILOT_HOME.
+        }
+        else if (mode.Length == 0 && liveHomeWasSet)
+        {
+            // No matching activation record: COPILOT_HOME is unowned.
+            AppendRecord(builder, "outcome.warn_unowned_home", liveHomeValue);
+        }
+
+        if (skillsOwned && skillsWasSet && liveSkillsWasSet && liveSkillsValue == skillsValue)
+        {
+            builder.Append("UNSET COPILOT_SKILLS_DIRS\n");
+        }
+
+        return builder.ToString();
+    }
+
+    private static void AppendRecord(StringBuilder builder, string name, string value)
+    {
+        if (!ProtocolCodec.IsClearOutcomeField(name))
+        {
+            throw new ProtocolException($"response record \"{name}\" is not allowlisted");
+        }
+
+        builder
+            .Append("REC ")
+            .Append(name)
+            .Append(' ')
+            .Append(ProtocolCodec.Escape(value))
+            .Append('\n');
+    }
+
+    private static string GetField(List<KeyValuePair<string, string>> fields, string name)
+    {
+        for (var i = fields.Count - 1; i >= 0; i--)
+        {
+            if (fields[i].Key == name)
+            {
+                return fields[i].Value;
+            }
+        }
+
+        return string.Empty;
     }
 
     private static int ProtocolFail(string message)
