@@ -369,44 +369,33 @@ _ctx_clear() {
     if [ "$clear_mode" = "synthetic-home" ]; then
         prev_home="${COPILOT_HOME:-}"
     fi
-    unset AI_CTX_PROFILES
-    unset COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-    case "$clear_mode" in
-        synthetic-home)
-            unset COPILOT_HOME
-            ;;
-        ephemeral-clean)
-            # Mode C: unset COPILOT_HOME only when it still exactly equals the
-            # recorded ephemeral path; a user's replacement value is preserved.
-            if [ -n "${COPILOT_HOME+x}" ] && [ "$COPILOT_HOME" = "$_ctx_active_home_value" ]; then
-                unset COPILOT_HOME
-            fi
-            ;;
-        *)
-            # Mode B and unknown: never touch COPILOT_HOME.
-            ;;
-    esac
-    # Unset COPILOT_SKILLS_DIRS only when the current value still matches what
-    # ctx established this session; a user's own or later value is left alone.
-    _ctx_unset_owned_skills_dirs
+    # The non---all environment mutations and warning decisions are delegated
+    # to the .NET engine via the line protocol. The engine applies the same
+    # allowlisted unset operations atomically; on engine failure nothing is
+    # mutated (fail closed) and clear returns non-zero.
+    if ! _ctx_clear_apply_engine "$clear_mode"; then
+        return 1
+    fi
     # No matching activation record: report a present COPILOT_HOME as unknown
-    # rather than attributing it to a mode or guessing a deletion target. On
-    # the unknown path COPILOT_HOME is still set, so read it directly.
-    if [ -z "$clear_mode" ] && [ -n "${COPILOT_HOME+x}" ]; then
-        printf 'ctx: warning: no matching activation record; COPILOT_HOME is unowned (unknown), left as-is: %s\n' "${COPILOT_HOME:-}" >&2
+    # rather than attributing it to a mode or guessing a deletion target. The
+    # literal string and stderr stream are unchanged; presence (not a non-empty
+    # value) is what triggers the notice.
+    if [ "$_ctx_protocol_outcome_warn_unowned_home_seen" -eq 1 ]; then
+        printf 'ctx: warning: no matching activation record; COPILOT_HOME is unowned (unknown), left as-is: %s\n' "$_ctx_protocol_outcome_warn_unowned_home" >&2
     fi
     # The Mode C retained-path notice prints for BOTH plain clear and
     # clear --all, before the active record is cleared. A COPILOT_HOME that
     # no longer equals the recorded ephemeral path is preserved and reported
     # as changed/unowned.
-    if [ "$clear_mode" = "ephemeral-clean" ]; then
-        if [ -n "$_ctx_active_home_value" ]; then
-            _ctx_report_retained_ephemeral_home "$_ctx_active_home_value"
-        fi
-        if [ -n "${COPILOT_HOME+x}" ] && [ "$COPILOT_HOME" != "$_ctx_active_home_value" ]; then
-            printf 'ctx: warning: COPILOT_HOME has changed from the recorded ephemeral path (unowned, unknown), left as-is: %s\n' "${COPILOT_HOME:-}" >&2
-        fi
+    if [ "$_ctx_protocol_outcome_retained_ephemeral_home_seen" -eq 1 ]; then
+        _ctx_report_retained_ephemeral_home "$_ctx_protocol_outcome_retained_ephemeral_home"
     fi
+    if [ "$_ctx_protocol_outcome_warn_home_changed_seen" -eq 1 ]; then
+        printf 'ctx: warning: COPILOT_HOME has changed from the recorded ephemeral path (unowned, unknown), left as-is: %s\n' "$_ctx_protocol_outcome_warn_home_changed" >&2
+    fi
+    # The engine already applied any COPILOT_SKILLS_DIRS unset; reset the
+    # session-local ownership bookkeeping exactly as before.
+    _ctx_reset_owned_skills_dirs
 
     if [ "${1:-}" = "--all" ]; then
         local dir_of_file="$_ctx_auto_load_dir"
@@ -743,6 +732,15 @@ _ctx_record_owned_skills_dirs() {
     fi
 }
 
+_ctx_reset_owned_skills_dirs() {
+    # Clears the session-local skills-ownership bookkeeping without touching
+    # the environment. The clear path applies the unset via the engine and
+    # then resets this record.
+    _ctx_skills_dirs_owned=0
+    _ctx_skills_dirs_was_set=0
+    _ctx_skills_dirs_value=""
+}
+
 _ctx_unset_owned_skills_dirs() {
     # Unsets COPILOT_SKILLS_DIRS only when the current presence/value still
     # matches what a prior B/C activation in this session established; never
@@ -751,9 +749,7 @@ _ctx_unset_owned_skills_dirs() {
         if [ "$_ctx_skills_dirs_was_set" -eq 1 ] && [ -n "${COPILOT_SKILLS_DIRS+x}" ] && [ "$COPILOT_SKILLS_DIRS" = "$_ctx_skills_dirs_value" ]; then
             unset COPILOT_SKILLS_DIRS
         fi
-        _ctx_skills_dirs_owned=0
-        _ctx_skills_dirs_was_set=0
-        _ctx_skills_dirs_value=""
+        _ctx_reset_owned_skills_dirs
     fi
 }
 
@@ -2500,8 +2496,102 @@ _ctx_protocol_env_allowed() {
 _ctx_protocol_request_field_allowed() {
     case "$1" in
         active.mode|active.context|active.custom_dirs|active.home_was_set|active.home_value|skills.owned|skills.was_set|skills.value|autoload.dir|autoload.home_override) return 0 ;;
+        live.home_was_set|live.home_value|live.skills_was_set|live.skills_value) return 0 ;;
+        outcome.warn_unowned_home|outcome.warn_home_changed|outcome.retained_ephemeral_home) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# Encodes a value into the protocol's escaped form in $_ctx_protocol_escaped:
+# '\' -> "\\", LF -> "\n", CR -> "\r"; every other byte passes through
+# literally. Assigning to a variable (not command substitution) keeps the
+# result intact.
+_ctx_protocol_escape() {
+    local _in="$1" _c _out=""
+    while [ -n "$_in" ]; do
+        _c="${_in%"${_in#?}"}"
+        _in="${_in#?}"
+        case "$_c" in
+            "\\") _out="${_out}\\\\";;
+            $'\n') _out="${_out}\\n";;
+            $'\r') _out="${_out}\\r";;
+            *) _out="${_out}${_c}";;
+        esac
+    done
+    _ctx_protocol_escaped="$_out"
+}
+
+# Prints one escaped "name value" request line.
+_ctx_protocol_request_line() {
+    _ctx_protocol_escape "$2"
+    printf '%s %s\n' "$1" "$_ctx_protocol_escaped"
+}
+
+# Writes the 14-field `protocol clear` request from current shell state. The
+# active.* fields come from the session-local activation record; the mode is
+# the *matching* recorded mode (empty when no record matches), so the engine
+# can reproduce "no matching activation record" without live selector fields.
+_ctx_protocol_write_clear_request() {
+    # $1: protocol dir, $2: matching recorded mode (may be empty)
+    local _dir="$1" _mode="$2"
+    local _live_home_was_set=0 _live_home_value="" _live_skills_was_set=0 _live_skills_value=""
+    if [ -n "${COPILOT_HOME+x}" ]; then
+        _live_home_was_set=1
+        _live_home_value="${COPILOT_HOME:-}"
+    fi
+    if [ -n "${COPILOT_SKILLS_DIRS+x}" ]; then
+        _live_skills_was_set=1
+        _live_skills_value="${COPILOT_SKILLS_DIRS:-}"
+    fi
+    {
+        printf 'CTX-REQ 1\n'
+        _ctx_protocol_request_line active.mode "$_mode"
+        _ctx_protocol_request_line active.context "${_ctx_active_context:-}"
+        _ctx_protocol_request_line active.custom_dirs "${_ctx_active_custom_dirs:-}"
+        _ctx_protocol_request_line active.home_was_set "${_ctx_active_home_was_set:-0}"
+        _ctx_protocol_request_line active.home_value "${_ctx_active_home_value:-}"
+        _ctx_protocol_request_line skills.owned "${_ctx_skills_dirs_owned:-0}"
+        _ctx_protocol_request_line skills.was_set "${_ctx_skills_dirs_was_set:-0}"
+        _ctx_protocol_request_line skills.value "${_ctx_skills_dirs_value:-}"
+        _ctx_protocol_request_line autoload.dir "${_ctx_auto_load_dir:-}"
+        _ctx_protocol_request_line autoload.home_override "${_ctx_auto_load_home_override:-}"
+        _ctx_protocol_request_line live.home_was_set "$_live_home_was_set"
+        _ctx_protocol_request_line live.home_value "$_live_home_value"
+        _ctx_protocol_request_line live.skills_was_set "$_live_skills_was_set"
+        _ctx_protocol_request_line live.skills_value "$_live_skills_value"
+        printf 'END\n'
+    } > "$_dir/request"
+}
+
+# Runs the engine's `protocol clear` round-trip and applies the response. Fails
+# closed (no mutation) when the engine is missing or the dotnet invocation
+# errors. Returns the adapter's code (the response EXIT, or 70 on invalid
+# output).
+_ctx_clear_apply_engine() {
+    # $1: matching recorded mode (may be empty)
+    local _mode="${1:-}" _dir _rc
+    if [ -z "${CTX_ENGINE_DLL:-}" ] || [ ! -f "$CTX_ENGINE_DLL" ]; then
+        printf 'ctx: error: .NET 10 engine DLL not found: %s\n' "${CTX_ENGINE_DLL:-<unset>}" >&2
+        return 1
+    fi
+    _dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-clear-protocol.XXXXXXXXXX" 2>/dev/null)" || {
+        printf 'ctx: error: .NET 10 engine DLL not found: %s\n' "$CTX_ENGINE_DLL" >&2
+        return 1
+    }
+    if ! _ctx_protocol_write_clear_request "$_dir" "$_mode"; then
+        rm -rf "$_dir"
+        printf 'ctx: error: .NET 10 engine DLL not found: %s\n' "$CTX_ENGINE_DLL" >&2
+        return 1
+    fi
+    if ! dotnet "$CTX_ENGINE_DLL" protocol clear --protocol-dir "$_dir"; then
+        rm -rf "$_dir"
+        printf 'ctx: error: .NET 10 engine DLL not found: %s\n' "$CTX_ENGINE_DLL" >&2
+        return 1
+    fi
+    _ctx_apply_protocol_response "$_dir/response"
+    _rc=$?
+    rm -rf "$_dir"
+    return "$_rc"
 }
 
 # Decodes the protocol escaping into $_ctx_protocol_unescaped. Returns 1 on an
@@ -2614,7 +2704,10 @@ _ctx_protocol_validate_response() {
     return 0
 }
 
-# Second, apply-only pass over an already-validated response.
+# Second, apply-only pass over an already-validated response. Also captures the
+# single EXIT value into $_ctx_protocol_exit and any flat outcome.* records into
+# the _ctx_protocol_outcome_* variables (with *_seen flags, because a present
+# outcome may legitimately carry an empty value).
 _ctx_protocol_apply_response() {
     local _file="$1" _line _rest _name _val
     while IFS= read -r _line; do
@@ -2639,6 +2732,30 @@ _ctx_protocol_apply_response() {
                 _name="${_line#UNSET }"
                 unset "$_name"
                 ;;
+            "REC "*)
+                _rest="${_line#REC }"
+                _name="${_rest%% *}"
+                if [ "$_name" = "$_rest" ]; then
+                    _val=""
+                else
+                    _val="${_rest#* }"
+                fi
+                _ctx_protocol_unescape "$_val" || return 1
+                case "$_name" in
+                    outcome.warn_unowned_home)
+                        _ctx_protocol_outcome_warn_unowned_home="$_ctx_protocol_unescaped"
+                        _ctx_protocol_outcome_warn_unowned_home_seen=1 ;;
+                    outcome.warn_home_changed)
+                        _ctx_protocol_outcome_warn_home_changed="$_ctx_protocol_unescaped"
+                        _ctx_protocol_outcome_warn_home_changed_seen=1 ;;
+                    outcome.retained_ephemeral_home)
+                        _ctx_protocol_outcome_retained_ephemeral_home="$_ctx_protocol_unescaped"
+                        _ctx_protocol_outcome_retained_ephemeral_home_seen=1 ;;
+                esac
+                ;;
+            "EXIT "*)
+                _ctx_protocol_exit="${_line#EXIT }"
+                ;;
             *) : ;;
         esac
     done < "$_file"
@@ -2646,11 +2763,20 @@ _ctx_protocol_apply_response() {
 }
 
 _ctx_apply_protocol_response() {
-    # $1: path to the engine's response file. Returns 70 on any validation
-    # failure, applying nothing.
+    # $1: path to the engine's response file. Validates then applies; returns 70
+    # on any validation failure, applying nothing. On success returns the
+    # response's EXIT value (the non---all clear path always emits EXIT 0).
     local _file="${1:-}"
     [ -n "$_file" ] || return 70
     [ -f "$_file" ] || return 70
+
+    _ctx_protocol_exit=""
+    _ctx_protocol_outcome_warn_unowned_home=""
+    _ctx_protocol_outcome_warn_unowned_home_seen=0
+    _ctx_protocol_outcome_warn_home_changed=""
+    _ctx_protocol_outcome_warn_home_changed_seen=0
+    _ctx_protocol_outcome_retained_ephemeral_home=""
+    _ctx_protocol_outcome_retained_ephemeral_home_seen=0
 
     if command -v od >/dev/null 2>&1; then
         local _tokens _first3 _last
@@ -2669,7 +2795,7 @@ _ctx_apply_protocol_response() {
 
     _ctx_protocol_validate_response "$_file" || return 70
     _ctx_protocol_apply_response "$_file" || return 70
-    return 0
+    return "${_ctx_protocol_exit:-0}"
 }
 
 # --- Shell integration (completion + chdir hooks) -----------------------

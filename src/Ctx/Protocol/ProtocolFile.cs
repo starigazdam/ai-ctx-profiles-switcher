@@ -71,7 +71,6 @@ internal static class ProtocolFile
     public static void WriteResponse(string protocolDir, IEnumerable<KeyValuePair<string, string>> fields)
     {
         var builder = new StringBuilder();
-        builder.Append(ResponseMarker).Append('\n');
         foreach (var field in fields)
         {
             builder
@@ -82,6 +81,18 @@ internal static class ProtocolFile
                 .Append('\n');
         }
 
+        WriteResponseBody(protocolDir, builder.ToString());
+    }
+
+    // Writes a fully-formed response body (the lines between "CTX-RES 1" and
+    // the trailing "EXIT 0"/"END"). Every line must already be escaped. The
+    // atomic tmp+rename, the EXIT 0 terminator and END are shared with
+    // WriteResponse so `protocol clear` does not reimplement them.
+    public static void WriteResponseBody(string protocolDir, string body)
+    {
+        var builder = new StringBuilder();
+        builder.Append(ResponseMarker).Append('\n');
+        builder.Append(body);
         builder.Append("EXIT 0\n");
         builder.Append("END\n");
 

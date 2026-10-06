@@ -20,6 +20,20 @@ internal static class ProtocolCodec
         "skills.value",
         "autoload.dir",
         "autoload.home_override",
+        "live.home_was_set",
+        "live.home_value",
+        "live.skills_was_set",
+        "live.skills_value",
+    };
+
+    // Flat, non-namespaced REC allowlist for `protocol clear` outcomes. The
+    // `protocol probe` subcommand keeps its own `probe.`-prefixed echo and is
+    // deliberately not represented here.
+    public static readonly string[] ClearOutcomeFields =
+    {
+        "outcome.warn_unowned_home",
+        "outcome.warn_home_changed",
+        "outcome.retained_ephemeral_home",
     };
 
     public static readonly string[] EnvNames =
@@ -33,6 +47,8 @@ internal static class ProtocolCodec
     public const string EnvNameAllowingEmpty = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
 
     public static bool IsRequestField(string name) => Array.IndexOf(RequestFields, name) >= 0;
+
+    public static bool IsClearOutcomeField(string name) => Array.IndexOf(ClearOutcomeFields, name) >= 0;
 
     public static bool IsEnvName(string name) => Array.IndexOf(EnvNames, name) >= 0;
 

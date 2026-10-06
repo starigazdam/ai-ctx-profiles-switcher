@@ -303,4 +303,297 @@ Describe 'ctx .NET protocol adapter' {
         $threw.Exception.Message | Should -Match '(?i)(crlf|line ending)'
         $env:AI_CTX_PROFILES | Should -Be 'keep'
     }
+
+    It 'surfaces outcome.* values including a present-empty value' {
+        $response = Join-Path $Script:CtxDotnetTmp 'outcome-response'
+        [System.IO.File]::WriteAllText(
+            $response,
+            "CTX-RES 1`nUNSET COPILOT_HOME`nREC outcome.warn_unowned_home `nREC outcome.warn_home_changed /tmp/other`nREC outcome.retained_ephemeral_home /tmp/eph`nEXIT 0`nEND`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $exit = Apply-CtxProtocolResponse -Path $response
+
+        $exit | Should -Be 0
+        $Script:CtxProtocolOutcomeWarnUnownedHome | Should -Be ''
+        $Script:CtxProtocolOutcomeWarnHomeChanged | Should -Be '/tmp/other'
+        $Script:CtxProtocolOutcomeRetainedEphemeralHome | Should -Be '/tmp/eph'
+    }
+
+    It 'returns the response EXIT value after applying its actions' {
+        $response = Join-Path $Script:CtxDotnetTmp 'exit-response'
+        [System.IO.File]::WriteAllText(
+            $response,
+            "CTX-RES 1`nSET AI_CTX_PROFILES changed`nEXIT 7`nEND`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $exit = Apply-CtxProtocolResponse -Path $response
+
+        $exit | Should -Be 7
+        $env:AI_CTX_PROFILES | Should -Be 'changed'
+    }
+}
+
+<#
+    Issue #67 packet 3: the `protocol clear` decision table, pinned at the CLI
+    level by asserting the exact response file bytes independently of the shell.
+#>
+Describe 'ctx .NET protocol clear command' {
+
+    BeforeAll {
+        function Script:Invoke-CtxProtocolClear {
+            param([string]$ProtocolDir)
+
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = 'dotnet'
+            $engine = $env:CTX_ENGINE_DLL
+            if ($engine -and (Test-Path -LiteralPath $engine -PathType Leaf)) {
+                foreach ($arg in @($engine, 'protocol', 'clear', '--protocol-dir', $ProtocolDir)) { [void]$psi.ArgumentList.Add($arg) }
+            } else {
+                foreach ($arg in @('run', '--project', $Script:CtxDotnetProject, '--', 'protocol', 'clear', '--protocol-dir', $ProtocolDir)) { [void]$psi.ArgumentList.Add($arg) }
+            }
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.WorkingDirectory = $Script:CtxDotnetTmp
+            $psi.Environment['DOTNET_CLI_HOME'] = $Script:CtxDotnetTmp
+            $psi.Environment['DOTNET_CLI_TELEMETRY_OPTOUT'] = '1'
+            $psi.Environment['DOTNET_NOLOGO'] = '1'
+
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $stdout = $proc.StandardOutput.ReadToEnd()
+            $stderr = $proc.StandardError.ReadToEnd()
+            $proc.WaitForExit()
+            return [pscustomobject]@{ ExitCode = $proc.ExitCode; StdOut = $stdout; StdErr = $stderr }
+        }
+
+        function Script:New-CtxProtocolDir {
+            param([string]$Name)
+            $dir = Join-Path $Script:CtxDotnetTmp $Name
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            return $dir
+        }
+
+        function Script:Write-CtxClearRequest {
+            param([string]$Dir, [string[]]$Lines)
+            $body = "CTX-REQ 1`n" + (($Lines -join "`n") + "`n") + "END`n"
+            [System.IO.File]::WriteAllBytes((Join-Path $Dir 'request'), [System.Text.UTF8Encoding]::new($false).GetBytes($body))
+        }
+
+        function Script:Get-ClearExpected {
+            param([string[]]$Lines)
+            return "CTX-RES 1`n" + (($Lines -join "`n") + "`n") + "EXIT 0`nEND`n"
+        }
+
+        function Script:Assert-ClearResponse {
+            param([string]$Dir, [string[]]$Lines)
+            $responsePath = Join-Path $Dir 'response'
+            Test-Path -LiteralPath $responsePath -PathType Leaf | Should -BeTrue
+            $actual = [System.Text.UTF8Encoding]::new($false).GetString([System.IO.File]::ReadAllBytes($responsePath))
+            $actual | Should -BeExactly (Get-ClearExpected -Lines $Lines)
+        }
+    }
+
+    BeforeEach {
+        $Script:CtxDotnetTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-dotnet-pester-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $Script:CtxDotnetTmp -Force | Out-Null
+    }
+
+    AfterEach {
+        Remove-Item -LiteralPath $Script:CtxDotnetTmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'synthetic-home unsets COPILOT_HOME unconditionally' {
+        $dir = New-CtxProtocolDir 'synthetic'
+        Write-CtxClearRequest -Dir $dir -Lines @('active.mode synthetic-home', 'live.home_was_set 1', 'live.home_value /tmp/x')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS',
+            'UNSET COPILOT_HOME'
+        )
+    }
+
+    It 'ephemeral-clean matching home unsets and retains the recorded path' {
+        $dir = New-CtxProtocolDir 'eph-match'
+        Write-CtxClearRequest -Dir $dir -Lines @('active.mode ephemeral-clean', 'active.home_value /tmp/eph', 'live.home_was_set 1', 'live.home_value /tmp/eph')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS',
+            'UNSET COPILOT_HOME',
+            'REC outcome.retained_ephemeral_home /tmp/eph'
+        )
+    }
+
+    It 'ephemeral-clean changed home is preserved, retained and warned' {
+        $dir = New-CtxProtocolDir 'eph-changed'
+        Write-CtxClearRequest -Dir $dir -Lines @('active.mode ephemeral-clean', 'active.home_value /tmp/eph', 'live.home_was_set 1', 'live.home_value /tmp/user-home')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS',
+            'REC outcome.retained_ephemeral_home /tmp/eph',
+            'REC outcome.warn_home_changed /tmp/user-home'
+        )
+    }
+
+    It 'ephemeral-clean with no recorded home emits no home records' {
+        $dir = New-CtxProtocolDir 'eph-nohome'
+        Write-CtxClearRequest -Dir $dir -Lines @('active.mode ephemeral-clean', 'active.home_value ', 'live.home_was_set 0', 'live.home_value ')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+        )
+    }
+
+    It 'global-user never touches COPILOT_HOME' {
+        $dir = New-CtxProtocolDir 'global'
+        Write-CtxClearRequest -Dir $dir -Lines @('active.mode global-user', 'live.home_was_set 1', 'live.home_value /tmp/user-home')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+        )
+    }
+
+    It 'no matching record warns an unowned present COPILOT_HOME' {
+        $dir = New-CtxProtocolDir 'unowned'
+        Write-CtxClearRequest -Dir $dir -Lines @('live.home_was_set 1', 'live.home_value /tmp/foreign')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS',
+            'REC outcome.warn_unowned_home /tmp/foreign'
+        )
+    }
+
+    It 'owned matching skills are unset' {
+        $dir = New-CtxProtocolDir 'skills-match'
+        Write-CtxClearRequest -Dir $dir -Lines @('active.mode global-user', 'skills.owned 1', 'skills.was_set 1', 'skills.value /skills', 'live.skills_was_set 1', 'live.skills_value /skills')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS',
+            'UNSET COPILOT_SKILLS_DIRS'
+        )
+    }
+
+    It 'owned mismatched skills are preserved' {
+        $dir = New-CtxProtocolDir 'skills-mismatch'
+        Write-CtxClearRequest -Dir $dir -Lines @('active.mode global-user', 'skills.owned 1', 'skills.was_set 1', 'skills.value /skills', 'live.skills_was_set 1', 'live.skills_value /user-skills')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+        )
+    }
+
+    It 'unowned skills are preserved' {
+        $dir = New-CtxProtocolDir 'skills-unowned'
+        Write-CtxClearRequest -Dir $dir -Lines @('active.mode global-user', 'skills.owned 0', 'skills.was_set 0', 'skills.value ', 'live.skills_was_set 1', 'live.skills_value /foreign-skills')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Be 0
+        Assert-ClearResponse -Dir $dir -Lines @(
+            'UNSET AI_CTX_PROFILES',
+            'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+        )
+    }
+
+    It 'rejects an unknown request field and writes no response' {
+        $dir = New-CtxProtocolDir 'bogus'
+        Write-CtxClearRequest -Dir $dir -Lines @('bogus.field x')
+        $result = Invoke-CtxProtocolClear -ProtocolDir $dir
+
+        $result.ExitCode | Should -Not -Be 0
+        Test-Path -LiteralPath (Join-Path $dir 'response') | Should -BeFalse
+    }
+}
+
+<#
+    Issue #67 packet 3: fail-closed behavior. A missing engine must leave the
+    environment untouched and report failure; it must never partially unset.
+#>
+Describe 'ctx clear fail-closed engine handling' {
+
+    BeforeAll {
+        $Script:CtxFailClosedSrc = Join-Path $Script:CtxDotnetRepoRoot 'ctx.ps1'
+    }
+
+    BeforeEach {
+        $Script:CtxFailClosedPriorEngineSet = Test-Path Env:\CTX_ENGINE_DLL
+        $Script:CtxFailClosedPriorEngine = $env:CTX_ENGINE_DLL
+
+        Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
+
+        . $Script:CtxFailClosedSrc
+    }
+
+    AfterEach {
+        if ($Script:CtxFailClosedPriorEngineSet) {
+            $env:CTX_ENGINE_DLL = $Script:CtxFailClosedPriorEngine
+        } else {
+            Remove-Item Env:\CTX_ENGINE_DLL -ErrorAction SilentlyContinue
+        }
+        Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
+    }
+
+    It 'returns $false and leaves the environment untouched when the engine is missing' {
+        $env:AI_CTX_PROFILES = 'review'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = '/dirs'
+        $env:COPILOT_HOME = '/tmp/ctx-synthetic'
+        Set-CtxActiveRecord -Mode 'synthetic-home'
+        $env:CTX_ENGINE_DLL = '/nonexistent/missing-ctx-engine.dll'
+
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
+        $result = $null
+        try { $result = Clear-CtxContext 2>$null } finally { $ErrorActionPreference = $previous }
+
+        $result | Should -BeFalse
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be '/dirs'
+        $env:COPILOT_HOME | Should -Be '/tmp/ctx-synthetic'
+    }
+
+    It 'returns $false and leaves the environment untouched when the engine is unset' {
+        $env:AI_CTX_PROFILES = 'review'
+        $env:COPILOT_HOME = '/tmp/ctx-synthetic'
+        Set-CtxActiveRecord -Mode 'synthetic-home'
+        Remove-Item Env:\CTX_ENGINE_DLL -ErrorAction SilentlyContinue
+
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
+        $result = $null
+        try { $result = Clear-CtxContext 2>$null } finally { $ErrorActionPreference = $previous }
+
+        $result | Should -BeFalse
+        $env:AI_CTX_PROFILES | Should -Be 'review'
+        $env:COPILOT_HOME | Should -Be '/tmp/ctx-synthetic'
+    }
 }
