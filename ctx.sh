@@ -2484,6 +2484,194 @@ _ctx_skills() {
     printf '[ctx skills] not observable: which skills Copilot actually loads or invokes (no Copilot CLI probe performed)\n'
 }
 
+# --- Issue #67 packet 2: shell<->engine protocol response adapter ---------
+# Internal, currently uncalled helper (packet 3 wires it in). It validates the
+# ENTIRE response before applying anything (parse-whole-then-apply): any
+# validation failure applies NOTHING and returns 70. It never evals or sources
+# engine output; it only performs direct export/unset on allowlisted names.
+
+_ctx_protocol_env_allowed() {
+    case "$1" in
+        AI_CTX_PROFILES|COPILOT_CUSTOM_INSTRUCTIONS_DIRS|COPILOT_HOME|COPILOT_SKILLS_DIRS) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_ctx_protocol_request_field_allowed() {
+    case "$1" in
+        active.mode|active.context|active.custom_dirs|active.home_was_set|active.home_value|skills.owned|skills.was_set|skills.value|autoload.dir|autoload.home_override) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Decodes the protocol escaping into $_ctx_protocol_unescaped. Returns 1 on an
+# invalid escape. Assigning to a variable (not command substitution) keeps an
+# embedded LF/CR intact.
+_ctx_protocol_unescape() {
+    local _in="$1" _c _next _out=""
+    while [ -n "$_in" ]; do
+        _c="${_in%"${_in#?}"}"
+        _in="${_in#?}"
+        if [ "$_c" = "\\" ]; then
+            [ -n "$_in" ] || return 1
+            _next="${_in%"${_in#?}"}"
+            _in="${_in#?}"
+            case "$_next" in
+                "\\") _out="${_out}\\";;
+                n) _out="${_out}"$'\n';;
+                r) _out="${_out}"$'\r';;
+                *) return 1 ;;
+            esac
+        else
+            _out="${_out}${_c}"
+        fi
+    done
+    _ctx_protocol_unescaped="$_out"
+    return 0
+}
+
+_ctx_protocol_validate_set() {
+    local _rest="$1" _name _val
+    [ -n "$_rest" ] || return 1
+    _name="${_rest%% *}"
+    if [ "$_name" = "$_rest" ]; then
+        _val=""
+    else
+        _val="${_rest#* }"
+    fi
+    _ctx_protocol_env_allowed "$_name" || return 1
+    _ctx_protocol_unescape "$_val" || return 1
+    return 0
+}
+
+_ctx_protocol_validate_setempty() {
+    [ "$1" = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS" ] || return 1
+    return 0
+}
+
+_ctx_protocol_validate_unset() {
+    [ -n "$1" ] || return 1
+    _ctx_protocol_env_allowed "$1" || return 1
+    return 0
+}
+
+_ctx_protocol_validate_rec() {
+    local _rest="$1" _name _val
+    [ -n "$_rest" ] || return 1
+    _name="${_rest%% *}"
+    if [ "$_name" = "$_rest" ]; then
+        _val=""
+    else
+        _val="${_rest#* }"
+    fi
+    _ctx_protocol_request_field_allowed "$_name" || return 1
+    _ctx_protocol_unescape "$_val" || return 1
+    return 0
+}
+
+_ctx_protocol_validate_exit() {
+    local _val="$1"
+    [ -n "$_val" ] || return 1
+    case "$_val" in
+        *[!0-9]*) return 1 ;;
+    esac
+    [ "$_val" -le 255 ] || return 1
+    return 0
+}
+
+# Validates every line without applying anything: bad verb, bad ENVNAME, bad
+# escape, missing/duplicate END, trailing bytes after END or a missing/duplicate
+# EXIT all fail closed. Returns 0 only for a fully valid response.
+_ctx_protocol_validate_response() {
+    local _file="$1" _line _lineno=0 _saw_end=0 _exit_count=0
+    while IFS= read -r _line; do
+        _lineno=$((_lineno + 1))
+        if [ "$_saw_end" -eq 1 ]; then
+            return 1
+        fi
+        if [ "$_lineno" -eq 1 ]; then
+            [ "$_line" = "CTX-RES 1" ] || return 1
+            continue
+        fi
+        case "$_line" in
+            END)
+                [ "$_exit_count" -eq 1 ] || return 1
+                _saw_end=1
+                ;;
+            "SET "*)      _ctx_protocol_validate_set "${_line#SET }" || return 1 ;;
+            "SETEMPTY "*) _ctx_protocol_validate_setempty "${_line#SETEMPTY }" || return 1 ;;
+            "UNSET "*)    _ctx_protocol_validate_unset "${_line#UNSET }" || return 1 ;;
+            "REC "*)      _ctx_protocol_validate_rec "${_line#REC }" || return 1 ;;
+            "MSG "*)      _ctx_protocol_unescape "${_line#MSG }" || return 1 ;;
+            "EXIT "*)
+                _ctx_protocol_validate_exit "${_line#EXIT }" || return 1
+                _exit_count=$((_exit_count + 1))
+                ;;
+            *) return 1 ;;
+        esac
+    done < "$_file"
+    [ "$_saw_end" -eq 1 ] || return 1
+    return 0
+}
+
+# Second, apply-only pass over an already-validated response.
+_ctx_protocol_apply_response() {
+    local _file="$1" _line _rest _name _val
+    while IFS= read -r _line; do
+        case "$_line" in
+            END) break ;;
+            "SET "*)
+                _rest="${_line#SET }"
+                _name="${_rest%% *}"
+                if [ "$_name" = "$_rest" ]; then
+                    _val=""
+                else
+                    _val="${_rest#* }"
+                fi
+                _ctx_protocol_unescape "$_val" || return 1
+                export "$_name=$_ctx_protocol_unescaped"
+                ;;
+            "SETEMPTY "*)
+                _name="${_line#SETEMPTY }"
+                export "$_name="
+                ;;
+            "UNSET "*)
+                _name="${_line#UNSET }"
+                unset "$_name"
+                ;;
+            *) : ;;
+        esac
+    done < "$_file"
+    return 0
+}
+
+_ctx_apply_protocol_response() {
+    # $1: path to the engine's response file. Returns 70 on any validation
+    # failure, applying nothing.
+    local _file="${1:-}"
+    [ -n "$_file" ] || return 70
+    [ -f "$_file" ] || return 70
+
+    if command -v od >/dev/null 2>&1; then
+        local _tokens _first3 _last
+        _tokens="$(od -An -v -tx1 "$_file" 2>/dev/null | tr ' ' '\n' | grep -v '^$')"
+        # NUL and raw CR are forbidden anywhere; the file must end with LF.
+        if printf '%s\n' "$_tokens" | grep -qEx '00|0d'; then
+            return 70
+        fi
+        _first3="$(printf '%s\n' "$_tokens" | head -n 3 | tr '\n' ' ')"
+        if [ "$_first3" = "ef bb bf " ]; then
+            return 70
+        fi
+        _last="$(printf '%s\n' "$_tokens" | tail -n 1)"
+        [ "$_last" = "0a" ] || return 70
+    fi
+
+    _ctx_protocol_validate_response "$_file" || return 70
+    _ctx_protocol_apply_response "$_file" || return 70
+    return 0
+}
+
 # --- Shell integration (completion + chdir hooks) -----------------------
 
 _ctx_list_subdirs() {

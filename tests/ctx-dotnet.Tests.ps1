@@ -238,3 +238,69 @@ Describe 'ctx .NET current command' {
         ($result.Output -join "`n") | Should -Not -Match 'instructions\.md'
     }
 }
+
+<#
+    Issue #67 packet 2: the PowerShell side of the shell<->engine protocol
+    codec. Apply-CtxProtocolResponse is the adapter function (Verb-CtxNoun, as
+    in the rest of ctx.ps1); these cases pin its byte-grammar rejection of a
+    UTF-8 BOM and of CRLF line endings, and that rejection applies nothing.
+#>
+Describe 'ctx .NET protocol adapter' {
+
+    BeforeAll {
+        $Script:CtxProtocolSrc = Join-Path $Script:CtxDotnetRepoRoot 'ctx.ps1'
+    }
+
+    BeforeEach {
+        $Script:CtxDotnetTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-dotnet-pester-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $Script:CtxDotnetTmp -Force | Out-Null
+
+        $Script:CtxProtocolPriorProfiles = $env:AI_CTX_PROFILES
+
+        . $Script:CtxProtocolSrc
+    }
+
+    AfterEach {
+        if ($null -ne $Script:CtxProtocolPriorProfiles) {
+            $env:AI_CTX_PROFILES = $Script:CtxProtocolPriorProfiles
+        } else {
+            Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
+        }
+
+        Remove-Item -LiteralPath $Script:CtxDotnetTmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'rejects a response with a UTF-8 BOM and applies nothing' {
+        $response = Join-Path $Script:CtxDotnetTmp 'bom-response'
+        $body = [System.Text.Encoding]::UTF8.GetBytes("CTX-RES 1`nSET AI_CTX_PROFILES changed`nEXIT 0`nEND`n")
+        $bytes = [byte[]]::new($body.Length + 3)
+        $bytes[0] = 0xEF; $bytes[1] = 0xBB; $bytes[2] = 0xBF
+        [System.Array]::Copy($body, 0, $bytes, 3, $body.Length)
+        [System.IO.File]::WriteAllBytes($response, $bytes)
+
+        $env:AI_CTX_PROFILES = 'keep'
+        $threw = $null
+        try { Apply-CtxProtocolResponse -Path $response } catch { $threw = $_ }
+
+        $threw | Should -Not -BeNullOrEmpty
+        $threw.Exception.Message | Should -Match '(?i)bom'
+        $env:AI_CTX_PROFILES | Should -Be 'keep'
+    }
+
+    It 'rejects a response with CRLF line endings and applies nothing' {
+        $response = Join-Path $Script:CtxDotnetTmp 'crlf-response'
+        [System.IO.File]::WriteAllText(
+            $response,
+            "CTX-RES 1`r`nSET AI_CTX_PROFILES changed`r`nEXIT 0`r`nEND`r`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $env:AI_CTX_PROFILES = 'keep'
+        $threw = $null
+        try { Apply-CtxProtocolResponse -Path $response } catch { $threw = $_ }
+
+        $threw | Should -Not -BeNullOrEmpty
+        $threw.Exception.Message | Should -Match '(?i)(crlf|line ending)'
+        $env:AI_CTX_PROFILES | Should -Be 'keep'
+    }
+}
