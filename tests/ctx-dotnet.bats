@@ -450,6 +450,318 @@ run_shell_apply_protocol_response() {
     [[ "$output" == *"AI_CTX_PROFILES=keep"* ]]
 }
 
+# ---------------------------------------------------------------------------
+# Issue #67 packet 3: `protocol clear` decision table + adapter finish.
+#
+# The engine's `protocol clear` subcommand is the non---all ctx clear mutation
+# boundary. Each case writes a request and asserts the response file
+# byte-for-byte, so the decision table is pinned independently of the shell.
+# ---------------------------------------------------------------------------
+
+# Runs the internal clear command (prebuilt engine preferred; dotnet run fallback).
+run_ctx_protocol_clear() {
+    local protocol_dir="$1"
+    if [ -n "${CTX_ENGINE_DLL:-}" ] && [ -f "${CTX_ENGINE_DLL:-}" ]; then
+        run dotnet "$CTX_ENGINE_DLL" protocol clear --protocol-dir "$protocol_dir"
+    else
+        run dotnet run --project "$CTX_DOTNET_PROJECT" -- protocol clear --protocol-dir "$protocol_dir"
+    fi
+}
+
+# write_clear_request <dir> <full-line>...
+write_clear_request() {
+    local dir="$1"
+    shift
+    {
+        printf '%s\n' 'CTX-REQ 1'
+        local line
+        for line in "$@"; do
+            printf '%s\n' "$line"
+        done
+        printf '%s\n' 'END'
+    } > "$dir/request"
+    chmod 0600 "$dir/request"
+}
+
+# write_expected_response <dir> <full-line>...
+write_expected_response() {
+    local dir="$1"
+    shift
+    {
+        printf '%s\n' 'CTX-RES 1'
+        local line
+        for line in "$@"; do
+            printf '%s\n' "$line"
+        done
+        printf '%s\n' 'EXIT 0'
+        printf '%s\n' 'END'
+    } > "$dir/expected"
+}
+
+assert_clear_response() {
+    local dir="$1"
+    run diff -u "$dir/expected" "$dir/response"
+    [ "$status" -eq 0 ]
+}
+
+@test "protocol clear: synthetic-home unsets COPILOT_HOME unconditionally" {
+    local dir
+    dir="$(new_protocol_dir clear-synthetic)"
+    write_clear_request "$dir" \
+        'active.mode synthetic-home' \
+        'live.home_was_set 1' \
+        'live.home_value /tmp/x'
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS' \
+        'UNSET COPILOT_HOME'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: ephemeral-clean matching home unsets and retains the recorded path" {
+    local dir
+    dir="$(new_protocol_dir clear-eph-match)"
+    write_clear_request "$dir" \
+        'active.mode ephemeral-clean' \
+        'active.home_value /tmp/eph' \
+        'live.home_was_set 1' \
+        'live.home_value /tmp/eph'
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS' \
+        'UNSET COPILOT_HOME' \
+        'REC outcome.retained_ephemeral_home /tmp/eph'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: ephemeral-clean changed home is preserved, retained and warned" {
+    local dir
+    dir="$(new_protocol_dir clear-eph-changed)"
+    write_clear_request "$dir" \
+        'active.mode ephemeral-clean' \
+        'active.home_value /tmp/eph' \
+        'live.home_was_set 1' \
+        'live.home_value /tmp/user-home'
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS' \
+        'REC outcome.retained_ephemeral_home /tmp/eph' \
+        'REC outcome.warn_home_changed /tmp/user-home'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: ephemeral-clean with no recorded home emits no home records" {
+    local dir
+    dir="$(new_protocol_dir clear-eph-nohome)"
+    write_clear_request "$dir" \
+        'active.mode ephemeral-clean' \
+        'active.home_value ' \
+        'live.home_was_set 0' \
+        'live.home_value '
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: global-user never touches COPILOT_HOME" {
+    local dir
+    dir="$(new_protocol_dir clear-global)"
+    write_clear_request "$dir" \
+        'active.mode global-user' \
+        'live.home_was_set 1' \
+        'live.home_value /tmp/user-home'
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: no matching record warns an unowned present COPILOT_HOME" {
+    local dir
+    dir="$(new_protocol_dir clear-unowned)"
+    write_clear_request "$dir" \
+        'live.home_was_set 1' \
+        'live.home_value /tmp/foreign'
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS' \
+        'REC outcome.warn_unowned_home /tmp/foreign'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: no matching record with no COPILOT_HOME emits no warnings" {
+    local dir
+    dir="$(new_protocol_dir clear-unowned-absent)"
+    write_clear_request "$dir" \
+        'live.home_was_set 0' \
+        'live.home_value '
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: owned matching skills are unset" {
+    local dir
+    dir="$(new_protocol_dir clear-skills-match)"
+    write_clear_request "$dir" \
+        'active.mode global-user' \
+        'skills.owned 1' \
+        'skills.was_set 1' \
+        'skills.value /skills' \
+        'live.skills_was_set 1' \
+        'live.skills_value /skills'
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS' \
+        'UNSET COPILOT_SKILLS_DIRS'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: owned mismatched skills are preserved" {
+    local dir
+    dir="$(new_protocol_dir clear-skills-mismatch)"
+    write_clear_request "$dir" \
+        'active.mode global-user' \
+        'skills.owned 1' \
+        'skills.was_set 1' \
+        'skills.value /skills' \
+        'live.skills_was_set 1' \
+        'live.skills_value /user-skills'
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: unowned skills are preserved" {
+    local dir
+    dir="$(new_protocol_dir clear-skills-unowned)"
+    write_clear_request "$dir" \
+        'active.mode global-user' \
+        'skills.owned 0' \
+        'skills.was_set 0' \
+        'skills.value ' \
+        'live.skills_was_set 1' \
+        'live.skills_value /foreign-skills'
+    write_expected_response "$dir" \
+        'UNSET AI_CTX_PROFILES' \
+        'UNSET COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -eq 0 ]
+    assert_clear_response "$dir"
+}
+
+@test "protocol clear: an unknown request field is rejected and no response is written" {
+    local dir
+    dir="$(new_protocol_dir clear-bogus)"
+    write_clear_request "$dir" 'bogus.field x'
+
+    run_ctx_protocol_clear "$dir"
+
+    [ "$status" -ne 0 ]
+    [ ! -e "$dir/response" ]
+}
+
+# Prints the adapter's return code plus the surfaced outcome.* variables.
+run_shell_adapter_outcomes() {
+    local response_file="$1"
+    local ctx_src="$CTX_DOTNET_REPO_ROOT/ctx.sh"
+    run env HOME="$CTX_DOTNET_HOME" bash --noprofile --norc -c '
+        source "$1"
+        _ctx_apply_protocol_response "$2"
+        rc=$?
+        printf "RC=%s\n" "$rc"
+        printf "UNOWNED_SEEN=%s\n" "${_ctx_protocol_outcome_warn_unowned_home_seen:-<unset>}"
+        printf "UNOWNED=[%s]\n" "${_ctx_protocol_outcome_warn_unowned_home-<unset>}"
+        printf "CHANGED_SEEN=%s\n" "${_ctx_protocol_outcome_warn_home_changed_seen:-<unset>}"
+        printf "CHANGED=[%s]\n" "${_ctx_protocol_outcome_warn_home_changed-<unset>}"
+        printf "RETAINED_SEEN=%s\n" "${_ctx_protocol_outcome_retained_ephemeral_home_seen:-<unset>}"
+        printf "RETAINED=[%s]\n" "${_ctx_protocol_outcome_retained_ephemeral_home-<unset>}"
+        printf "AI_CTX_PROFILES=%s\n" "${AI_CTX_PROFILES-<unset>}"
+        exit 0
+    ' -- "$ctx_src" "$response_file"
+}
+
+@test "protocol adapter: surfaces outcome.* values including present-empty" {
+    local response="$CTX_DOTNET_TMP/outcome-response"
+    {
+        printf '%s\n' 'CTX-RES 1'
+        printf '%s\n' 'UNSET COPILOT_HOME'
+        printf '%s\n' 'REC outcome.warn_unowned_home '
+        printf '%s\n' 'REC outcome.warn_home_changed /tmp/other'
+        printf '%s\n' 'REC outcome.retained_ephemeral_home /tmp/eph'
+        printf '%s\n' 'EXIT 0'
+        printf '%s\n' 'END'
+    } > "$response"
+
+    run_shell_adapter_outcomes "$response"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"UNOWNED_SEEN=1"* ]]
+    [[ "$output" == *"UNOWNED=[]"* ]]
+    [[ "$output" == *"CHANGED_SEEN=1"* ]]
+    [[ "$output" == *"CHANGED=[/tmp/other]"* ]]
+    [[ "$output" == *"RETAINED_SEEN=1"* ]]
+    [[ "$output" == *"RETAINED=[/tmp/eph]"* ]]
+}
+
+@test "protocol adapter: propagates a non-zero EXIT value as its return code" {
+    local response="$CTX_DOTNET_TMP/exit-restores-response"
+    {
+        printf '%s\n' 'CTX-RES 1'
+        printf '%s\n' 'SET AI_CTX_PROFILES changed'
+        printf '%s\n' 'EXIT 7'
+        printf '%s\n' 'END'
+    } > "$response"
+
+    run_shell_adapter_outcomes "$response"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RC=7"* ]]
+    [[ "$output" == *"AI_CTX_PROFILES=changed"* ]]
+    [[ "$output" == *"UNOWNED_SEEN=0"* ]]
+}
+
 @test "protocol adapter: applies a valid response under zsh (zsh-gated)" {
     if ! command -v zsh >/dev/null 2>&1; then
         skip "zsh is not installed"
@@ -481,4 +793,82 @@ run_shell_apply_protocol_response() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"AI_CTX_PROFILES=review"* ]]
     [[ "$output" == *"COPILOT_HOME=/zhome"* ]]
+}
+
+@test "ctx clear: missing engine fails closed without mutating the environment" {
+    local ctx_src="$CTX_DOTNET_REPO_ROOT/ctx.sh"
+    run env HOME="$CTX_DOTNET_HOME" CTX_ENGINE_DLL="$CTX_DOTNET_TMP/missing-engine/ctx.dll" \
+        bash --noprofile --norc -c '
+        source "$1"
+        export AI_CTX_PROFILES=review
+        export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/dirs
+        export COPILOT_HOME=/tmp/ctx-synthetic
+        _ctx_set_active_record synthetic-home
+        ctx clear 2>&1
+        rc=$?
+        printf "RC=%s\n" "$rc"
+        printf "AI_CTX_PROFILES=%s\n" "${AI_CTX_PROFILES-<unset>}"
+        printf "COPILOT_CUSTOM_INSTRUCTIONS_DIRS=%s\n" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS-<unset>}"
+        printf "COPILOT_HOME=%s\n" "${COPILOT_HOME-<unset>}"
+        exit 0
+    ' -- "$ctx_src"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RC=1"* ]]
+    [[ "$output" == *"engine DLL not found"* ]]
+    [[ "$output" == *"AI_CTX_PROFILES=review"* ]]
+    [[ "$output" == *"COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/dirs"* ]]
+    [[ "$output" == *"COPILOT_HOME=/tmp/ctx-synthetic"* ]]
+    [[ "$output" != *"AI context cleared."* ]]
+}
+
+@test "ctx clear: an unset engine fails closed without mutating the environment" {
+    local ctx_src="$CTX_DOTNET_REPO_ROOT/ctx.sh"
+    run env HOME="$CTX_DOTNET_HOME" CTX_ENGINE_DLL= \
+        bash --noprofile --norc -c '
+        source "$1"
+        export AI_CTX_PROFILES=review
+        export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/dirs
+        export COPILOT_HOME=/tmp/ctx-synthetic
+        _ctx_set_active_record synthetic-home
+        ctx clear 2>&1
+        rc=$?
+        printf "RC=%s\n" "$rc"
+        printf "AI_CTX_PROFILES=%s\n" "${AI_CTX_PROFILES-<unset>}"
+        printf "COPILOT_HOME=%s\n" "${COPILOT_HOME-<unset>}"
+        exit 0
+    ' -- "$ctx_src"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RC=1"* ]]
+    [[ "$output" == *"engine DLL not found: <unset>"* ]]
+    [[ "$output" == *"AI_CTX_PROFILES=review"* ]]
+    [[ "$output" == *"COPILOT_HOME=/tmp/ctx-synthetic"* ]]
+}
+
+@test "ctx clear: real engine round-trip clears a synthetic-home activation" {
+    local ctx_src="$CTX_DOTNET_REPO_ROOT/ctx.sh"
+    if [ -z "${CTX_ENGINE_DLL:-}" ] || [ ! -f "${CTX_ENGINE_DLL:-}" ]; then
+        skip "CTX_ENGINE_DLL is not set to a prebuilt engine"
+    fi
+    run env HOME="$CTX_DOTNET_HOME" CTX_ENGINE_DLL="${CTX_ENGINE_DLL}" \
+        bash --noprofile --norc -c '
+        source "$1"
+        export AI_CTX_PROFILES=review
+        export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/dirs
+        export COPILOT_HOME=/tmp/ctx-synthetic
+        _ctx_set_active_record synthetic-home
+        ctx clear 2>&1
+        rc=$?
+        printf "RC=%s\n" "$rc"
+        printf "AI_CTX_PROFILES=%s\n" "${AI_CTX_PROFILES-<unset>}"
+        printf "COPILOT_HOME=%s\n" "${COPILOT_HOME-<unset>}"
+        exit 0
+    ' -- "$ctx_src"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RC=0"* ]]
+    [[ "$output" == *"AI context cleared."* ]]
+    [[ "$output" == *"AI_CTX_PROFILES=<unset>"* ]]
+    [[ "$output" == *"COPILOT_HOME=<unset>"* ]]
 }
