@@ -251,44 +251,32 @@ function Clear-CtxContext {
     if ($clearMode -ceq 'synthetic-home') {
         $prevHome = $env:COPILOT_HOME
     }
-    Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
-    Remove-Item Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS -ErrorAction SilentlyContinue
-    switch ($clearMode) {
-        'synthetic-home' {
-            Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
-        }
-        'ephemeral-clean' {
-            # Mode C: unset COPILOT_HOME only when it still exactly equals the
-            # recorded ephemeral path; a user's replacement value is preserved.
-            if ((Test-Path Env:\COPILOT_HOME) -and ($env:COPILOT_HOME -ceq $Script:CtxActiveHomeValue)) {
-                Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
-            }
-        }
-        default {
-            # Mode B and unknown: never touch COPILOT_HOME.
-        }
+    # The non---all environment mutations and warning decisions are delegated
+    # to the .NET engine via the line protocol. On engine failure nothing is
+    # mutated (fail closed) and clear returns $false.
+    if (-not (Invoke-CtxClearEngine -Mode $clearMode)) {
+        return $false
     }
-    # Unset COPILOT_SKILLS_DIRS only when the current value still matches what
-    # ctx established this session; a user's own or later value is left alone.
-    Unset-CtxOwnedSkillsDirs
     # No matching activation record: report a present COPILOT_HOME as unknown
-    # rather than attributing it to a mode or guessing a deletion target. On
-    # the unknown path COPILOT_HOME is still set, so read it directly.
-    if (-not $clearMode -and $env:COPILOT_HOME) {
-        Write-Warning "ctx: warning: no matching activation record; COPILOT_HOME is unowned (unknown), left as-is: $($env:COPILOT_HOME)"
+    # rather than attributing it to a mode or guessing a deletion target. The
+    # literal string and warning stream are unchanged; like the original
+    # comparison, a present-empty value is not reported as unowned.
+    if ($Script:CtxProtocolOutcomeWarnUnownedHome) {
+        Write-Warning "ctx: warning: no matching activation record; COPILOT_HOME is unowned (unknown), left as-is: $($Script:CtxProtocolOutcomeWarnUnownedHome)"
     }
     # The Mode C retained-path notice prints for BOTH plain clear and
     # clear --all, before the active record is cleared. A COPILOT_HOME that
     # no longer equals the recorded ephemeral path is preserved and reported
     # as changed/unowned.
-    if ($clearMode -ceq 'ephemeral-clean') {
-        if ($Script:CtxActiveHomeValue) {
-            Write-CtxRetainedEphemeralHome -Path $Script:CtxActiveHomeValue
-        }
-        if ((Test-Path Env:\COPILOT_HOME) -and ($env:COPILOT_HOME -cne $Script:CtxActiveHomeValue)) {
-            Write-Warning "ctx: warning: COPILOT_HOME has changed from the recorded ephemeral path (unowned, unknown), left as-is: $($env:COPILOT_HOME)"
-        }
+    if ($null -ne $Script:CtxProtocolOutcomeRetainedEphemeralHome) {
+        Write-CtxRetainedEphemeralHome -Path $Script:CtxProtocolOutcomeRetainedEphemeralHome
     }
+    if ($null -ne $Script:CtxProtocolOutcomeWarnHomeChanged) {
+        Write-Warning "ctx: warning: COPILOT_HOME has changed from the recorded ephemeral path (unowned, unknown), left as-is: $($Script:CtxProtocolOutcomeWarnHomeChanged)"
+    }
+    # The engine already applied any COPILOT_SKILLS_DIRS unset; reset the
+    # session-local ownership bookkeeping exactly as before.
+    Reset-CtxSkillsDirsRecord
 
     if ($All) {
         $dirOfFile = $Script:CtxAutoLoadDir
@@ -649,6 +637,74 @@ function ConvertFrom-CtxProtocolEscape {
     return $builder.ToString()
 }
 
+function ConvertTo-CtxProtocolEscape {
+    param([string]$Value)
+
+    if ($null -eq $Value) { return '' }
+    $builder = [System.Text.StringBuilder]::new($Value.Length)
+    foreach ($c in $Value.ToCharArray()) {
+        if ($c -ceq '\') {
+            [void]$builder.Append('\\')
+        } elseif ($c -ceq "`n") {
+            [void]$builder.Append('\n')
+        } elseif ($c -ceq "`r") {
+            [void]$builder.Append('\r')
+        } else {
+            [void]$builder.Append($c)
+        }
+    }
+    return $builder.ToString()
+}
+
+function Write-CtxProtocolClearRequest {
+    # Writes the 14-field `protocol clear` request from current shell state.
+    # active.mode is the *matching* recorded mode (empty when none matches), so
+    # the engine can reproduce "no matching activation record".
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProtocolDir,
+        [string]$Mode
+    )
+
+    $liveHomeWasSet = if (Test-Path Env:\COPILOT_HOME) { '1' } else { '0' }
+    $liveHomeValue = if (Test-Path Env:\COPILOT_HOME) { [string]$env:COPILOT_HOME } else { '' }
+    $liveSkillsWasSet = if (Test-Path Env:\COPILOT_SKILLS_DIRS) { '1' } else { '0' }
+    $liveSkillsValue = if (Test-Path Env:\COPILOT_SKILLS_DIRS) { [string]$env:COPILOT_SKILLS_DIRS } else { '' }
+    $activeHomeWasSet = if ($Script:CtxActiveHomeWasSet) { '1' } else { '0' }
+    $skillsOwned = if ($Script:CtxSkillsDirsOwned) { '1' } else { '0' }
+    $skillsWasSet = if ($Script:CtxSkillsDirsWasSet) { '1' } else { '0' }
+
+    $fields = [ordered]@{
+        'active.mode'           = $Mode
+        'active.context'        = $Script:CtxActiveContext
+        'active.custom_dirs'    = $Script:CtxActiveCustomDirs
+        'active.home_was_set'   = $activeHomeWasSet
+        'active.home_value'     = $Script:CtxActiveHomeValue
+        'skills.owned'          = $skillsOwned
+        'skills.was_set'        = $skillsWasSet
+        'skills.value'          = $Script:CtxSkillsDirsValue
+        'autoload.dir'          = $Script:CtxAutoLoadDir
+        'autoload.home_override' = $Script:CtxAutoLoadHomeOverride
+        'live.home_was_set'     = $liveHomeWasSet
+        'live.home_value'       = $liveHomeValue
+        'live.skills_was_set'   = $liveSkillsWasSet
+        'live.skills_value'     = $liveSkillsValue
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append("CTX-REQ 1`n")
+    foreach ($name in $fields.Keys) {
+        $value = if ($null -eq $fields[$name]) { '' } else { [string]$fields[$name] }
+        [void]$builder.Append($name).Append(' ').Append((ConvertTo-CtxProtocolEscape -Value $value)).Append("`n")
+    }
+    [void]$builder.Append("END`n")
+
+    [System.IO.File]::WriteAllBytes(
+        (Join-Path $ProtocolDir 'request'),
+        [System.Text.UTF8Encoding]::new($false).GetBytes($builder.ToString())
+    )
+}
+
 function Apply-CtxProtocolResponse {
     [CmdletBinding()]
     param(
@@ -687,11 +743,18 @@ function Apply-CtxProtocolResponse {
     }
 
     $envAllowlist = @('AI_CTX_PROFILES', 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS', 'COPILOT_HOME', 'COPILOT_SKILLS_DIRS')
-    $fieldAllowlist = @('active.mode', 'active.context', 'active.custom_dirs', 'active.home_was_set', 'active.home_value', 'skills.owned', 'skills.was_set', 'skills.value', 'autoload.dir', 'autoload.home_override')
+    $fieldAllowlist = @(
+        'active.mode', 'active.context', 'active.custom_dirs', 'active.home_was_set', 'active.home_value',
+        'skills.owned', 'skills.was_set', 'skills.value', 'autoload.dir', 'autoload.home_override',
+        'live.home_was_set', 'live.home_value', 'live.skills_was_set', 'live.skills_value',
+        'outcome.warn_unowned_home', 'outcome.warn_home_changed', 'outcome.retained_ephemeral_home'
+    )
 
     $actions = [System.Collections.Generic.List[object]]::new()
+    $outcomes = @{}
     $sawEnd = $false
     $exitCount = 0
+    $exitValue = 0
 
     for ($i = 1; $i -lt $last; $i++) {
         $line = $lines[$i]
@@ -752,7 +815,10 @@ function Apply-CtxProtocolResponse {
             if (-not ($fieldAllowlist -ccontains $name)) {
                 throw "protocol error: REC of non-allowlisted field '$name'"
             }
-            [void](ConvertFrom-CtxProtocolEscape -Value $escaped)
+            $decoded = ConvertFrom-CtxProtocolEscape -Value $escaped
+            if ($name -clike 'outcome.*') {
+                $outcomes[$name] = $decoded
+            }
             continue
         }
 
@@ -767,6 +833,7 @@ function Apply-CtxProtocolResponse {
             if (-not [int]::TryParse($value, [ref]$parsed) -or $parsed -lt 0 -or $parsed -gt 255) {
                 throw "protocol error: invalid EXIT value '$value'"
             }
+            $exitValue = $parsed
             $exitCount++
             continue
         }
@@ -787,6 +854,51 @@ function Apply-CtxProtocolResponse {
         } else {
             Set-Item -Path "Env:$($action.Name)" -Value $action.Value
         }
+    }
+
+    # Surface flat outcome.* records to the caller ($null = absent, so a
+    # present empty value stays distinguishable). The EXIT value becomes the
+    # adapter's return value.
+    $Script:CtxProtocolOutcomeWarnUnownedHome = $outcomes['outcome.warn_unowned_home']
+    $Script:CtxProtocolOutcomeWarnHomeChanged = $outcomes['outcome.warn_home_changed']
+    $Script:CtxProtocolOutcomeRetainedEphemeralHome = $outcomes['outcome.retained_ephemeral_home']
+
+    return $exitValue
+}
+
+# Runs the engine's `protocol clear` round-trip and applies the response. Fails
+# closed (no mutation) when the engine is missing or the dotnet invocation
+# errors. Returns $true on success, $false otherwise.
+function Invoke-CtxClearEngine {
+    param([string]$Mode)
+
+    $engine = $env:CTX_ENGINE_DLL
+    if ([string]::IsNullOrWhiteSpace($engine) -or -not (Test-Path -LiteralPath $engine -PathType Leaf)) {
+        $reported = if ([string]::IsNullOrWhiteSpace($engine)) { '<unset>' } else { $engine }
+        Write-Error "ctx: error: .NET 10 engine DLL not found: $reported" -ErrorAction Continue
+        return $false
+    }
+
+    $protocolDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-clear-protocol-" + [guid]::NewGuid())
+    try {
+        New-Item -ItemType Directory -Path $protocolDir -Force | Out-Null
+        Write-CtxProtocolClearRequest -ProtocolDir $protocolDir -Mode $Mode
+        & dotnet $engine protocol clear --protocol-dir $protocolDir
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "ctx: error: .NET 10 engine DLL not found: $engine" -ErrorAction Continue
+            return $false
+        }
+        $exitValue = Apply-CtxProtocolResponse -Path (Join-Path $protocolDir 'response')
+        if ($exitValue -ne 0) {
+            Write-Error "ctx: error: .NET 10 engine DLL not found: $engine" -ErrorAction Continue
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Error "ctx: error: .NET 10 engine DLL not found: $engine" -ErrorAction Continue
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $protocolDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -873,6 +985,15 @@ function Set-CtxActiveSkillsDirsRecord {
     }
 }
 
+function Reset-CtxSkillsDirsRecord {
+    # Clears the session-local skills-ownership bookkeeping without touching
+    # the environment. The clear path applies the unset via the engine and
+    # then resets this record.
+    $Script:CtxSkillsDirsOwned = $false
+    $Script:CtxSkillsDirsWasSet = $false
+    $Script:CtxSkillsDirsValue = $null
+}
+
 function Unset-CtxOwnedSkillsDirs {
     # Unsets COPILOT_SKILLS_DIRS only when the current presence/value still
     # matches what a prior B/C activation in this session established; never
@@ -881,9 +1002,7 @@ function Unset-CtxOwnedSkillsDirs {
         if ($Script:CtxSkillsDirsWasSet -and (Test-Path Env:\COPILOT_SKILLS_DIRS) -and ($env:COPILOT_SKILLS_DIRS -ceq $Script:CtxSkillsDirsValue)) {
             Remove-Item Env:\COPILOT_SKILLS_DIRS -ErrorAction SilentlyContinue
         }
-        $Script:CtxSkillsDirsOwned = $false
-        $Script:CtxSkillsDirsWasSet = $false
-        $Script:CtxSkillsDirsValue = $null
+        Reset-CtxSkillsDirsRecord
     }
 }
 
