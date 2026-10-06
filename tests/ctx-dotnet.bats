@@ -187,3 +187,298 @@ run_ctx_dotnet_current_with_mode() {
     [ "$status" -eq 0 ]
     [[ "$output" != *"instructions.md"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Issue #67 packet 2: shell<->engine protocol codec (probe + adapters), RED.
+#
+# The internal probe command
+#     dotnet "$CTX_ENGINE_DLL" protocol probe --protocol-dir <dir>
+# is a zero-side-effect round-trip proof of the line-oriented request/response
+# codec. The shell adapter helpers are deliberately unreachable from every
+# public command in this packet, so the tests call them directly. Case 9-11 pin
+# the bash adapter (_ctx_apply_protocol_response) and case 12-13 pin the
+# PowerShell adapter (Apply-CtxProtocolResponse). Cases 4-8 must additionally
+# prove the *new* command is the thing rejecting the request - a missing
+# command must not make the rejection assertion pass accidentally.
+# ---------------------------------------------------------------------------
+
+# Runs the internal probe command. Prefers the prebuilt engine named by
+# CTX_ENGINE_DLL (the same variable `ctx current` delegates to); falls back to
+# `dotnet run` for a local, unbuilt checkout. Sets $status/$output.
+run_ctx_protocol_probe() {
+    local protocol_dir="$1"
+    if [ -n "${CTX_ENGINE_DLL:-}" ] && [ -f "${CTX_ENGINE_DLL:-}" ]; then
+        run dotnet "$CTX_ENGINE_DLL" protocol probe --protocol-dir "$protocol_dir"
+    else
+        run dotnet run --project "$CTX_DOTNET_PROJECT" -- protocol probe --protocol-dir "$protocol_dir"
+    fi
+}
+
+# Creates a fresh mode-0700 protocol dir under the test temp and echoes it.
+new_protocol_dir() {
+    local dir="$CTX_DOTNET_TMP/protocol-$1"
+    mkdir -p "$dir"
+    chmod 0700 "$dir"
+    printf '%s' "$dir"
+}
+
+# Sources ctx.sh in an isolated non-interactive shell with a known
+# pre-existing environment, then calls the bash adapter's apply function for
+# the given response file. Prints the resulting environment for inspection and
+# exits with the adapter's return code (70 = validation failure, per contract).
+run_shell_apply_protocol_response() {
+    local response_file="$1"
+    local ctx_src="$CTX_DOTNET_REPO_ROOT/ctx.sh"
+    run env HOME="$CTX_DOTNET_HOME" bash --noprofile --norc -c '
+        source "$1"
+        export AI_CTX_PROFILES=keep
+        export COPILOT_HOME=/keep-home
+        export COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/keep-dirs
+        export EVIL_VAR=keep-evil
+        _ctx_apply_protocol_response "$2"
+        rc=$?
+        printf "RC=%s\n" "$rc"
+        printf "AI_CTX_PROFILES=%s\n" "${AI_CTX_PROFILES-<unset>}"
+        printf "COPILOT_HOME=%s\n" "${COPILOT_HOME-<unset>}"
+        printf "COPILOT_CUSTOM_INSTRUCTIONS_DIRS=%s\n" "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS-<unset>}"
+        printf "EVIL_VAR=%s\n" "${EVIL_VAR-<unset>}"
+        exit "$rc"
+    ' -- "$ctx_src" "$response_file"
+}
+
+@test "protocol probe: round-trips all 10 allowlisted fields with exact escaping" {
+    local dir request expected
+    dir="$(new_protocol_dir case1)"
+    request="$dir/request"
+    expected="$dir/expected-response"
+
+    # Values deliberately include embedded spaces, Unicode, commas and both
+    # shapes of backslash escape: literal backslash-n/r ("\\n"/"\\r" in bytes)
+    # and a real LF/CR encoded as "\n"/"\r".
+    {
+        printf '%s\n' 'CTX-REQ 1'
+        printf '%s\n' 'active.mode global-user'
+        printf '%s\n' 'active.context café 日本, one'
+        printf '%s\n' 'active.custom_dirs /alpha,/beta'
+        printf '%s\n' 'active.home_was_set 1'
+        printf '%s\n' 'active.home_value /tmp/a b/c'
+        printf '%s\n' 'skills.owned /s1,/s2'
+        printf '%s\n' 'skills.was_set true'
+        printf '%s\n' 'skills.value a\\nb\\rc'
+        printf '%s\n' 'autoload.dir dir with space'
+        printf '%s\n' 'autoload.home_override lf\ncr\r'
+        printf '%s\n' 'END'
+    } > "$request"
+    chmod 0600 "$request"
+
+    {
+        printf '%s\n' 'CTX-RES 1'
+        printf '%s\n' 'REC probe.active.mode global-user'
+        printf '%s\n' 'REC probe.active.context café 日本, one'
+        printf '%s\n' 'REC probe.active.custom_dirs /alpha,/beta'
+        printf '%s\n' 'REC probe.active.home_was_set 1'
+        printf '%s\n' 'REC probe.active.home_value /tmp/a b/c'
+        printf '%s\n' 'REC probe.skills.owned /s1,/s2'
+        printf '%s\n' 'REC probe.skills.was_set true'
+        printf '%s\n' 'REC probe.skills.value a\\nb\\rc'
+        printf '%s\n' 'REC probe.autoload.dir dir with space'
+        printf '%s\n' 'REC probe.autoload.home_override lf\ncr\r'
+        printf '%s\n' 'EXIT 0'
+        printf '%s\n' 'END'
+    } > "$expected"
+
+    run_ctx_protocol_probe "$dir"
+
+    [ "$status" -eq 0 ]
+    [ -f "$dir/response" ]
+    run diff -u "$expected" "$dir/response"
+    [ "$status" -eq 0 ]
+}
+
+@test "protocol probe: an absent field has no echo line" {
+    local dir request
+    dir="$(new_protocol_dir case2)"
+    request="$dir/request"
+
+    # active.home_was_set is deliberately absent from the request.
+    {
+        printf '%s\n' 'CTX-REQ 1'
+        printf '%s\n' 'active.mode global-user'
+        printf '%s\n' 'active.context review'
+        printf '%s\n' 'active.custom_dirs /alpha'
+        printf '%s\n' 'active.home_value /tmp/a'
+        printf '%s\n' 'skills.owned /s1'
+        printf '%s\n' 'skills.was_set true'
+        printf '%s\n' 'skills.value v'
+        printf '%s\n' 'autoload.dir d'
+        printf '%s\n' 'autoload.home_override h'
+        printf '%s\n' 'END'
+    } > "$request"
+
+    run_ctx_protocol_probe "$dir"
+
+    [ "$status" -eq 0 ]
+    [ -f "$dir/response" ]
+    grep -q '^REC probe\.active\.mode global-user' "$dir/response"
+    ! grep -q '^REC probe\.active\.home_was_set' "$dir/response"
+}
+
+@test "protocol probe: present-empty field is distinguishable from absent" {
+    local dir request
+    dir="$(new_protocol_dir case3)"
+    request="$dir/request"
+
+    # active.custom_dirs is present with an empty value (note the trailing
+    # space); active.home_was_set is absent entirely.
+    {
+        printf '%s\n' 'CTX-REQ 1'
+        printf '%s\n' 'active.custom_dirs '
+        printf '%s\n' 'END'
+    } > "$request"
+
+    run_ctx_protocol_probe "$dir"
+
+    [ "$status" -eq 0 ]
+    [ -f "$dir/response" ]
+    grep -qxF 'REC probe.active.custom_dirs ' "$dir/response"
+    ! grep -q '^REC probe\.active\.home_was_set' "$dir/response"
+}
+
+@test "protocol probe: missing END is rejected and no response is written" {
+    local dir request
+    dir="$(new_protocol_dir case4)"
+    request="$dir/request"
+    printf '%s\n' 'CTX-REQ 1' 'active.mode A' > "$request"
+
+    run_ctx_protocol_probe "$dir"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unknown command"* ]]
+    [[ "$output" != *"usage: ctx current"* ]]
+    [ ! -e "$dir/response" ]
+}
+
+@test "protocol probe: trailing garbage after END is rejected" {
+    local dir request
+    dir="$(new_protocol_dir case5)"
+    request="$dir/request"
+    printf '%s\n' 'CTX-REQ 1' 'active.mode A' 'END' 'garbage' > "$request"
+
+    run_ctx_protocol_probe "$dir"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unknown command"* ]]
+    [[ "$output" != *"usage: ctx current"* ]]
+    [ ! -e "$dir/response" ]
+}
+
+@test "protocol probe: unknown request field name is rejected" {
+    local dir request
+    dir="$(new_protocol_dir case6)"
+    request="$dir/request"
+    printf '%s\n' 'CTX-REQ 1' 'bogus.field x' 'END' > "$request"
+
+    run_ctx_protocol_probe "$dir"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unknown command"* ]]
+    [[ "$output" != *"usage: ctx current"* ]]
+    [ ! -e "$dir/response" ]
+}
+
+@test "protocol probe: invalid backslash escape is rejected" {
+    local dir request
+    dir="$(new_protocol_dir case7)"
+    request="$dir/request"
+    printf '%s\n' 'CTX-REQ 1' 'active.context \x' 'END' > "$request"
+
+    run_ctx_protocol_probe "$dir"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unknown command"* ]]
+    [[ "$output" != *"usage: ctx current"* ]]
+    [ ! -e "$dir/response" ]
+}
+
+@test "protocol probe: a raw NUL byte anywhere is rejected" {
+    local dir request
+    dir="$(new_protocol_dir case8)"
+    request="$dir/request"
+    printf 'CTX-REQ 1\nactive.mode A\000bad\nEND\n' > "$request"
+
+    run_ctx_protocol_probe "$dir"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unknown command"* ]]
+    [[ "$output" != *"usage: ctx current"* ]]
+    [ ! -e "$dir/response" ]
+}
+
+@test "protocol adapter: truncated response applies nothing" {
+    local response="$CTX_DOTNET_TMP/truncated-response"
+    # Missing END (and EXIT): a crash mid-write must apply nothing.
+    printf '%s\n' 'CTX-RES 1' 'SET AI_CTX_PROFILES hijacked' > "$response"
+
+    run_shell_apply_protocol_response "$response"
+
+    [ "$status" -eq 70 ]
+    [[ "$output" == *"AI_CTX_PROFILES=keep"* ]]
+    [[ "$output" == *"COPILOT_HOME=/keep-home"* ]]
+    [[ "$output" == *"COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/keep-dirs"* ]]
+    [[ "$output" != *"hijacked"* ]]
+}
+
+@test "protocol adapter: unknown ENVNAME is rejected before any export" {
+    local response="$CTX_DOTNET_TMP/unknown-envname-response"
+    printf '%s\n' 'CTX-RES 1' 'SET EVIL_VAR hijacked' 'EXIT 0' 'END' > "$response"
+
+    run_shell_apply_protocol_response "$response"
+
+    [ "$status" -eq 70 ]
+    [[ "$output" == *"EVIL_VAR=keep-evil"* ]]
+    [[ "$output" == *"AI_CTX_PROFILES=keep"* ]]
+    [[ "$output" != *"hijacked"* ]]
+}
+
+@test "protocol adapter: SETEMPTY on a non-allowlisted name is rejected" {
+    local response="$CTX_DOTNET_TMP/bad-setempty-response"
+    printf '%s\n' 'CTX-RES 1' 'SETEMPTY AI_CTX_PROFILES' 'EXIT 0' 'END' > "$response"
+
+    run_shell_apply_protocol_response "$response"
+
+    [ "$status" -eq 70 ]
+    [[ "$output" == *"AI_CTX_PROFILES=keep"* ]]
+}
+
+@test "protocol adapter: applies a valid response under zsh (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+
+    local dir response zsh_path
+    dir="$(new_protocol_dir zsh)"
+    response="$dir/response"
+    {
+        printf '%s\n' 'CTX-RES 1'
+        printf '%s\n' 'SET AI_CTX_PROFILES review'
+        printf '%s\n' 'SET COPILOT_HOME /zhome'
+        printf '%s\n' 'EXIT 0'
+        printf '%s\n' 'END'
+    } > "$response"
+
+    local ctx_src="$CTX_DOTNET_REPO_ROOT/ctx.sh"
+    zsh_path="$(command -v zsh)"
+    run env HOME="$CTX_DOTNET_HOME" "$zsh_path" -f -c '
+        source "$1"
+        _ctx_apply_protocol_response "$2"
+        rc=$?
+        printf "RC=%s\n" "$rc"
+        printf "AI_CTX_PROFILES=%s\n" "${AI_CTX_PROFILES-<unset>}"
+        printf "COPILOT_HOME=%s\n" "${COPILOT_HOME-<unset>}"
+        exit "$rc"
+    ' -- "$ctx_src" "$response"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"AI_CTX_PROFILES=review"* ]]
+    [[ "$output" == *"COPILOT_HOME=/zhome"* ]]
+}

@@ -1,4 +1,5 @@
 using System.Text;
+using Ctx.Protocol;
 
 namespace Ctx;
 
@@ -11,6 +12,11 @@ internal static class Program
     private static int Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
+        if (args.Length > 0 && args[0] == "protocol")
+        {
+            return RunProtocol(args);
+        }
 
         if (args.Length == 0 || args[0] != "current")
         {
@@ -58,6 +64,68 @@ internal static class Program
 
         PrintStatus(profiles, recordedMode);
         return 0;
+    }
+
+    private static int RunProtocol(string[] args)
+    {
+        if (args.Length < 2 || args[1] != "probe")
+        {
+            return ProtocolFail(args.Length < 2
+                ? "missing protocol subcommand"
+                : $"unknown protocol subcommand \"{args[1]}\"");
+        }
+
+        string? protocolDir = null;
+        for (var i = 2; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg == "--protocol-dir")
+            {
+                if (protocolDir is not null)
+                {
+                    return ProtocolFail("duplicate --protocol-dir");
+                }
+
+                if (i + 1 >= args.Length)
+                {
+                    return ProtocolFail("--protocol-dir requires a value");
+                }
+
+                protocolDir = args[++i];
+            }
+            else
+            {
+                return ProtocolFail($"unexpected argument \"{arg}\"");
+            }
+        }
+
+        if (protocolDir is null)
+        {
+            return ProtocolFail("--protocol-dir is required");
+        }
+
+        try
+        {
+            var fields = ProtocolFile.ReadRequest(protocolDir);
+            ProtocolFile.WriteResponse(protocolDir, fields);
+            return 0;
+        }
+        catch (ProtocolException ex)
+        {
+            return ProtocolFail(ex.Message);
+        }
+        catch (Exception ex)
+        {
+            return ProtocolFail(ex.Message);
+        }
+    }
+
+    private static int ProtocolFail(string message)
+    {
+        Console.Error.Write("ctx: error: protocol: ");
+        Console.Error.Write(message);
+        Console.Error.Write('\n');
+        return 2;
     }
 
     private static int Fail(string message)

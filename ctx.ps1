@@ -615,6 +615,181 @@ $Script:CtxSkillsDirsOwned = $false
 $Script:CtxSkillsDirsWasSet = $false
 $Script:CtxSkillsDirsValue = $null
 
+# --- Issue #67 packet 2: shell<->engine protocol response adapter ---------
+# Internal, currently uncalled helper (packet 3 wires it in). Validates the
+# ENTIRE response before applying anything; on any validation failure it
+# throws and applies NOTHING. It never uses Invoke-Expression on engine output;
+# it only performs direct Set-Item/Remove-Item Env: calls on allowlisted names.
+
+function ConvertFrom-CtxProtocolEscape {
+    param([string]$Value)
+
+    $builder = [System.Text.StringBuilder]::new($Value.Length)
+    for ($i = 0; $i -lt $Value.Length; $i++) {
+        $c = $Value[$i]
+        if ($c -cne '\') {
+            [void]$builder.Append($c)
+            continue
+        }
+        if ($i + 1 -ge $Value.Length) {
+            throw 'protocol error: invalid trailing escape'
+        }
+        $i++
+        $next = $Value[$i]
+        if ($next -ceq '\') {
+            [void]$builder.Append('\')
+        } elseif ($next -ceq 'n') {
+            [void]$builder.Append("`n")
+        } elseif ($next -ceq 'r') {
+            [void]$builder.Append("`r")
+        } else {
+            throw "protocol error: invalid escape sequence '\$next'"
+        }
+    }
+    return $builder.ToString()
+}
+
+function Apply-CtxProtocolResponse {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "protocol error: response file not found: $Path"
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+
+    # Reject a UTF-8 BOM explicitly: ReadAllLines would silently strip it.
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw 'protocol error: response must not start with a UTF-8 BOM'
+    }
+    foreach ($b in $bytes) {
+        if ($b -eq 0) {
+            throw 'protocol error: response contains a NUL byte'
+        }
+        if ($b -eq 0x0D) {
+            throw 'protocol error: response must use LF line endings (CRLF found)'
+        }
+    }
+
+    $text = [System.Text.UTF8Encoding]::new($false).GetString($bytes)
+    if (-not $text.EndsWith("`n")) {
+        throw 'protocol error: response must end with LF'
+    }
+
+    $lines = $text.Split("`n")
+    $last = $lines.Length - 1
+    if ($last -lt 1 -or $lines[0] -cne 'CTX-RES 1') {
+        throw 'protocol error: response must start with CTX-RES 1'
+    }
+
+    $envAllowlist = @('AI_CTX_PROFILES', 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS', 'COPILOT_HOME', 'COPILOT_SKILLS_DIRS')
+    $fieldAllowlist = @('active.mode', 'active.context', 'active.custom_dirs', 'active.home_was_set', 'active.home_value', 'skills.owned', 'skills.was_set', 'skills.value', 'autoload.dir', 'autoload.home_override')
+
+    $actions = [System.Collections.Generic.List[object]]::new()
+    $sawEnd = $false
+    $exitCount = 0
+
+    for ($i = 1; $i -lt $last; $i++) {
+        $line = $lines[$i]
+
+        if ($line -ceq 'END') {
+            $sawEnd = $true
+            if ($i -ne ($last - 1)) {
+                throw 'protocol error: unexpected data after END'
+            }
+            break
+        }
+
+        if ($line.StartsWith('SET ')) {
+            $rest = $line.Substring(4)
+            $separator = $rest.IndexOf(' ')
+            if ($separator -lt 0) {
+                $name = $rest
+                $escaped = ''
+            } else {
+                $name = $rest.Substring(0, $separator)
+                $escaped = $rest.Substring($separator + 1)
+            }
+            if (-not ($envAllowlist -ccontains $name)) {
+                throw "protocol error: SET of non-allowlisted name '$name'"
+            }
+            $actions.Add([pscustomobject]@{ Kind = 'SET'; Name = $name; Value = (ConvertFrom-CtxProtocolEscape -Value $escaped) })
+            continue
+        }
+
+        if ($line.StartsWith('SETEMPTY ')) {
+            $name = $line.Substring(9)
+            if ($name -cne 'COPILOT_CUSTOM_INSTRUCTIONS_DIRS') {
+                throw 'protocol error: SETEMPTY is only valid for COPILOT_CUSTOM_INSTRUCTIONS_DIRS'
+            }
+            $actions.Add([pscustomobject]@{ Kind = 'SET'; Name = $name; Value = '' })
+            continue
+        }
+
+        if ($line.StartsWith('UNSET ')) {
+            $name = $line.Substring(6)
+            if (-not ($envAllowlist -ccontains $name)) {
+                throw "protocol error: UNSET of non-allowlisted name '$name'"
+            }
+            $actions.Add([pscustomobject]@{ Kind = 'UNSET'; Name = $name; Value = $null })
+            continue
+        }
+
+        if ($line.StartsWith('REC ')) {
+            $rest = $line.Substring(4)
+            $separator = $rest.IndexOf(' ')
+            if ($separator -lt 0) {
+                $name = $rest
+                $escaped = ''
+            } else {
+                $name = $rest.Substring(0, $separator)
+                $escaped = $rest.Substring($separator + 1)
+            }
+            if (-not ($fieldAllowlist -ccontains $name)) {
+                throw "protocol error: REC of non-allowlisted field '$name'"
+            }
+            [void](ConvertFrom-CtxProtocolEscape -Value $escaped)
+            continue
+        }
+
+        if ($line.StartsWith('MSG ')) {
+            [void](ConvertFrom-CtxProtocolEscape -Value $line.Substring(4))
+            continue
+        }
+
+        if ($line.StartsWith('EXIT ')) {
+            $value = $line.Substring(5)
+            $parsed = 0
+            if (-not [int]::TryParse($value, [ref]$parsed) -or $parsed -lt 0 -or $parsed -gt 255) {
+                throw "protocol error: invalid EXIT value '$value'"
+            }
+            $exitCount++
+            continue
+        }
+
+        throw "protocol error: unrecognized response line '$line'"
+    }
+
+    if (-not $sawEnd) {
+        throw 'protocol error: response is missing the END line'
+    }
+    if ($exitCount -ne 1) {
+        throw 'protocol error: response must contain exactly one EXIT before END'
+    }
+
+    foreach ($action in $actions) {
+        if ($action.Kind -ceq 'UNSET') {
+            Remove-Item -Path "Env:$($action.Name)" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path "Env:$($action.Name)" -Value $action.Value
+        }
+    }
+}
+
 # Session-local activation record (no on-disk registry). Written only after
 # an activation has actually succeeded; reset on clear and never on a failed
 # activation. `ctx current`/`ctx check` report the mode and home of the
