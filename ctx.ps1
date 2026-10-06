@@ -209,17 +209,26 @@ function Write-CtxStatus {
 }
 
 function Show-CtxCurrent {
-    if (-not $env:AI_CTX_PROFILES) {
-        Write-Host "No active AI context."
-        Write-Host 'Run "ctx <profile> [profile...]" to activate one.'
+    # Read-only: delegates to the .NET 10 engine named by CTX_ENGINE_DLL.
+    # There is no legacy renderer fallback, so a missing/non-file engine is a
+    # hard failure. The recorded mode is passed only when the session-local
+    # activation record still matches; the mode is never inferred from
+    # AI_CTX_PROFILES_COPILOT_MODE.
+    $engine = $env:CTX_ENGINE_DLL
+    if ([string]::IsNullOrWhiteSpace($engine) -or -not (Test-Path -LiteralPath $engine -PathType Leaf)) {
+        $reported = if ([string]::IsNullOrWhiteSpace($engine)) { '<unset>' } else { $engine }
+        Write-Error "ctx: error: .NET 10 engine DLL not found: $reported"
         return
     }
 
-    $parts = $env:AI_CTX_PROFILES -split '\+'
-    $profileName = $parts[0]
-    $sharedCsv = ($parts | Select-Object -Skip 1) -join ', '
-
-    Write-CtxStatus -ProfileName $profileName -SharedCsv $sharedCsv
+    if (Test-CtxActiveRecordMatches) {
+        & dotnet $engine current --recorded-mode $Script:CtxActiveMode
+    } else {
+        & dotnet $engine current
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "ctx: error: .NET 10 engine exited with status $LASTEXITCODE"
+    }
 }
 
 function Clear-CtxContext {

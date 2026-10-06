@@ -3994,4 +3994,47 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         @(Get-CtxProfileName) | Should -Contain 'review'
     }
 
+    It 'Issue67: ctx current fails when the missing .NET engine DLL path does not exist' {
+        # The shell adapter must delegate `current` to the .NET 10 engine named
+        # by CTX_ENGINE_DLL. A missing DLL is a hard failure with no old-shell
+        # fallback, even when no profile is active.
+        $priorSet = Test-Path Env:\CTX_ENGINE_DLL
+        $priorValue = $env:CTX_ENGINE_DLL
+        $missingDll = Join-Path $Script:TestTmp 'missing-engine/no-such-ctx-engine.dll'
+        Test-Path -LiteralPath $missingDll | Should -BeFalse
+
+        try {
+            $env:CTX_ENGINE_DLL = $missingDll
+
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'SilentlyContinue'
+            $errorCountBefore = $Error.Count
+            $caught = $null
+            $out = @()
+            try {
+                $out = @(& { ctx current } *>&1)
+            } catch {
+                $caught = $_
+            } finally {
+                $ErrorActionPreference = $previous
+            }
+
+            $newErrors = @($Error | Select-Object -First ($Error.Count - $errorCountBefore))
+            $err = @($newErrors + @($caught) | Where-Object { $_ })
+            $err | Should -Not -BeNullOrEmpty
+
+            $text = ($out | ForEach-Object { $_.ToString() }) -join "`n"
+            $text | Should -Not -Match 'No active AI context'
+            $combined = $text + "`n" + (($err | ForEach-Object { $_.ToString() }) -join "`n")
+            $combined | Should -Match ([regex]::Escape($missingDll))
+            $combined | Should -Match '(?i)engine'
+        } finally {
+            if ($priorSet) {
+                $env:CTX_ENGINE_DLL = $priorValue
+            } else {
+                Remove-Item Env:\CTX_ENGINE_DLL -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
 }

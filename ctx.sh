@@ -269,22 +269,21 @@ _ctx_print_status() {
 }
 
 _ctx_current() {
-    if [ -z "${AI_CTX_PROFILES:-}" ]; then
-        printf 'No active AI context.\n'
-        printf 'Run "ctx <profile> [profile...]" to activate one.\n'
-        return 0
+    # Read-only: delegates to the .NET 10 engine named by CTX_ENGINE_DLL.
+    # There is no legacy renderer fallback, so a missing/non-file engine is a
+    # hard failure. The recorded mode is passed only when the session-local
+    # activation record still matches; the mode is never inferred from
+    # AI_CTX_PROFILES_COPILOT_MODE.
+    if [ -z "${CTX_ENGINE_DLL:-}" ] || [ ! -f "$CTX_ENGINE_DLL" ]; then
+        printf 'ctx: error: .NET 10 engine DLL not found: %s\n' "${CTX_ENGINE_DLL:-<unset>}" >&2
+        return 1
     fi
 
-    local profile shared_csv
-    profile="${AI_CTX_PROFILES%%+*}"
-    if [ "$AI_CTX_PROFILES" = "$profile" ]; then
-        shared_csv=""
+    if _ctx_active_record_matches; then
+        dotnet "$CTX_ENGINE_DLL" current --recorded-mode "$_ctx_active_mode"
     else
-        shared_csv="${AI_CTX_PROFILES#*+}"
-        shared_csv="${shared_csv//+/, }"
+        dotnet "$CTX_ENGINE_DLL" current
     fi
-
-    _ctx_print_status "$profile" "$shared_csv"
 }
 
 _ctx_file_identity() {
@@ -537,7 +536,7 @@ ctx() {
     if [ "$#" -eq 0 ]; then _ctx_usage; return 0; fi
     case "$1" in
         -h|--help) _ctx_usage; return 0 ;;
-        current) _ctx_current; return 0 ;;
+        current) _ctx_current; return $? ;;
         check) _ctx_check; return $? ;;
         skills) _ctx_skills; return 0 ;;
         clear) _ctx_clear "$2"; return $? ;;
