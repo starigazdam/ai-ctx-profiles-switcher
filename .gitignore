@@ -15,3 +15,4 @@ node_modules/
 # needs to be ignored here for them. If you ever point AI_CTX_PROFILES_SYNTHETIC_HOMES_ROOT at a
 # path inside a repo, ignore it explicitly, e.g.:
 # .config/ctx/homes/
+node_modules/
