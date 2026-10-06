@@ -284,6 +284,58 @@ discovery locations (personal `~/.agents/skills`, repository `.github/skills` /
 still be discovered by Copilot and are not blocked. Modes B/C instead export
 `COPILOT_SKILLS_DIRS` (see [Integration modes](#integration-modes)).
 
+Per the
+[official add-skills docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills)
+and the
+[CLI config-dir reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference),
+Copilot CLI discovers skills from several documented roots. Personal roots are
+`~/.copilot/skills` and `~/.agents/skills` — Copilot CLI does not treat
+`~/.claude/skills` as an official personal root — and project-level roots
+include `.github/skills`, `.agents/skills`, and `.claude/skills`. These are
+documented locations that may be additive; not every one is always present or
+always loaded under a custom `COPILOT_HOME`. Skills can also come from plugin
+and other custom sources. `ctx` does not remove or disable any of these, so a
+context may see personal, project, inherited, or plugin/custom skills alongside
+the ones it projects.
+
+Verified with **GitHub Copilot CLI 1.0.91** (issue #49 investigation):
+`copilot skill list --json` run from a child working directory lists a skill
+stored under an *ancestor* `.agents/skills` directory with `source: inherited`.
+An isolated probe set `COPILOT_HOME` to an unrelated directory outside that
+ancestor tree and still listed the canary as `source: inherited`, confirming
+this ancestor `.agents/skills` source is independent of the selected
+`COPILOT_HOME` — the only independence verified. The exact original issue
+command that redirected all environment variables was not run successfully, and
+the nine exact issue entries were not individually reproduced, so their paths
+and any `HOME`/`USERPROFILE`/`CLAUDE_CONFIG_DIR` behavior remain unverified.
+
+Two verified findings also constrain per-context exclusion. First, in Mode A,
+`copilot skill disable <name>` is **not** a safe per-context workaround: it
+writes `disabledSkills` into `settings.json` under the active Copilot home, and
+in Mode A each synthetic home's `settings.json` is a symlink to the same
+`$HOME/.copilot/settings.json`. Reproduced with a Mode-A fixture and a
+disposable fake `HOME`, the baseline global/inherited skill was enabled;
+disabling the inherited skill in context `alpha` kept `alpha`'s own selected
+skill enabled but disabled the inherited skill in `beta` and, after `ctx
+clear`, outside `ctx` entirely. Second, the CLI's supported skill-name disable
+command offers no negative *skill-root* filter: the docs and help expose no
+skill-root exclusion option, and `COPILOT_SKILLS_DIRS`, where supported, is
+additive rather than an exclusion mechanism.
+
+How `copilot skill disable` affects outside-`ctx` behavior differs by mode, but
+`ctx` provides no built-in or durable per-context exclusion workflow in any of
+them. In Mode A the shared `settings.json` symlink makes a disable unsafe: it
+writes the real `$HOME/.copilot/settings.json`, so it affects every Mode A
+context and, outside `ctx`, normal behavior. In Mode B `ctx` leaves whatever
+`COPILOT_HOME` value is already set alone — the normal user home, a stale
+Mode-A synthetic pointer, or another custom value — so a disable's effect
+follows that existing home and may affect any sessions sharing it; `ctx` itself
+does not provide exclusion. In Mode C a user could manually disable a skill
+name inside that activation's fresh home without changing global settings, but
+the home is recreated on every activation, so the disable would have to be
+repeated each time and is never automated or persisted by `ctx`. In short:
+there is no negative skill-root filter and no ctx-managed durable exclusion.
+
 #### Inspecting potential skill discovery with `ctx skills`
 
 `ctx skills` is a strictly read-only, filesystem/configuration-based inventory
@@ -498,7 +550,10 @@ keep working identically across contexts, and populates the per-context
 (`.github/skills` for legacy profiles, `.agents/skills` for canonical
 profiles). Canonical profiles additionally project their `AGENTS.md` into
 `instructions/ctx-profiles/` (see
-[Canonical profiles](#canonical-profiles-agentsmd)). Known risks remain; this
+[Canonical profiles](#canonical-profiles-agentsmd)). That skills projection is
+additive, not exclusive: Copilot CLI also loads personal, project, inherited,
+and plugin/custom skill roots (see [Skill discovery](#skill-discovery)), so a
+context may see more skills than its own. Known risks remain; this
 feature does not fix them:
 
 - Copilot's atomic temp-file+rename writes can replace a symlinked file
@@ -506,6 +561,10 @@ feature does not fix them:
   from the real shared file until the next activation's reconciliation
   repairs it. See `docs/empirical-symlink-hazard.md`.
 - Concurrent contexts are last-reconciliation-wins.
+- There is no built-in or durable per-context skill exclusion in any mode;
+  `copilot skill disable` is shared across every Mode A context via the single
+  `settings.json` symlink, and neither Mode A nor Modes B/C offers a negative
+  skill-root filter (see [Skill discovery](#skill-discovery)).
 - **Local TOCTOU gap:** Mode A path checks, including rechecks before creating
   the synthetic home and before `ctx clear --all` recursively deletes it, are
   preflight validation only—not race protection. A different local user who
@@ -602,7 +661,8 @@ and exports `COPILOT_HOME` to point at it:
   profiles, `.agents/skills/*` for canonical profiles), so this context
   projects exactly the selected profiles' skills. This controls the synthetic
   `COPILOT_HOME` view only — it does not hide or block other built-in or
-  configured skill locations Copilot may discover, and it is not a security
+  configured skill locations Copilot may discover (see
+  [Skill discovery](#skill-discovery)), and it is not a security
   sandbox.
 - Reactivating a context (re-`cd`-ing into a `.ctx` dir, or re-running
   `ctx <profile>`) is idempotent: unchanged symlinks are left alone, stale
