@@ -4065,8 +4065,10 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             function Script:New-CtxLocalRootsFixture {
                 # Builds a project whose .ctx uses @profile entries for two legacy
                 # primary profiles plus one canonical external profile, with the
-                # two root directives placed after every entry.
-                param([switch]$Absolute)
+                # two root directives placed after every entry. $TaskIdentifier
+                # overrides the task-scaffold entry value (default: its direct
+                # relative path) so callers can exercise @profile lookup.
+                param([switch]$Absolute, [string]$TaskIdentifier)
                 $base = Join-Path $Script:TestTmp ("local-roots-" + [guid]::NewGuid().ToString('N'))
                 $proj = Join-Path $base 'project'
                 New-Item -ItemType Directory -Path $proj -Force | Out-Null
@@ -4078,7 +4080,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
                 $taskDir = New-CtxLocalRootsCanonical -Root $externalRoot -Name 'task-scaffold' -Skill 'task-skill'
                 $configPath = if ($Absolute) { $configRoot } else { './ai-config' }
                 $externalPath = if ($Absolute) { $externalRoot } else { './external-profiles' }
-                $taskPath = if ($Absolute) { $taskDir } else { './external-profiles/task-scaffold' }
+                $taskPath = if ($TaskIdentifier) { $TaskIdentifier } elseif ($Absolute) { $taskDir } else { './external-profiles/task-scaffold' }
                 $ctxFile = Join-Path $proj '.ctx'
                 Set-Content -LiteralPath $ctxFile -Value @(
                     'team:@profile'
@@ -4185,6 +4187,42 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             Invoke-CtxAutoLoad | Out-Null
             $env:AI_CTX_PROFILES | Should -Be 'team+dotnet+task-scaffold'
             Test-Path -LiteralPath $f.Workspace | Should -BeFalse
+        }
+
+        It 'loads valid local roots even when both env root variables are invalid' {
+            $badConfig = Join-Path $Script:TestTmp 'invalid-env-ai-config'
+            $badExternal = Join-Path $Script:TestTmp 'invalid-env-external-profiles'
+            $env:AI_CTX_PROFILES_CONFIG_ROOT = $badConfig
+            $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = $badExternal
+
+            $f = New-CtxLocalRootsFixture -TaskIdentifier '@profile'
+            ctx load $f.CtxFile | Should -BeTrue
+
+            $env:AI_CTX_PROFILES | Should -Be 'team+dotnet+task-scaffold'
+            $env:AI_CTX_PROFILES_CONFIG_ROOT | Should -Be $badConfig
+            $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT | Should -Be $badExternal
+            (Get-CtxLinkTarget -Path (Join-Path $env:COPILOT_HOME 'skills/task-skill') -Target $null) | Should -Be (Join-Path $f.TaskDir '.agents/skills/task-skill')
+
+            Set-Location $f.Project
+            (ctx check) | Should -BeTrue
+        }
+
+        It 'rejects partially qualified Windows root directives before normalization' {
+            if (-not ($IsWindows -or ($env:OS -ceq 'Windows_NT'))) {
+                Set-ItResult -Skipped -Because 'drive-relative and root-relative ambiguity is Windows-only'
+                return
+            }
+            $cases = @(
+                @{ Label = 'drive-relative config-root'; Line = 'config-root:C:relative' },
+                @{ Label = 'root-relative external-profiles-root'; Line = 'external-profiles-root:\root-relative' }
+            )
+            foreach ($case in $cases) {
+                $proj = Join-Path $Script:TestTmp ("partial-root-" + [guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Path $proj -Force | Out-Null
+                $ctxFile = Join-Path $proj '.ctx'
+                Set-Content -LiteralPath $ctxFile -Value @('team:@profile', $case.Line)
+                { Parse-CtxFile -CtxFile $ctxFile } | Should -Throw '*fully qualified*' -Because $case.Label
+            }
         }
 
         It 'rejects invalid or duplicate root directives while preserving the active context' {

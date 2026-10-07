@@ -256,6 +256,53 @@ security:./local-instructions
   works](#how-it-works) below) instead of the centralized default. See
   [Choosing a custom COPILOT_HOME location](#choosing-a-custom-copilot_home-location).
 
+#### Folder-local profiles roots (PowerShell only)
+
+PowerShell (`ctx.ps1`) lets a `.ctx` file declare its own profile roots instead
+of relying on the environment:
+
+```
+config-root:<path-to-ai-config>
+external-profiles-root:<path-to-external-profiles-root>
+```
+
+- `config-root:` overrides `AI_CTX_PROFILES_CONFIG_ROOT` for this `.ctx` file;
+  it must name a directory that contains a `profiles` subdirectory.
+- `external-profiles-root:` overrides
+  `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT`, trusting canonical profiles
+  directly beneath it.
+- `<path>` may be relative to the directory containing the `.ctx` file
+  (`./ai-config`, `.\ai-config`, `..\profiles`) or an absolute, fully qualified
+  path (`C:\path\to\ai-config`, `\\server\share\profiles`). A Windows
+  drive-relative (`C:foo`) or root-relative (`\foo`) value is rejected before
+  any normalization, because it would otherwise resolve against the process
+  current directory/drive rather than the `.ctx` folder.
+- Both root directives are collected and validated before any entry is
+  resolved, regardless of line position, and both apply only to that parse.
+  They take precedence over the matching environment variables, so an invalid
+  environment value does not break a `.ctx` that supplies valid local roots.
+- The directives are metadata, not context entries: they never appear in
+  `AI_CTX_PROFILES`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, the adjacent workspace
+  file, or the skill inventory.
+- `ctx` never writes, mutates, or clears `AI_CTX_PROFILES_CONFIG_ROOT` or
+  `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT`; the override is scoped to the
+  single `.ctx` load and does not leak to manual activation or a later context.
+- Each root must exist and cannot be the filesystem root. Profile targets
+  (including canonical `AGENTS.md` profiles reached through `@profile`) are
+  physically resolved and must remain beneath a trusted root, so junctions,
+  symlinks, and sibling path-prefix escapes are rejected by the same
+  containment checks.
+- An invalid, missing, duplicate, or partially qualified root directive rejects
+  the whole `.ctx` file before any state change, leaving the previous context
+  untouched. The auto-load hook treats a `.ctx` file's local root directives as
+  trusted exactly as explicit `ctx load` does.
+
+> **Bash/zsh (`ctx.sh`) does not support these directives.** It parses
+> `config-root:` and `external-profiles-root:` lines as ordinary
+> `<name>:<path>` profile entries, which typically makes it reject the file (or
+> attempt to activate a bad path). A `.ctx` file that uses these directives is
+> not portable to the Bash implementation.
+
 When your shell prompt renders after a `cd` / `Set-Location` into that
 directory (or any descendant of it), `AI_CTX_PROFILES` (the names joined by `+`)
 is set, overwriting any previous value. `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`

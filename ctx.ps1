@@ -2257,6 +2257,18 @@ function Parse-CtxFile {
         $seenRoots[$directive] = $true
         $path = $line.Substring($sepIndex + 1).Trim()
         if (-not $path) { throw "invalid .ctx line in $CtxFile (expected <name>:<path>): $line" }
+        # On Windows, IsPathRooted also accepts drive-relative (C:foo) and
+        # root-relative (\foo) values, which GetFullPath would resolve against
+        # the process current directory/drive rather than this .ctx folder.
+        # Reject those partially qualified values at the original-value boundary
+        # using the same drive/UNC full-qualification test as
+        # Get-CtxExternalProfilesRoot. Normal relative values, fully qualified
+        # drive paths (C:\...), and UNC paths (\\server\share\...) are accepted.
+        $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
+        $isFullyQualified = ($path -match '^[A-Za-z]:[\\/]') -or ($path -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+')
+        if ($isWindowsLike -and [System.IO.Path]::IsPathRooted($path) -and -not $isFullyQualified) {
+            throw "`"$directive`" must be a fully qualified absolute path: $path"
+        }
         $rootPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
         $rootPath = [System.IO.Path]::GetFullPath($rootPath)
         $canonicalRoot = Get-CtxExternalProfilesRoot -ExternalRoot $rootPath -RootName $directive
