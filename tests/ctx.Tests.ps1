@@ -4341,7 +4341,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             # A symlinked child of the trusted external root whose physical
             # target is outside the root must not resolve through @profile.
             $profileLink = Join-Path $f.ExternalRoot 'escape'
-            New-CtxLocalRootsDirLink -Path $profileLink -Target $outside | Out-Null
+            New-CtxLocalRootsDirLink -Path $profileLink -Target $outside | Should -Not -BeNullOrEmpty
             $profileProj = Join-Path $Script:TestTmp 'project-profile-symlink-escape'
             New-Item -ItemType Directory -Path $profileProj -Force | Out-Null
             $profileCtx = Join-Path $profileProj '.ctx'
