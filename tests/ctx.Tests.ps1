@@ -4062,6 +4062,26 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
                 return $dir
             }
 
+            function Script:New-CtxLocalRootsDirLink {
+                # Creates a directory link at $Path to $Target, preferring a
+                # symbolic link and falling back to a Windows junction when
+                # symlink privilege is unavailable. Returns $null when neither
+                # can be created.
+                param([string]$Path, [string]$Target)
+                try {
+                    New-Item -ItemType SymbolicLink -Path $Path -Target $Target -ErrorAction Stop | Out-Null
+                    return 'symlink'
+                } catch {
+                    if (-not ($IsWindows -or ($env:OS -ceq 'Windows_NT'))) { return $null }
+                    try {
+                        New-Item -ItemType Junction -Path $Path -Target $Target -ErrorAction Stop | Out-Null
+                        return 'junction'
+                    } catch {
+                        return $null
+                    }
+                }
+            }
+
             function Script:New-CtxLocalRootsFixture {
                 # Builds a project whose .ctx uses @profile entries for two legacy
                 # primary profiles plus one canonical external profile, with the
@@ -4264,16 +4284,8 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             }
         }
 
-        It 'rejects canonical profiles that physically escape the local roots' {
+        It 'rejects canonical profiles that escape through a sibling path prefix' {
             $f = New-CtxLocalRootsFixture
-            $outside = Join-Path $Script:TestTmp 'outside-canonical'
-            New-Item -ItemType Directory -Path $outside -Force | Out-Null
-            [System.IO.File]::WriteAllText((Join-Path $outside 'AGENTS.md'), "# outside canonical`n")
-            $link = Join-Path $f.ExternalRoot 'linked-canonical'
-            try { New-Item -ItemType SymbolicLink -Path $link -Target $outside | Out-Null } catch {
-                Set-ItResult -Skipped -Because 'symlink creation unavailable'
-                return
-            }
 
             $null = New-CtxTestProfile -Name 'escapeprev'
             ctx escapeprev | Out-Null
@@ -4293,6 +4305,27 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             try { $result = Import-CtxFile -CtxFile $siblingCtx } finally { $ErrorActionPreference = $previous }
             $result | Should -BeFalse
             $env:AI_CTX_PROFILES | Should -Be $prevContext
+            $env:COPILOT_HOME | Should -Be $prevHome
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        }
+
+        It 'rejects canonical profiles that physically escape through a directory link' {
+            $f = New-CtxLocalRootsFixture
+            $outside = Join-Path $Script:TestTmp 'outside-canonical'
+            New-Item -ItemType Directory -Path $outside -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $outside 'AGENTS.md'), "# outside canonical`n")
+            $link = Join-Path $f.ExternalRoot 'linked-canonical'
+            if (-not (New-CtxLocalRootsDirLink -Path $link -Target $outside)) {
+                Set-ItResult -Skipped -Because 'symlink/junction creation unavailable'
+                return
+            }
+
+            $null = New-CtxTestProfile -Name 'escapeprev'
+            ctx escapeprev | Out-Null
+            $prevContext = $env:AI_CTX_PROFILES
+            $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+            $prevHome = $env:COPILOT_HOME
+            $prevContext | Should -Be 'escapeprev'
 
             $linkProj = Join-Path $Script:TestTmp 'project-symlink-escape'
             New-Item -ItemType Directory -Path $linkProj -Force | Out-Null
@@ -4304,6 +4337,60 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             $env:AI_CTX_PROFILES | Should -Be $prevContext
             $env:COPILOT_HOME | Should -Be $prevHome
             $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+
+            # A symlinked child of the trusted external root whose physical
+            # target is outside the root must not resolve through @profile.
+            $profileLink = Join-Path $f.ExternalRoot 'escape'
+            New-CtxLocalRootsDirLink -Path $profileLink -Target $outside | Out-Null
+            $profileProj = Join-Path $Script:TestTmp 'project-profile-symlink-escape'
+            New-Item -ItemType Directory -Path $profileProj -Force | Out-Null
+            $profileCtx = Join-Path $profileProj '.ctx'
+            Set-Content -LiteralPath $profileCtx -Value @('escape:@profile', "external-profiles-root:$($f.ExternalRoot)")
+            $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+            try { $result = Import-CtxFile -CtxFile $profileCtx } finally { $ErrorActionPreference = $previous }
+            $result | Should -BeFalse
+            $env:AI_CTX_PROFILES | Should -Be $prevContext
+            $env:COPILOT_HOME | Should -Be $prevHome
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        }
+
+        It 'PR73: resolves a relative external-profiles-root through a physical link component' {
+            Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
+            $configRoot = $env:AI_CTX_PROFILES_CONFIG_ROOT
+            $teamDir = New-CtxTestProfile -Name 'team'
+
+            $base = Join-Path $Script:TestTmp ("physical-root-" + [guid]::NewGuid().ToString('N'))
+            $proj = Join-Path $base 'project'
+            $lexicalTrusted = Join-Path $proj 'trusted'
+            $outsideTrusted = Join-Path $base 'outside/trusted'
+            $linkTarget = Join-Path $base 'outside/nested'
+            New-Item -ItemType Directory -Path $proj, $lexicalTrusted, $outsideTrusted, $linkTarget -Force | Out-Null
+
+            $null = New-CtxLocalRootsCanonical -Root $lexicalTrusted -Name 'task-scaffold' -Skill 'task-skill'
+            $physicalProfile = New-CtxLocalRootsCanonical -Root $outsideTrusted -Name 'task-scaffold' -Skill 'task-skill'
+
+            $link = Join-Path $proj 'link'
+            if (-not (New-CtxLocalRootsDirLink -Path $link -Target $linkTarget)) {
+                Set-ItResult -Skipped -Because 'symlink/junction creation unavailable'
+                return
+            }
+
+            $ctxFile = Join-Path $proj '.ctx'
+            Set-Content -LiteralPath $ctxFile -Value @(
+                'team:@profile'
+                'task-scaffold:@profile'
+                'external-profiles-root:./link/../trusted'
+            )
+
+            ctx load $ctxFile | Should -BeTrue
+            $env:AI_CTX_PROFILES | Should -Be 'team+task-scaffold'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $teamDir
+            $env:AI_CTX_PROFILES_CONFIG_ROOT | Should -Be $configRoot
+            (Test-Path Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT) | Should -BeFalse
+            (Get-CtxLinkTarget -Path (Join-Path $env:COPILOT_HOME 'skills/task-skill') -Target $null) | Should -Be (Join-Path $physicalProfile '.agents/skills/task-skill')
+
+            Set-Location $proj
+            (ctx check) | Should -BeTrue
         }
     }
 }

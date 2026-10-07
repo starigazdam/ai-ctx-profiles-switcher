@@ -2270,7 +2270,12 @@ function Parse-CtxFile {
             throw "`"$directive`" must be a fully qualified absolute path: $path"
         }
         $rootPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
-        $rootPath = [System.IO.Path]::GetFullPath($rootPath)
+        # Do NOT lexically normalize with GetFullPath: that would collapse a
+        # "link/.." segment before Get-CtxPhysicalPath follows the symlink or
+        # junction in filesystem order, letting a directive select a different
+        # physical root than the OS resolves. Only make an otherwise-relative
+        # result absolute, without collapsing path components.
+        if (-not [System.IO.Path]::IsPathRooted($rootPath)) { $rootPath = Join-Path (Get-Location).Path $rootPath }
         $canonicalRoot = Get-CtxExternalProfilesRoot -ExternalRoot $rootPath -RootName $directive
         if ($directive -eq 'config-root') {
             $profilesDir = Join-Path $canonicalRoot 'profiles'

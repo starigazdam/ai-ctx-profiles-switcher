@@ -272,10 +272,12 @@ external-profiles-root:<path-to-external-profiles-root>
   `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT`, trusting canonical profiles
   directly beneath it.
 - `<path>` may be relative to the directory containing the `.ctx` file
-  (`./ai-config`, `.\ai-config`, `..\profiles`) or an absolute, fully qualified
-  path (`C:\path\to\ai-config`, `\\server\share\profiles`). A Windows
-  drive-relative (`C:foo`) or root-relative (`\foo`) value is rejected before
-  any normalization, because it would otherwise resolve against the process
+  (`./ai-config`, `../profiles`) or an absolute, fully qualified path
+  (`C:\path\to\ai-config`, `\\server\share\profiles`). Backslash separators
+  (`.\ai-config`, `..\profiles`) are Windows-only; Unix uses `/` because a
+  backslash there is a literal filename character. A Windows drive-relative
+  (`C:foo`) or root-relative (`\foo`) value is rejected before any
+  normalization, because it would otherwise resolve against the process
   current directory/drive rather than the `.ctx` folder.
 - Both root directives are collected and validated before any entry is
   resolved, regardless of line position, and both apply only to that parse.
@@ -295,7 +297,9 @@ external-profiles-root:<path-to-external-profiles-root>
 - An invalid, missing, duplicate, or partially qualified root directive rejects
   the whole `.ctx` file before any state change, leaving the previous context
   untouched. The auto-load hook treats a `.ctx` file's local root directives as
-  trusted exactly as explicit `ctx load` does.
+  trusted exactly as explicit `ctx load` does. Entering an untrusted repository
+  whose `.ctx` declares roots can activate those roots and project their skills
+  without any approval prompt, so only enter repositories you trust.
 
 > **Bash/zsh (`ctx.sh`) does not support these directives.** It parses
 > `config-root:` and `external-profiles-root:` lines as ordinary
