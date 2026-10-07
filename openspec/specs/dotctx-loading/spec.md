@@ -60,6 +60,35 @@ The system SHALL parse a `.ctx` file as lines of the form `<name>:<path>`. Blank
 - **WHEN** a `.ctx` file is loaded or auto-loaded under any mode
 - **THEN** the parser accepts exactly the existing line grammar (no mode directive), and `noautoload` handling and hook triggering are unchanged by the mode selector
 
+### Requirement: Folder-local profiles roots directives
+
+The PowerShell implementation (`ctx.ps1`) SHALL support two reserved `.ctx` directives that scope the profile roots for a single file: `config-root:` and `external-profiles-root:`. This capability is PowerShell-only; the Bash/zsh implementation (`ctx.sh`) SHALL NOT be required to implement it, and a `.ctx` file containing these directives is not portable to Bash. `config-root:<path>` SHALL override `AI_CTX_PROFILES_CONFIG_ROOT` for that parse and SHALL name a directory containing a `profiles` subdirectory. `external-profiles-root:<path>` SHALL override `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` for that parse and SHALL trust canonical profiles physically beneath it. Both directives SHALL be recognized in any line position, SHALL be collected and validated before any entry is resolved, and SHALL take precedence over the matching environment variables, so an invalid environment value cannot break a `.ctx` that supplies valid local roots. Paths SHALL be either relative to the directory containing the `.ctx` file or absolute and fully qualified; a Windows drive-relative (`C:foo`) or root-relative (`\foo`) value SHALL be rejected before normalization, while fully qualified drive (`C:\...`) and UNC (`\\server\share\...`) values SHALL be accepted. Each root SHALL exist, SHALL not be a filesystem root, and SHALL be physically resolved under the same containment rules as the environment roots, so junctions, symlinks, and sibling path-prefix escapes are rejected. The directives SHALL be metadata only: they SHALL NOT appear as context entries in `AI_CTX_PROFILES`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, the adjacent workspace file, or the skill inventory. Applying the directives SHALL NOT mutate, set, or clear either root environment variable and SHALL NOT require an approval prompt; the override is scoped to the single parse and SHALL NOT leak to manual activation or a later context. An invalid, missing, duplicate, or partially qualified root directive SHALL reject the whole `.ctx` file before any state change, with the same previous-context-untouched semantics as other `.ctx` validation errors. The directory-change auto-load hook SHALL treat a `.ctx` file's local root directives as trusted exactly as explicit `ctx load` does.
+
+#### Scenario: PowerShell loads a .ctx with folder-local roots
+
+- **WHEN** a `.ctx` file declares valid `config-root:` and `external-profiles-root:` directives and a user loads it with PowerShell
+- **THEN** the entries resolve beneath those local roots, the directives are treated as metadata rather than entries, neither root environment variable is changed, and no approval prompt is required
+
+#### Scenario: Local roots override invalid environment roots
+
+- **WHEN** `AI_CTX_PROFILES_CONFIG_ROOT` and `AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT` hold invalid values and a `.ctx` file supplies valid `config-root:` and `external-profiles-root:` directives
+- **THEN** the file loads, `ctx check` passes, and both environment variables remain unchanged
+
+#### Scenario: Partially qualified Windows roots are rejected early
+
+- **WHEN** a `.ctx` file declares `config-root:C:relative` or `external-profiles-root:\root-relative` on Windows
+- **THEN** parsing fails with a precise "fully qualified" validation error before normalization, even when the target paths do not exist, and the previous context remains unchanged
+
+#### Scenario: Invalid local roots reject the file before any state change
+
+- **WHEN** a `.ctx` file declares a missing, duplicate, filesystem-root, or otherwise invalid `config-root:` or `external-profiles-root:` directive
+- **THEN** the file is rejected before any state change and the previous context remains unchanged
+
+#### Scenario: Bash is not portable with folder-local roots
+
+- **WHEN** a `.ctx` file contains `config-root:` or `external-profiles-root:` and is loaded with Bash/zsh
+- **THEN** Bash parses the lines as ordinary `<name>:<path>` entries (it does not implement the directives) and typically rejects the file, so the file is not portable to Bash
+
 ### Requirement: .ctx auto-loading on directory change
 
 The system SHALL auto-load the nearest `.ctx` file (searching from the current directory upward) when the shell changes into a directory within its tree. A file containing a bare `noautoload` directive (case-insensitive) SHALL be skipped by the auto-load hook; the hook evaluates `noautoload` when triggered by a directory change.

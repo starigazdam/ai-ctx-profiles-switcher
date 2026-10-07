@@ -4037,4 +4037,360 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         }
     }
 
+
+    Context 'CtxLocalRoots: config-root and external-profiles-root directives' {
+
+        BeforeAll {
+            function Script:New-CtxLocalRootsLegacy {
+                param([string]$Root, [string]$Name)
+                $dir = Join-Path $Root "profiles/$Name"
+                New-Item -ItemType Directory -Path (Join-Path $dir '.github/instructions') -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $dir ".github/instructions/$Name.instructions.md") -Value "# $Name instructions"
+                return $dir
+            }
+
+            function Script:New-CtxLocalRootsCanonical {
+                param([string]$Root, [string]$Name, [string]$Skill)
+                $dir = Join-Path $Root $Name
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                [System.IO.File]::WriteAllText((Join-Path $dir 'AGENTS.md'), "# $Name canonical instructions`n")
+                if ($Skill) {
+                    $skillDir = Join-Path $dir ".agents/skills/$Skill"
+                    New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
+                    [System.IO.File]::WriteAllText((Join-Path $skillDir 'SKILL.md'), "---`nname: $Skill`ndescription: test`n---`n")
+                }
+                return $dir
+            }
+
+            function Script:New-CtxLocalRootsDirLink {
+                # Creates a directory link at $Path to $Target, preferring a
+                # symbolic link and falling back to a Windows junction when
+                # symlink privilege is unavailable. Returns $null when neither
+                # can be created.
+                param([string]$Path, [string]$Target)
+                try {
+                    New-Item -ItemType SymbolicLink -Path $Path -Target $Target -ErrorAction Stop | Out-Null
+                    return 'symlink'
+                } catch {
+                    if (-not ($IsWindows -or ($env:OS -ceq 'Windows_NT'))) { return $null }
+                    try {
+                        New-Item -ItemType Junction -Path $Path -Target $Target -ErrorAction Stop | Out-Null
+                        return 'junction'
+                    } catch {
+                        return $null
+                    }
+                }
+            }
+
+            function Script:New-CtxLocalRootsFixture {
+                # Builds a project whose .ctx uses @profile entries for two legacy
+                # primary profiles plus one canonical external profile, with the
+                # two root directives placed after every entry. $TaskIdentifier
+                # overrides the task-scaffold entry value (default: its direct
+                # relative path) so callers can exercise @profile lookup.
+                param([switch]$Absolute, [string]$TaskIdentifier)
+                $base = Join-Path $Script:TestTmp ("local-roots-" + [guid]::NewGuid().ToString('N'))
+                $proj = Join-Path $base 'project'
+                New-Item -ItemType Directory -Path $proj -Force | Out-Null
+                $configRoot = Join-Path $proj 'ai-config'
+                $externalRoot = Join-Path $proj 'external-profiles'
+                New-Item -ItemType Directory -Path (Join-Path $configRoot 'profiles'), $externalRoot -Force | Out-Null
+                $teamDir = New-CtxLocalRootsLegacy -Root $configRoot -Name 'team'
+                $dotnetDir = New-CtxLocalRootsLegacy -Root $configRoot -Name 'dotnet'
+                $taskDir = New-CtxLocalRootsCanonical -Root $externalRoot -Name 'task-scaffold' -Skill 'task-skill'
+                $configPath = if ($Absolute) { $configRoot } else { './ai-config' }
+                $externalPath = if ($Absolute) { $externalRoot } else { './external-profiles' }
+                $taskPath = if ($TaskIdentifier) { $TaskIdentifier } elseif ($Absolute) { $taskDir } else { './external-profiles/task-scaffold' }
+                $ctxFile = Join-Path $proj '.ctx'
+                Set-Content -LiteralPath $ctxFile -Value @(
+                    'team:@profile'
+                    'dotnet:@profile'
+                    "task-scaffold:$taskPath"
+                    "config-root:$configPath"
+                    "external-profiles-root:$externalPath"
+                )
+                return [pscustomobject]@{
+                    Base = $base; Project = $proj; CtxFile = $ctxFile
+                    ConfigRoot = $configRoot; ExternalRoot = $externalRoot
+                    TeamDir = $teamDir; DotnetDir = $dotnetDir; TaskDir = $taskDir
+                    Workspace = Join-Path $proj "$(Split-Path -Leaf $proj).code-workspace"
+                }
+            }
+        }
+
+        It 'loads a real mixed fixture using relative root directives placed after the entries' {
+            Remove-Item Env:\AI_CTX_PROFILES_CONFIG_ROOT -ErrorAction SilentlyContinue
+            Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
+            $f = New-CtxLocalRootsFixture
+
+            ctx load $f.CtxFile | Should -BeTrue
+
+            $env:AI_CTX_PROFILES | Should -Be 'team+dotnet+task-scaffold'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be (($f.TeamDir, $f.DotnetDir) -join ',')
+            (Test-Path Env:\AI_CTX_PROFILES_CONFIG_ROOT) | Should -BeFalse
+            (Test-Path Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT) | Should -BeFalse
+
+            $projDir = Join-Path $env:COPILOT_HOME 'instructions/ctx-profiles'
+            Test-Path -LiteralPath (Join-Path $projDir '0003-task-scaffold.instructions.md') | Should -BeTrue
+            ((@(Get-ChildItem -LiteralPath $projDir -File -Filter '*.instructions.md').Name | Sort-Object) -join "`n") | Should -Be '0003-task-scaffold.instructions.md'
+            (Get-CtxLinkTarget -Path (Join-Path $env:COPILOT_HOME 'skills/task-skill') -Target $null) | Should -Be (Join-Path $f.TaskDir '.agents/skills/task-skill')
+
+            $ws = Get-Content -LiteralPath $f.Workspace -Raw | ConvertFrom-Json
+            $folderNames = @($ws.folders | ForEach-Object { $_.name })
+            $folderNames | Should -Contain 'ctx: team'
+            $folderNames | Should -Contain 'ctx: dotnet'
+            $folderNames | Should -Contain 'ctx: task-scaffold'
+            $folderNames | Should -Not -Contain 'ctx: config-root'
+            $folderNames | Should -Not -Contain 'ctx: external-profiles-root'
+
+            Set-Location $f.Project
+            (ctx check) | Should -BeTrue
+        }
+
+        It 'supports absolute root directives and leaves both root env vars untouched' {
+            Remove-Item Env:\AI_CTX_PROFILES_CONFIG_ROOT -ErrorAction SilentlyContinue
+            Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
+            $f = New-CtxLocalRootsFixture -Absolute
+
+            ctx load $f.CtxFile | Should -BeTrue
+            $env:AI_CTX_PROFILES | Should -Be 'team+dotnet+task-scaffold'
+            (Test-Path Env:\AI_CTX_PROFILES_CONFIG_ROOT) | Should -BeFalse
+            (Test-Path Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT) | Should -BeFalse
+
+            Set-Location $f.Project
+            (ctx check) | Should -BeTrue
+        }
+
+        It 'local directives override the matching env roots without leaking to manual ctx or later contexts' {
+            $envConfig = Join-Path $Script:TestTmp 'env-ai-config'
+            $envTeamDir = New-CtxLocalRootsLegacy -Root $envConfig -Name 'envteam'
+            $envExternal = Join-Path $Script:TestTmp 'env-external-profiles'
+            $null = New-CtxLocalRootsCanonical -Root $envExternal -Name 'envcanon'
+            $env:AI_CTX_PROFILES_CONFIG_ROOT = $envConfig
+            $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = $envExternal
+
+            $f = New-CtxLocalRootsFixture
+            ctx load $f.CtxFile | Should -BeTrue
+            $env:AI_CTX_PROFILES | Should -Be 'team+dotnet+task-scaffold'
+            $env:AI_CTX_PROFILES_CONFIG_ROOT | Should -Be $envConfig
+            $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT | Should -Be $envExternal
+
+            Set-Location $env:HOME
+            ctx envteam | Out-Null
+            $env:AI_CTX_PROFILES | Should -Be 'envteam'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $envTeamDir
+
+            $proj2 = Join-Path $Script:TestTmp 'project-env-root-only'
+            New-Item -ItemType Directory -Path $proj2 -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $proj2 '.ctx') -Value 'envteam:@profile'
+            ctx load (Join-Path $proj2 '.ctx') | Should -BeTrue
+            $env:AI_CTX_PROFILES | Should -Be 'envteam'
+        }
+
+        It 'a legacy .ctx without root directives still resolves through the env roots' {
+            $teamDir = New-CtxTestProfile -Name 'plainteam'
+            $proj = Join-Path $Script:TestTmp 'project-legacy-no-directive'
+            New-Item -ItemType Directory -Path $proj -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $proj '.ctx') -Value 'plainteam:@profile'
+            ctx load (Join-Path $proj '.ctx') | Should -BeTrue
+            $env:AI_CTX_PROFILES | Should -Be 'plainteam'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $teamDir
+            Set-Location $proj
+            (ctx check) | Should -BeTrue
+        }
+
+        It 'auto-load applies the root directives but never writes a workspace file' {
+            Remove-Item Env:\AI_CTX_PROFILES_CONFIG_ROOT -ErrorAction SilentlyContinue
+            Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
+            $f = New-CtxLocalRootsFixture
+            Set-Location $f.Project
+            Invoke-CtxAutoLoad | Out-Null
+            $env:AI_CTX_PROFILES | Should -Be 'team+dotnet+task-scaffold'
+            Test-Path -LiteralPath $f.Workspace | Should -BeFalse
+        }
+
+        It 'loads valid local roots even when both env root variables are invalid' {
+            $badConfig = Join-Path $Script:TestTmp 'invalid-env-ai-config'
+            $badExternal = Join-Path $Script:TestTmp 'invalid-env-external-profiles'
+            $env:AI_CTX_PROFILES_CONFIG_ROOT = $badConfig
+            $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT = $badExternal
+
+            $f = New-CtxLocalRootsFixture -TaskIdentifier '@profile'
+            ctx load $f.CtxFile | Should -BeTrue
+
+            $env:AI_CTX_PROFILES | Should -Be 'team+dotnet+task-scaffold'
+            $env:AI_CTX_PROFILES_CONFIG_ROOT | Should -Be $badConfig
+            $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT | Should -Be $badExternal
+            (Get-CtxLinkTarget -Path (Join-Path $env:COPILOT_HOME 'skills/task-skill') -Target $null) | Should -Be (Join-Path $f.TaskDir '.agents/skills/task-skill')
+
+            Set-Location $f.Project
+            (ctx check) | Should -BeTrue
+        }
+
+        It 'rejects partially qualified Windows root directives before normalization' {
+            if (-not ($IsWindows -or ($env:OS -ceq 'Windows_NT'))) {
+                Set-ItResult -Skipped -Because 'drive-relative and root-relative ambiguity is Windows-only'
+                return
+            }
+            $cases = @(
+                @{ Label = 'drive-relative config-root'; Line = 'config-root:C:relative' },
+                @{ Label = 'root-relative external-profiles-root'; Line = 'external-profiles-root:\root-relative' }
+            )
+            foreach ($case in $cases) {
+                $proj = Join-Path $Script:TestTmp ("partial-root-" + [guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Path $proj -Force | Out-Null
+                $ctxFile = Join-Path $proj '.ctx'
+                Set-Content -LiteralPath $ctxFile -Value @('team:@profile', $case.Line)
+                { Parse-CtxFile -CtxFile $ctxFile } | Should -Throw '*fully qualified*' -Because $case.Label
+            }
+        }
+
+        It 'rejects invalid or duplicate root directives while preserving the active context' {
+            $null = New-CtxTestProfile -Name 'prevteam'
+            ctx prevteam | Out-Null
+            $prevContext = $env:AI_CTX_PROFILES
+            $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+            $prevHome = $env:COPILOT_HOME
+            $prevContext | Should -Be 'prevteam'
+
+            $f = New-CtxLocalRootsFixture
+            $notDir = Join-Path $f.Project 'not-a-directory'
+            Set-Content -LiteralPath $notDir -Value 'file'
+            $fsRoot = [System.IO.Path]::GetPathRoot($f.Project)
+
+            $cases = @(
+                @{ Label = 'duplicate config-root'; Lines = @('team:@profile', "config-root:$($f.ConfigRoot)", "Config-Root:$($f.ConfigRoot)") },
+                @{ Label = 'duplicate external-profiles-root'; Lines = @("task-scaffold:$($f.TaskDir)", "external-profiles-root:$($f.ExternalRoot)", "external-profiles-root:$($f.ExternalRoot)") },
+                @{ Label = 'empty config-root'; Lines = @('team:@profile', 'config-root:') },
+                @{ Label = 'missing config-root'; Lines = @('team:@profile', 'config-root:./no-such-root') },
+                @{ Label = 'non-directory config-root'; Lines = @('team:@profile', "config-root:$notDir") },
+                @{ Label = 'filesystem-root external-profiles-root'; Lines = @('task-scaffold:@profile', "external-profiles-root:$fsRoot") }
+            )
+            if (-not ($IsWindows -or ($env:OS -ceq 'Windows_NT'))) {
+                $cases += @{ Label = 'backslash external-profiles-root on Unix'; Lines = @('task-scaffold:@profile', 'external-profiles-root:.\evil') }
+            }
+
+            foreach ($case in $cases) {
+                $badProj = Join-Path $Script:TestTmp ("bad-roots-" + [guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Path $badProj -Force | Out-Null
+                $badCtx = Join-Path $badProj '.ctx'
+                Set-Content -LiteralPath $badCtx -Value $case.Lines
+                $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+                try { $result = Import-CtxFile -CtxFile $badCtx } finally { $ErrorActionPreference = $previous }
+                $result | Should -BeFalse -Because $case.Label
+                $env:AI_CTX_PROFILES | Should -Be $prevContext -Because $case.Label
+                $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs -Because $case.Label
+                $env:COPILOT_HOME | Should -Be $prevHome -Because $case.Label
+            }
+        }
+
+        It 'rejects canonical profiles that escape through a sibling path prefix' {
+            $f = New-CtxLocalRootsFixture
+
+            $null = New-CtxTestProfile -Name 'escapeprev'
+            ctx escapeprev | Out-Null
+            $prevContext = $env:AI_CTX_PROFILES
+            $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+            $prevHome = $env:COPILOT_HOME
+            $prevContext | Should -Be 'escapeprev'
+
+            $siblingProfile = Join-Path ($f.ExternalRoot + '-evil') 'task-scaffold'
+            New-Item -ItemType Directory -Path $siblingProfile -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $siblingProfile 'AGENTS.md'), "# sibling canonical`n")
+            $siblingProj = Join-Path $Script:TestTmp 'project-sibling-escape'
+            New-Item -ItemType Directory -Path $siblingProj -Force | Out-Null
+            $siblingCtx = Join-Path $siblingProj '.ctx'
+            Set-Content -LiteralPath $siblingCtx -Value @("escape:$siblingProfile", "external-profiles-root:$($f.ExternalRoot)")
+            $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+            try { $result = Import-CtxFile -CtxFile $siblingCtx } finally { $ErrorActionPreference = $previous }
+            $result | Should -BeFalse
+            $env:AI_CTX_PROFILES | Should -Be $prevContext
+            $env:COPILOT_HOME | Should -Be $prevHome
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        }
+
+        It 'rejects canonical profiles that physically escape through a directory link' {
+            $f = New-CtxLocalRootsFixture
+            $outside = Join-Path $Script:TestTmp 'outside-canonical'
+            New-Item -ItemType Directory -Path $outside -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $outside 'AGENTS.md'), "# outside canonical`n")
+            $link = Join-Path $f.ExternalRoot 'linked-canonical'
+            if (-not (New-CtxLocalRootsDirLink -Path $link -Target $outside)) {
+                Set-ItResult -Skipped -Because 'symlink/junction creation unavailable'
+                return
+            }
+
+            $null = New-CtxTestProfile -Name 'escapeprev'
+            ctx escapeprev | Out-Null
+            $prevContext = $env:AI_CTX_PROFILES
+            $prevDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+            $prevHome = $env:COPILOT_HOME
+            $prevContext | Should -Be 'escapeprev'
+
+            $linkProj = Join-Path $Script:TestTmp 'project-symlink-escape'
+            New-Item -ItemType Directory -Path $linkProj -Force | Out-Null
+            $linkCtx = Join-Path $linkProj '.ctx'
+            Set-Content -LiteralPath $linkCtx -Value @("escape:$link", "external-profiles-root:$($f.ExternalRoot)")
+            $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+            try { $result = Import-CtxFile -CtxFile $linkCtx } finally { $ErrorActionPreference = $previous }
+            $result | Should -BeFalse
+            $env:AI_CTX_PROFILES | Should -Be $prevContext
+            $env:COPILOT_HOME | Should -Be $prevHome
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+
+            # A symlinked child of the trusted external root whose physical
+            # target is outside the root must not resolve through @profile.
+            $profileLink = Join-Path $f.ExternalRoot 'escape'
+            New-CtxLocalRootsDirLink -Path $profileLink -Target $outside | Should -Not -BeNullOrEmpty
+            $profileProj = Join-Path $Script:TestTmp 'project-profile-symlink-escape'
+            New-Item -ItemType Directory -Path $profileProj -Force | Out-Null
+            $profileCtx = Join-Path $profileProj '.ctx'
+            Set-Content -LiteralPath $profileCtx -Value @('escape:@profile', "external-profiles-root:$($f.ExternalRoot)")
+            $previous = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'; $Error.Clear()
+            try { $result = Import-CtxFile -CtxFile $profileCtx } finally { $ErrorActionPreference = $previous }
+            $result | Should -BeFalse
+            $env:AI_CTX_PROFILES | Should -Be $prevContext
+            $env:COPILOT_HOME | Should -Be $prevHome
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $prevDirs
+        }
+
+        It 'PR73: resolves a relative external-profiles-root through a physical link component' {
+            Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
+            $configRoot = $env:AI_CTX_PROFILES_CONFIG_ROOT
+            $teamDir = New-CtxTestProfile -Name 'team'
+
+            $base = Join-Path $Script:TestTmp ("physical-root-" + [guid]::NewGuid().ToString('N'))
+            $proj = Join-Path $base 'project'
+            $lexicalTrusted = Join-Path $proj 'trusted'
+            $outsideTrusted = Join-Path $base 'outside/trusted'
+            $linkTarget = Join-Path $base 'outside/nested'
+            New-Item -ItemType Directory -Path $proj, $lexicalTrusted, $outsideTrusted, $linkTarget -Force | Out-Null
+
+            $null = New-CtxLocalRootsCanonical -Root $lexicalTrusted -Name 'task-scaffold' -Skill 'task-skill'
+            $physicalProfile = New-CtxLocalRootsCanonical -Root $outsideTrusted -Name 'task-scaffold' -Skill 'task-skill'
+
+            $link = Join-Path $proj 'link'
+            if (-not (New-CtxLocalRootsDirLink -Path $link -Target $linkTarget)) {
+                Set-ItResult -Skipped -Because 'symlink/junction creation unavailable'
+                return
+            }
+
+            $ctxFile = Join-Path $proj '.ctx'
+            Set-Content -LiteralPath $ctxFile -Value @(
+                'team:@profile'
+                'task-scaffold:@profile'
+                'external-profiles-root:./link/../trusted'
+            )
+
+            ctx load $ctxFile | Should -BeTrue
+            $env:AI_CTX_PROFILES | Should -Be 'team+task-scaffold'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $teamDir
+            $env:AI_CTX_PROFILES_CONFIG_ROOT | Should -Be $configRoot
+            (Test-Path Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT) | Should -BeFalse
+            (Get-CtxLinkTarget -Path (Join-Path $env:COPILOT_HOME 'skills/task-skill') -Target $null) | Should -Be (Join-Path $physicalProfile '.agents/skills/task-skill')
+
+            Set-Location $proj
+            (ctx check) | Should -BeTrue
+        }
+    }
 }

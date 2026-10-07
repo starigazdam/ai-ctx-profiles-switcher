@@ -126,6 +126,12 @@
 # --- Core implementation -------------------------------------------------
 
 function Get-CtxRoot {
+    # $ConfigRoot is an already-validated folder-local override from a .ctx
+    # config-root directive; when absent the environment/default is used.
+    param([string]$ConfigRoot)
+    if ($ConfigRoot) {
+        return $ConfigRoot
+    }
     if ($env:AI_CTX_PROFILES_CONFIG_ROOT) {
         return $env:AI_CTX_PROFILES_CONFIG_ROOT
     }
@@ -384,15 +390,17 @@ function Clear-CtxContext {
 function Resolve-CtxProfileIdentifier {
     # Profiles are identifiers, not paths. Resolve only immediate children of
     # the configured root or the explicitly trusted external profiles root.
-    param([string]$Name)
+    # $ConfigRoot/$ExternalRoot are optional already-validated folder-local
+    # overrides from a single .ctx parse; manual activation leaves them unset.
+    param([string]$Name, [string]$ConfigRoot, [string]$ExternalRoot)
     if ([string]::IsNullOrWhiteSpace($Name) -or $Name -in @('.', '..') -or $Name -match '[\\/]') {
         throw "invalid profile identifier `"$Name`""
     }
-    $profilesRoot = Join-Path (Get-CtxRoot) 'profiles'
-    $externalRoot = Get-CtxExternalProfilesRoot
+    $profilesRoot = Join-Path (Get-CtxRoot -ConfigRoot $ConfigRoot) 'profiles'
+    $externalRoot = Get-CtxExternalProfilesRoot -ExternalRoot $ExternalRoot
     $searchRoots = @($profilesRoot)
     if ($externalRoot) { $searchRoots += $externalRoot }
-    $trustedRoots = @(Get-CtxTrustedProfileRoots)
+    $trustedRoots = @(Get-CtxTrustedProfileRoots -ConfigRoot $ConfigRoot -ExternalRoot $ExternalRoot)
     $comparison = if ($IsWindows -or $env:OS -ceq 'Windows_NT') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
     foreach ($searchRoot in $searchRoots) {
         $candidate = Join-Path $searchRoot $Name
@@ -1100,40 +1108,49 @@ function Get-CtxPhysicalPath {
 }
 
 function Get-CtxExternalProfilesRoot {
-    if (-not $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT) { return $null }
-    $configured = $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT
+    # $ExternalRoot is an already-resolved folder-local override from a .ctx
+    # external-profiles-root/config-root directive; it takes precedence over the
+    # environment variable so an invalid env value cannot break a .ctx that
+    # overrides it. $RootName only shapes error messages.
+    param([string]$ExternalRoot, [string]$RootName)
+    $configured = if ($ExternalRoot) { $ExternalRoot } else { $env:AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT }
+    if (-not $configured) { return $null }
+    if (-not $RootName) { $RootName = 'external profiles root' }
     $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
     if (-not $isWindowsLike -and $configured.Contains('\')) {
-        throw "AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT must not contain a backslash on Unix; use '/' path separators: $configured"
+        throw "$RootName must not contain a backslash on Unix; use '/' path separators: $configured"
     }
     $isAbsolute = [System.IO.Path]::IsPathRooted($configured)
     if ($isWindowsLike) {
         $isAbsolute = ($configured -match '^[A-Za-z]:[\\/]') -or ($configured -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+')
     }
     if (-not $isAbsolute) {
-        throw 'AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT must be an absolute path'
+        throw "$RootName must be an absolute path"
     }
     if (-not (Test-Path -LiteralPath $configured -PathType Container)) {
-        throw "external profiles root is not a directory: $configured"
+        throw "$RootName is not a directory: $configured"
     }
     $canonical = Get-CtxPhysicalPath -Path $configured
-    if (-not $canonical) { throw "external profiles root cannot be physically resolved: $configured" }
+    if (-not $canonical) { throw "$RootName cannot be physically resolved: $configured" }
     $filesystemRoot = [System.IO.Path]::GetPathRoot($canonical)
     if ([string]::Equals($canonical, $filesystemRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw 'external profiles root cannot be the filesystem root'
+        throw "$RootName cannot be the filesystem root"
     }
     return $canonical
 }
 
 function Get-CtxTrustedProfileRoots {
+    # $ConfigRoot/$ExternalRoot are optional already-validated folder-local
+    # overrides from a single .ctx parse; absent means env/default behavior.
+    param([string]$ConfigRoot, [string]$ExternalRoot)
     $roots = @()
-    $profilesRoot = Join-Path (Get-CtxRoot) 'profiles'
+    $profilesRoot = Join-Path (Get-CtxRoot -ConfigRoot $ConfigRoot) 'profiles'
     if (Test-Path -LiteralPath $profilesRoot -PathType Container) {
         $canonical = Get-CtxPhysicalPath -Path $profilesRoot
         if (-not $canonical) { throw "configured profiles root cannot be physically resolved: $profilesRoot" }
         $roots += $canonical
     }
-    $externalRoot = Get-CtxExternalProfilesRoot
+    $externalRoot = Get-CtxExternalProfilesRoot -ExternalRoot $ExternalRoot
     if ($externalRoot) { $roots += $externalRoot }
     return $roots
 }
@@ -1142,11 +1159,11 @@ function Test-CtxCanonicalProfileWithinRoot {
     # Canonical targets must physically resolve beneath the configured or
     # explicitly trusted external profiles root. Path-prefix siblings are not
     # contained; physical resolution follows symlinks and junctions.
-    param([string]$ProfileDir)
+    param([string]$ProfileDir, [string]$ConfigRoot, [string]$ExternalRoot)
     $dirResolved = Get-CtxPhysicalPath -Path $ProfileDir
     if (-not $dirResolved) { return $false }
     $comparison = if ($IsWindows -or $env:OS -ceq 'Windows_NT') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
-    foreach ($rootResolved in @(Get-CtxTrustedProfileRoots)) {
+    foreach ($rootResolved in @(Get-CtxTrustedProfileRoots -ConfigRoot $ConfigRoot -ExternalRoot $ExternalRoot)) {
         $rootTrimmed = $rootResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
         $dirTrimmed = $dirResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
         if ([string]::Equals($dirTrimmed, $rootTrimmed, $comparison)) { continue }
@@ -2220,10 +2237,60 @@ function Parse-CtxFile {
     # Side-effect-free .ctx parser shared by Import-CtxFile and Test-CtxActivation.
     # It validates all labels/targets before either caller changes state.
     param([string]$CtxFile)
-    $null = Get-CtxExternalProfilesRoot
     $dirOfFile = Split-Path -Parent $CtxFile
+    $rawLines = @(Get-Content -LiteralPath $CtxFile)
+    # First pass: collect and validate every folder-local root directive before
+    # resolving any profile or other entry, regardless of line position. These
+    # lines are metadata, never selected names/dirs/projections/workspace.
+    # `config-root:` overrides the config root and `external-profiles-root:`
+    # overrides the trusted external profiles root, for this parse only.
+    $localConfigRoot = $null; $localExternalRoot = $null; $seenRoots = @{}
+    foreach ($rawLine in $rawLines) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        if ($line -ieq 'noautoload') { continue }
+        $sepIndex = $line.IndexOf(':')
+        if ($sepIndex -lt 1) { continue }
+        $directive = $line.Substring(0, $sepIndex).Trim().ToLowerInvariant()
+        if ($directive -ne 'config-root' -and $directive -ne 'external-profiles-root') { continue }
+        if ($seenRoots.ContainsKey($directive)) { throw "duplicate `"$directive`" directive in $CtxFile" }
+        $seenRoots[$directive] = $true
+        $path = $line.Substring($sepIndex + 1).Trim()
+        if (-not $path) { throw "invalid .ctx line in $CtxFile (expected <name>:<path>): $line" }
+        # On Windows, IsPathRooted also accepts drive-relative (C:foo) and
+        # root-relative (\foo) values, which GetFullPath would resolve against
+        # the process current directory/drive rather than this .ctx folder.
+        # Reject those partially qualified values at the original-value boundary
+        # using the same drive/UNC full-qualification test as
+        # Get-CtxExternalProfilesRoot. Normal relative values, fully qualified
+        # drive paths (C:\...), and UNC paths (\\server\share\...) are accepted.
+        $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
+        $isFullyQualified = ($path -match '^[A-Za-z]:[\\/]') -or ($path -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+')
+        if ($isWindowsLike -and [System.IO.Path]::IsPathRooted($path) -and -not $isFullyQualified) {
+            throw "`"$directive`" must be a fully qualified absolute path: $path"
+        }
+        $rootPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path }
+        # Do NOT lexically normalize with GetFullPath: that would collapse a
+        # "link/.." segment before Get-CtxPhysicalPath follows the symlink or
+        # junction in filesystem order, letting a directive select a different
+        # physical root than the OS resolves. Only make an otherwise-relative
+        # result absolute, without collapsing path components.
+        if (-not [System.IO.Path]::IsPathRooted($rootPath)) { $rootPath = Join-Path (Get-Location).Path $rootPath }
+        $canonicalRoot = Get-CtxExternalProfilesRoot -ExternalRoot $rootPath -RootName $directive
+        if ($directive -eq 'config-root') {
+            $profilesDir = Join-Path $canonicalRoot 'profiles'
+            if (-not (Test-Path -LiteralPath $profilesDir -PathType Container)) { throw "config-root is missing a profiles directory: $canonicalRoot" }
+            if (-not (Get-CtxPhysicalPath -Path $profilesDir)) { throw "config-root profiles directory cannot be physically resolved: $profilesDir" }
+            $localConfigRoot = $canonicalRoot
+        } else {
+            $localExternalRoot = $canonicalRoot
+        }
+    }
+    # With no local external root directive, keep the original env preflight
+    # (including its validation); a local override already did not touch env.
+    if (-not $localExternalRoot) { $null = Get-CtxExternalProfilesRoot }
     $names = @(); $dirs = @(); $seenLabels = @{}; $seenTargets = @{}; $homeOverride = $null; $noAutoLoad = $false
-    foreach ($rawLine in Get-Content -LiteralPath $CtxFile) {
+    foreach ($rawLine in $rawLines) {
         $line = $rawLine.Trim()
         if (-not $line -or $line.StartsWith('#')) { continue }
         if ($line -ieq 'noautoload') { $noAutoLoad = $true; continue }
@@ -2231,12 +2298,13 @@ function Parse-CtxFile {
         if ($sepIndex -lt 1) { throw "invalid .ctx line in $CtxFile (expected <name>:<path>): $line" }
         $name = $line.Substring(0, $sepIndex).Trim(); $path = $line.Substring($sepIndex + 1).Trim()
         if (-not $name -or -not $path) { throw "invalid .ctx line in $CtxFile (expected <name>:<path>): $line" }
+        if ($name -ieq 'config-root' -or $name -ieq 'external-profiles-root') { continue }
         $labelKey = $name.ToLowerInvariant()
         if ($name -ine 'home') {
             if ($seenLabels.ContainsKey($labelKey)) { throw "duplicate .ctx entry label `"$name`"; first declared as `"$($seenLabels[$labelKey])`"" }
             $seenLabels[$labelKey] = $name
         }
-        if ($path -ceq '@profile') { $resolvedPath = Resolve-CtxProfileIdentifier -Name $name }
+        if ($path -ceq '@profile') { $resolvedPath = Resolve-CtxProfileIdentifier -Name $name -ConfigRoot $localConfigRoot -ExternalRoot $localExternalRoot }
         else { $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path } }
         if ($name -ieq 'home') {
             if ($homeOverride) { throw "duplicate `"home:`" directive in $CtxFile" }
@@ -2244,7 +2312,7 @@ function Parse-CtxFile {
             continue
         }
         if (-not (Test-Path -LiteralPath $resolvedPath -PathType Container)) { throw ".ctx entry `"$name`" in $CtxFile points to missing directory: $resolvedPath" }
-        if ((Test-CtxProfileCanonical -ProfileDir $resolvedPath) -and -not (Test-CtxCanonicalProfileWithinRoot -ProfileDir $resolvedPath)) {
+        if ((Test-CtxProfileCanonical -ProfileDir $resolvedPath) -and -not (Test-CtxCanonicalProfileWithinRoot -ProfileDir $resolvedPath -ConfigRoot $localConfigRoot -ExternalRoot $localExternalRoot)) {
             throw "canonical profile `"$name`" resolves outside the configured profiles root: $resolvedPath"
         }
         $canonical = [System.IO.Path]::GetFullPath($resolvedPath)
