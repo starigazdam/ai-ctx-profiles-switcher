@@ -4178,6 +4178,71 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             (ctx check) | Should -BeTrue
         }
 
+        It 'ctx load accepts a root-bound .ctx reached through its 8.3 short-name path (#79)' {
+            if (-not ($IsWindows -or $env:OS -ceq 'Windows_NT')) {
+                Set-ItResult -Skipped -Because '8.3 short names exist only on Windows'
+                return
+            }
+            $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($Script:TestTmp).ShortPath
+            if ([System.IO.Path]::GetFullPath($short) -ieq $short) {
+                Set-ItResult -Skipped -Because 'GetFullPath does not re-spell any component of the temp path'
+                return
+            }
+            Remove-Item Env:\AI_CTX_PROFILES_CONFIG_ROOT -ErrorAction SilentlyContinue
+            Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
+            $base = Join-Path $short ("short-name-" + [guid]::NewGuid().ToString('N'))
+            $configRoot = Join-Path $base 'copilot-ai-tools'
+            $externalRoot = Join-Path $base 'external-profiles'
+            New-Item -ItemType Directory -Path (Join-Path $configRoot 'profiles'), $externalRoot -Force | Out-Null
+            $null = New-CtxLocalRootsLegacy -Root $configRoot -Name 'team'
+            $null = New-CtxLocalRootsCanonical -Root $externalRoot -Name 'task-scaffold' -Skill 'task-skill'
+            $task = Join-Path $base 'x/y/task'
+            New-Item -ItemType Directory -Path $task -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $task '.ctx') -Value @(
+                'config-root:../../../copilot-ai-tools'
+                'external-profiles-root:../../../external-profiles'
+                'team:../../../copilot-ai-tools/profiles/team'
+                'task-scaffold:../../../external-profiles/task-scaffold'
+            )
+            # Load through the absolute 8.3 spelling: Resolve-Path keeps it for the
+            # .ctx folder and the root directives, while GetFullPath expands it for
+            # the relative entries, which made the containment check reject the
+            # canonical profile (#79). A relative load after Set-Location cannot
+            # reproduce this, because Set-Location re-spells $PWD to the long form.
+            ctx load (Join-Path $task '.ctx') | Should -BeTrue
+            $env:AI_CTX_PROFILES | Should -Be 'team+task-scaffold'
+        }
+
+        It 'canonical containment stays fail-closed for a drive-root-relative profile path (#79)' {
+            if (-not ($IsWindows -or $env:OS -ceq 'Windows_NT')) {
+                Set-ItResult -Skipped -Because 'root-relative drive paths exist only on Windows'
+                return
+            }
+            $configRoot = Join-Path $Script:TestTmp 'rootrel-config'
+            $evil = New-CtxLocalRootsCanonical -Root (Join-Path $configRoot 'profiles') -Name 'evil'
+            $full = [System.IO.Path]::GetFullPath($evil)
+            if ($full -notmatch '^[A-Za-z]:\\') {
+                Set-ItResult -Skipped -Because 'temp path is not drive-qualified'
+                return
+            }
+            $rootRelative = $full.Substring(2)
+            # Precondition for this case: the walker hands the root-relative operand
+            # on unchanged (still without a drive), so it reaches the GetFullPath step
+            # and only the guard decides the outcome; the PowerShell drive plays no part.
+            Get-CtxPhysicalPath -Path $rootRelative | Should -Be $rootRelative
+            $savedCwd = [System.Environment]::CurrentDirectory
+            try {
+                # With the process current directory on the trusted root's drive,
+                # GetFullPath alone would qualify the root-relative operand into a
+                # path inside the root. The operand must stay fail-closed instead.
+                [System.Environment]::CurrentDirectory = $Script:TestTmp
+                Test-CtxCanonicalProfileWithinRoot -ProfileDir $rootRelative -ConfigRoot $configRoot | Should -BeFalse
+                Test-CtxCanonicalProfileWithinRoot -ProfileDir $full -ConfigRoot $configRoot | Should -BeTrue
+            } finally {
+                [System.Environment]::CurrentDirectory = $savedCwd
+            }
+        }
+
         It 'ctx clear --all removes the workspace generated at a custom filesystem PSDrive root (#75)' {
             $root = Join-Path $Script:TestTmp ("psdrive-root-" + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $root -Force | Out-Null
