@@ -4226,6 +4226,10 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
                 return
             }
             $rootRelative = $full.Substring(2)
+            # Precondition for this case: the walker hands the root-relative operand
+            # on unchanged (still without a drive), so it reaches the GetFullPath step
+            # and only the guard decides the outcome; the PowerShell drive plays no part.
+            Get-CtxPhysicalPath -Path $rootRelative | Should -Be $rootRelative
             $savedCwd = [System.Environment]::CurrentDirectory
             try {
                 # With the process current directory on the trusted root's drive,
