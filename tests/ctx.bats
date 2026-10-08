@@ -4079,3 +4079,20 @@ _setup_check_home() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"CHECK PASS workspace"* ]]
 }
+
+@test "issue75: a symlinked alias of the loaded folder shares its auto-load key and clear --all workspace" {
+    local phys="$TEST_TMP/physical" alias="$TEST_TMP/alias"
+    mkdir -p "$phys/profiles/team/.github/instructions"
+    echo "# team instructions" > "$phys/profiles/team/.github/instructions/team.instructions.md"
+    printf 'team:profiles/team\n' > "$phys/.ctx"
+    ln -s "$phys" "$alias"
+
+    ctx load "$phys/.ctx" >/dev/null
+    [ -f "$phys/physical.code-workspace" ]
+    cd "$alias"
+    [ -z "$(_ctx_auto_load_hook 2>&1)" ]
+    _ctx_auto_load_dir=""
+    run ctx clear --all
+    [ "$status" -eq 0 ]
+    [ ! -e "$phys/physical.code-workspace" ]
+}
