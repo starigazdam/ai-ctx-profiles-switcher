@@ -4154,7 +4154,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             $configRoot = Join-Path $base 'copilot-ai-tools'
             $externalRoot = Join-Path $base 'external-profiles'
             New-Item -ItemType Directory -Path (Join-Path $configRoot 'profiles'), $externalRoot -Force | Out-Null
-            $null = New-CtxLocalRootsLegacy -Root $configRoot -Name 'team'
+            $teamDir = New-CtxLocalRootsLegacy -Root $configRoot -Name 'team'
             $null = New-CtxLocalRootsCanonical -Root $externalRoot -Name 'task-scaffold' -Skill 'task-skill'
             $task = Join-Path $base 'x/y/task'
             New-Item -ItemType Directory -Path $task -Force | Out-Null
@@ -4168,10 +4168,34 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
             Set-Location (Split-Path -Parent $task)
             ctx load './task/.ctx' | Should -BeTrue
+            Join-Path $task 'task.code-workspace' | Should -Exist
+            # Relative entries are stored without "." / ".." segments.
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be ([System.IO.Path]::GetFullPath($teamDir))
             Set-Location $task
-            Invoke-CtxAutoLoad | Out-Null  # what the prompt hook runs after cd
+            # The prompt hook must not re-activate the folder ctx load just activated.
+            @(& { Invoke-CtxAutoLoad } 6>&1).Count | Should -Be 0
 
             (ctx check) | Should -BeTrue
+        }
+
+        It 'ctx clear --all removes the workspace generated at a custom filesystem PSDrive root (#75)' {
+            $root = Join-Path $Script:TestTmp ("psdrive-root-" + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            $teamDir = New-CtxLocalRootsLegacy -Root (Join-Path $Script:TestTmp 'psdrive-config') -Name 'team'
+            Set-Content -LiteralPath (Join-Path $root '.ctx') -Value "team:$teamDir"
+            $workspace = Join-Path $root "$(Split-Path -Leaf $root).code-workspace"
+            New-PSDrive -Name CtxT75 -PSProvider FileSystem -Root $root | Out-Null
+            try {
+                Set-Location CtxT75:\
+                ctx load '.ctx' | Should -BeTrue
+                $workspace | Should -Exist
+                (ctx check) | Should -BeTrue
+                ctx clear --all | Out-Null
+                $workspace | Should -Not -Exist
+            } finally {
+                Set-Location $env:HOME
+                Remove-PSDrive -Name CtxT75 -ErrorAction SilentlyContinue
+            }
         }
 
         It 'supports absolute root directives and leaves both root env vars untouched' {

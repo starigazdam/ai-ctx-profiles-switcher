@@ -4042,3 +4042,23 @@ _setup_check_home() {
     [[ "$out" == *"$missing_dll"* ]]
     [[ "${out,,}" == *"engine"* ]]
 }
+
+@test "issue75: relative entries resolve identically for ctx load, auto-load, and ctx check" {
+    _make_profile team
+    local task="$TEST_TMP/x/y/task"
+    mkdir -p "$task"
+    printf 'team:../../../ai-config/profiles/team\n' > "$task/.ctx"
+
+    cd "$TEST_TMP/x/y"
+    ctx load ./task/.ctx >/dev/null
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$(realpath "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/team")" ]
+    cd task
+    [ -z "$(_ctx_auto_load_hook 2>&1)" ]
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS workspace"* ]]
+
+    ctx load ./.ctx >/dev/null
+    [ -f "$task/task.code-workspace" ]
+    [ ! -e "$task/..code-workspace" ]
+}
