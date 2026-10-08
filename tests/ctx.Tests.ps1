@@ -4184,8 +4184,8 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
                 return
             }
             $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($Script:TestTmp).ShortPath
-            if ($short -ieq $Script:TestTmp) {
-                Set-ItResult -Skipped -Because 'no path component has an 8.3 short name'
+            if ([System.IO.Path]::GetFullPath($short) -ieq $short) {
+                Set-ItResult -Skipped -Because 'GetFullPath does not re-spell any component of the temp path'
                 return
             }
             Remove-Item Env:\AI_CTX_PROFILES_CONFIG_ROOT -ErrorAction SilentlyContinue
@@ -4211,6 +4211,32 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             # reproduce this, because Set-Location re-spells $PWD to the long form.
             ctx load (Join-Path $task '.ctx') | Should -BeTrue
             $env:AI_CTX_PROFILES | Should -Be 'team+task-scaffold'
+        }
+
+        It 'canonical containment stays fail-closed for a drive-root-relative profile path (#79)' {
+            if (-not ($IsWindows -or $env:OS -ceq 'Windows_NT')) {
+                Set-ItResult -Skipped -Because 'root-relative drive paths exist only on Windows'
+                return
+            }
+            $configRoot = Join-Path $Script:TestTmp 'rootrel-config'
+            $evil = New-CtxLocalRootsCanonical -Root (Join-Path $configRoot 'profiles') -Name 'evil'
+            $full = [System.IO.Path]::GetFullPath($evil)
+            if ($full -notmatch '^[A-Za-z]:\\') {
+                Set-ItResult -Skipped -Because 'temp path is not drive-qualified'
+                return
+            }
+            $rootRelative = $full.Substring(2)
+            $savedCwd = [System.Environment]::CurrentDirectory
+            try {
+                # With the process current directory on the trusted root's drive,
+                # GetFullPath alone would qualify the root-relative operand into a
+                # path inside the root. The operand must stay fail-closed instead.
+                [System.Environment]::CurrentDirectory = $Script:TestTmp
+                Test-CtxCanonicalProfileWithinRoot -ProfileDir $rootRelative -ConfigRoot $configRoot | Should -BeFalse
+                Test-CtxCanonicalProfileWithinRoot -ProfileDir $full -ConfigRoot $configRoot | Should -BeTrue
+            } finally {
+                [System.Environment]::CurrentDirectory = $savedCwd
+            }
         }
 
         It 'ctx clear --all removes the workspace generated at a custom filesystem PSDrive root (#75)' {
