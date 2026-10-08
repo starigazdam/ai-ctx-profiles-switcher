@@ -20,6 +20,11 @@ The system SHALL parse a `.ctx` file as lines of the form `<name>:<path>`. Blank
 - **WHEN** a `.ctx` entry has a relative path and a user loads the file
 - **THEN** the path resolves against the directory containing the `.ctx` file, not the current working directory
 
+#### Scenario: Relative paths resolve the same way however the .ctx path is spelled
+
+- **WHEN** `ctx load` receives a `.ctx` path containing `.` or `..` segments (for example `./task/.ctx`) and the same file is later found by auto-load or `ctx check` from the task folder
+- **THEN** every relative entry resolves to the same normalized absolute directory, without `.` or `..` segments, in the exported environment, the generated workspace file, and the check, and auto-load does not re-activate the folder that `ctx load` just activated
+
 #### Scenario: @profile resolves the name under a trusted profiles root
 
 - **WHEN** a `.ctx` entry uses the value `@profile`

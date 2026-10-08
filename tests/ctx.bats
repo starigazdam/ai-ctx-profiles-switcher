@@ -4042,3 +4042,95 @@ _setup_check_home() {
     [[ "$out" == *"$missing_dll"* ]]
     [[ "${out,,}" == *"engine"* ]]
 }
+
+@test "issue75: relative entries resolve identically for ctx load, auto-load, and ctx check" {
+    _make_profile team
+    local task="$TEST_TMP/x/y/task"
+    mkdir -p "$task"
+    printf 'team:../../../ai-config/profiles/team\n' > "$task/.ctx"
+
+    cd "$TEST_TMP/x/y"
+    ctx load ./task/.ctx >/dev/null
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$(realpath "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/team")" ]
+    cd task
+    [ -z "$(_ctx_auto_load_hook 2>&1)" ]
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS workspace"* ]]
+
+    ctx load ./.ctx >/dev/null
+    [ -f "$task/task.code-workspace" ]
+    [ ! -e "$task/..code-workspace" ]
+}
+
+@test "issue75: a link/.. .ctx path anchors relative entries at the physically read folder" {
+    local phys="$TEST_TMP/physical" logical="$TEST_TMP/logical"
+    mkdir -p "$phys/child" "$phys/profiles/team/.github/instructions" "$logical"
+    echo "# team instructions" > "$phys/profiles/team/.github/instructions/team.instructions.md"
+    ln -s "$phys/child" "$logical/link"
+    printf 'team:profiles/team\n' > "$phys/.ctx"
+
+    ctx load "$logical/link/../.ctx" >/dev/null
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$(realpath "$phys/profiles/team")" ]
+    [ -f "$phys/physical.code-workspace" ]
+    cd "$phys"
+    [ -z "$(_ctx_auto_load_hook 2>&1)" ]
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS workspace"* ]]
+}
+
+@test "issue75: a symlinked alias of the loaded folder shares its auto-load key and clear --all workspace" {
+    local phys="$TEST_TMP/physical" alias="$TEST_TMP/alias"
+    mkdir -p "$phys/profiles/team/.github/instructions"
+    echo "# team instructions" > "$phys/profiles/team/.github/instructions/team.instructions.md"
+    printf 'team:profiles/team\n' > "$phys/.ctx"
+    ln -s "$phys" "$alias"
+
+    ctx load "$phys/.ctx" >/dev/null
+    [ -f "$phys/physical.code-workspace" ]
+    cd "$alias"
+    [ -z "$(_ctx_auto_load_hook 2>&1)" ]
+    _ctx_auto_load_dir=""
+    run ctx clear --all
+    [ "$status" -eq 0 ]
+    [ ! -e "$phys/physical.code-workspace" ]
+}
+
+@test "issue75: zsh auto-load hook is not re-entered by .ctx folder normalization (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+
+    local proj="$HOME/project-zsh-issue75" quiet="$HOME/project-zsh-issue75-noautoload"
+    mkdir -p "$proj/profiles/team/.github/instructions" "$quiet"
+    echo "# team instructions" > "$proj/profiles/team/.github/instructions/team.instructions.md"
+    printf 'team:profiles/team\n' > "$proj/.ctx"
+    printf 'noautoload\n' > "$quiet/.ctx"
+
+    # zsh runs chpwd hooks even for a cd inside command substitution, so a cd-based
+    # folder normalization re-enters _ctx_auto_load_hook; timeout bounds a hang.
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    run timeout --kill-after=5s 60s env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        cd "$2" || exit 90
+        source "$1" >/dev/null 2>&1 || exit 91
+        [[ ${chpwd_functions[(Ie)_ctx_auto_load_hook]} -gt 0 ]] || exit 89
+        marker="$4"
+        functions -c _ctx_auto_load_hook _ctx_issue75_hook
+        _ctx_auto_load_hook() { (( ZSH_SUBSHELL == 0 )) || print -r -- nested >> "$marker"; _ctx_issue75_hook "$@"; }
+        cd "$HOME" || exit 92
+        ctx load "$3/.ctx" >/dev/null 2>&1 || exit 93
+        [ "$_ctx_auto_load_dir" = "$(realpath "$3")" ] || exit 94
+        cd "$3" || exit 95
+        [ "$AI_CTX_PROFILES" = team ] || exit 96
+        _ctx_auto_load_dir=""
+        ctx clear --all >/dev/null 2>&1 || exit 97
+        [ ! -e "$3/project-zsh-issue75.code-workspace" ] || exit 98
+        [ ! -e "$marker" ] || exit 88
+        print -r -- zsh-issue75-ok
+    ' -- "$CTX_SRC" "$quiet" "$proj" "$TEST_TMP/zsh-nested-hook"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "zsh-issue75-ok" ]
+}

@@ -402,7 +402,7 @@ _ctx_clear() {
         if [ -z "$dir_of_file" ]; then
             local ctx_file
             if ctx_file="$(_ctx_find_ctx_file)"; then
-                dir_of_file="$(dirname "$ctx_file")"
+                dir_of_file="$(realpath -e -- "$(dirname -- "$ctx_file")")"
             fi
         fi
 
@@ -544,7 +544,9 @@ ctx() {
                 printf 'ctx: error: file not found: %s\n' "$load_file" >&2
                 return 1
             fi
-            load_dir="$(dirname "$load_file")"
+            # Same normalization as the parser, so the auto-load hook sees the
+            # folder ctx load just activated (#75).
+            load_dir="$(realpath -e -- "$(dirname -- "$load_file")")" || return 1
             if _ctx_load_ctx_file "$load_file"; then
                 _ctx_auto_load_dir="$load_dir"
             else
@@ -830,7 +832,8 @@ _ctx_auto_load_hook() {
     local ctx_file
     if ctx_file="$(_ctx_find_ctx_file)"; then
         local dir_of_file
-        dir_of_file="$(dirname "$ctx_file")"
+        # Same filesystem-order normalization as the parser and ctx load (#75).
+        dir_of_file="$(realpath -e -- "$(dirname -- "$ctx_file")")" || return 1
         if _ctx_ctx_file_has_noautoload "$ctx_file"; then
             # File explicitly opts out of auto-loading. If we previously
             # had this file loaded (e.g. flag was added after loading),
@@ -1693,7 +1696,12 @@ _ctx_parse_ctx_file() {
     local -a dirs=() names=() pairs=()
     local -A seen_labels=() seen_targets=()
     _ctx_external_profiles_root >/dev/null || return 1
-    dir_of_file="$(dirname "$ctx_file")"
+    # Normalize in filesystem order (realpath), the way the kernel resolves the path
+    # this file is read from, so `ctx load ./task/.ctx`, auto-load, and check agree
+    # and the workspace is named after the real folder, not "." (#75). Never cd here:
+    # zsh runs chpwd hooks (including _ctx_auto_load_hook) even for a cd inside
+    # command substitution, and user-defined cd wrappers would run too.
+    dir_of_file="$(realpath -e -- "$(dirname -- "$ctx_file")")" || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"; [ -z "$line" ] && continue
         case "$line" in '#'*) continue ;; esac
@@ -1726,6 +1734,10 @@ _ctx_parse_ctx_file() {
         fi
         canonical_path="$(realpath -m -- "$resolved_path" 2>/dev/null)" || return 1
         if [ -n "${seen_targets[$canonical_path]+set}" ]; then printf 'ctx: error: .ctx entries "%s" and "%s" resolve to the same directory\n' "${seen_targets[$canonical_path]}" "$name" >&2; return 1; fi
+        # Store non-absolute entries (relative paths, @profile) in realpath form, the
+        # kernel's own resolution and the duplicate key above, so every caller
+        # derives the same string (#75).
+        case "$entry_path" in /*) ;; *) resolved_path="$canonical_path" ;; esac
         seen_targets[$canonical_path]="$name"; names+=("$name"); dirs+=("$resolved_path"); pairs+=("$name" "$resolved_path")
         [ -z "$ai_context" ] && { ai_context="$name"; first_name="$name"; } || ai_context="$ai_context+$name"
     done < "$ctx_file"

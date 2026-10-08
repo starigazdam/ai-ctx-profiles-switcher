@@ -310,7 +310,7 @@ function Clear-CtxContext {
                 }
             }
 
-            $folderName = Split-Path -Leaf (Resolve-Path -LiteralPath $dirOfFile).Path
+            $folderName = Split-Path -Leaf (Resolve-Path -LiteralPath $dirOfFile).ProviderPath
             $workspaceFile = Join-Path $dirOfFile "$folderName.code-workspace"
             $workspaceItem = Get-Item -LiteralPath $workspaceFile -Force -ErrorAction SilentlyContinue
             if ($workspaceItem -and ($workspaceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -461,7 +461,9 @@ function ctx {
                 Write-Error "ctx: error: file not found: $loadFile"
                 return
             }
-            $loadDir = Split-Path -Parent $loadFile
+            # Same spelling as the auto-load hook's location-based path, so `ctx load
+            # .\task\.ctx` followed by cd does not re-activate the folder (#75).
+            $loadDir = (Resolve-Path -LiteralPath (Split-Path -Parent $loadFile)).Path
             if (Import-CtxFile -CtxFile $loadFile) {
                 $Script:CtxAutoLoadDir = $loadDir
                 if ((Get-CtxActiveRecordMode) -ceq 'synthetic-home') {
@@ -2237,7 +2239,10 @@ function Parse-CtxFile {
     # Side-effect-free .ctx parser shared by Import-CtxFile and Test-CtxActivation.
     # It validates all labels/targets before either caller changes state.
     param([string]$CtxFile)
-    $dirOfFile = Split-Path -Parent $CtxFile
+    # Normalize the folder the way -LiteralPath did when reading the file, so
+    # `ctx load .\task\.ctx`, auto-load, and `ctx check` anchor relative paths
+    # identically (#75). Root directives keep their own ".." segments (#73).
+    $dirOfFile = (Resolve-Path -LiteralPath (Split-Path -Parent $CtxFile) -ErrorAction Stop).ProviderPath
     $rawLines = @(Get-Content -LiteralPath $CtxFile)
     # First pass: collect and validate every folder-local root directive before
     # resolving any profile or other entry, regardless of line position. These
@@ -2304,8 +2309,11 @@ function Parse-CtxFile {
             if ($seenLabels.ContainsKey($labelKey)) { throw "duplicate .ctx entry label `"$name`"; first declared as `"$($seenLabels[$labelKey])`"" }
             $seenLabels[$labelKey] = $name
         }
+        # Relative paths are stored ".."-free in the lexical form PowerShell already
+        # resolves them to (and the duplicate check below uses), so explicit load,
+        # auto-load, and `ctx check` derive the same string (#75).
         if ($path -ceq '@profile') { $resolvedPath = Resolve-CtxProfileIdentifier -Name $name -ConfigRoot $localConfigRoot -ExternalRoot $localExternalRoot }
-        else { $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $dirOfFile $path } }
+        else { $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { [System.IO.Path]::GetFullPath((Join-Path $dirOfFile $path)) } }
         if ($name -ieq 'home') {
             if ($homeOverride) { throw "duplicate `"home:`" directive in $CtxFile" }
             $homeOverride = Get-CtxValidatedHomePath -Path $resolvedPath
