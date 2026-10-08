@@ -4178,7 +4178,7 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             (ctx check) | Should -BeTrue
         }
 
-        It 'ctx load and ctx check accept a root-bound .ctx under an 8.3 short-name path (#79)' {
+        It 'ctx load accepts a root-bound .ctx reached through its 8.3 short-name path (#79)' {
             if (-not ($IsWindows -or $env:OS -ceq 'Windows_NT')) {
                 Set-ItResult -Skipped -Because '8.3 short names exist only on Windows'
                 return
@@ -4204,13 +4204,13 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
                 'team:../../../copilot-ai-tools/profiles/team'
                 'task-scaffold:../../../external-profiles/task-scaffold'
             )
-            # The .ctx folder is entered through its 8.3 spelling. GetFullPath expands
-            # that spelling for the relative entries while the root directives keep it,
-            # which made the containment check reject the canonical profile (#79).
-            Set-Location (Split-Path -Parent $task)
-            ctx load './task/.ctx' | Should -BeTrue
-            Set-Location $task
-            (ctx check) | Should -BeTrue
+            # Load through the absolute 8.3 spelling: Resolve-Path keeps it for the
+            # .ctx folder and the root directives, while GetFullPath expands it for
+            # the relative entries, which made the containment check reject the
+            # canonical profile (#79). A relative load after Set-Location cannot
+            # reproduce this, because Set-Location re-spells $PWD to the long form.
+            ctx load (Join-Path $task '.ctx') | Should -BeTrue
+            $env:AI_CTX_PROFILES | Should -Be 'team+task-scaffold'
         }
 
         It 'ctx clear --all removes the workspace generated at a custom filesystem PSDrive root (#75)' {
