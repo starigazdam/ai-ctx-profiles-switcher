@@ -1164,12 +1164,20 @@ function Test-CtxCanonicalProfileWithinRoot {
     param([string]$ProfileDir, [string]$ConfigRoot, [string]$ExternalRoot)
     $dirResolved = Get-CtxPhysicalPath -Path $ProfileDir
     if (-not $dirResolved) { return $false }
-    # Both operands exist here. On Windows GetFullPath expands 8.3 components
-    # (GetLongPathName), which the relative-entry operand already went through
-    # in Parse-CtxFile (#75) while Get-CtxPhysicalPath never does. Apply it to
-    # both sides so the comparison never mixes short and long spellings.
+    $isWindowsLike = $IsWindows -or ($env:OS -ceq 'Windows_NT')
+    # A Windows root-relative (\profiles\x) or drive-relative (C:x) entry passes
+    # the IsPathRooted check in Parse-CtxFile and leaves Get-CtxPhysicalPath still
+    # unqualified. GetFullPath would qualify it against the process current drive,
+    # not the PowerShell location the rest of the parser used, so such an operand
+    # stays fail-closed here, exactly as it was before #79.
+    if ($isWindowsLike -and -not (($dirResolved -match '^[A-Za-z]:[\\/]') -or ($dirResolved -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+'))) { return $false }
+    # Both operands exist and are fully qualified here. On Windows GetFullPath
+    # expands 8.3 components (GetLongPathName), which the relative-entry operand
+    # already went through in Parse-CtxFile (#75) while Get-CtxPhysicalPath never
+    # does. Apply it to both sides so the comparison never mixes short and long
+    # spellings.
     $dirResolved = [System.IO.Path]::GetFullPath($dirResolved)
-    $comparison = if ($IsWindows -or $env:OS -ceq 'Windows_NT') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    $comparison = if ($isWindowsLike) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
     foreach ($rootResolved in @(Get-CtxTrustedProfileRoots -ConfigRoot $ConfigRoot -ExternalRoot $ExternalRoot)) {
         $rootResolved = [System.IO.Path]::GetFullPath($rootResolved)
         $rootTrimmed = $rootResolved.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
