@@ -2237,7 +2237,10 @@ function Parse-CtxFile {
     # Side-effect-free .ctx parser shared by Import-CtxFile and Test-CtxActivation.
     # It validates all labels/targets before either caller changes state.
     param([string]$CtxFile)
-    $dirOfFile = Split-Path -Parent $CtxFile
+    # Normalize the folder the way -LiteralPath did when reading the file, so
+    # `ctx load .\task\.ctx`, auto-load, and `ctx check` anchor relative paths
+    # identically (#75). Entries' own ".." segments stay as written (#73).
+    $dirOfFile = (Resolve-Path -LiteralPath (Split-Path -Parent $CtxFile) -ErrorAction Stop).ProviderPath
     $rawLines = @(Get-Content -LiteralPath $CtxFile)
     # First pass: collect and validate every folder-local root directive before
     # resolving any profile or other entry, regardless of line position. These

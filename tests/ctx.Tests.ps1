@@ -4147,6 +4147,33 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
             (ctx check) | Should -BeTrue
         }
 
+        It 'ctx check passes after ctx load of a nested relative .ctx through a non-normalized path (#75)' {
+            Remove-Item Env:\AI_CTX_PROFILES_CONFIG_ROOT -ErrorAction SilentlyContinue
+            Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
+            $base = Join-Path $Script:TestTmp ("local-roots-nested-" + [guid]::NewGuid().ToString('N'))
+            $configRoot = Join-Path $base 'copilot-ai-tools'
+            $externalRoot = Join-Path $base 'external-profiles'
+            New-Item -ItemType Directory -Path (Join-Path $configRoot 'profiles'), $externalRoot -Force | Out-Null
+            $null = New-CtxLocalRootsLegacy -Root $configRoot -Name 'team'
+            $null = New-CtxLocalRootsCanonical -Root $externalRoot -Name 'task-scaffold' -Skill 'task-skill'
+            $task = Join-Path $base 'x/y/task'
+            New-Item -ItemType Directory -Path $task -Force | Out-Null
+            # ai-task-scaffold root mode: every path relative to the task folder.
+            Set-Content -LiteralPath (Join-Path $task '.ctx') -Value @(
+                'config-root:../../../copilot-ai-tools'
+                'external-profiles-root:../../../external-profiles'
+                'team:../../../copilot-ai-tools/profiles/team'
+                'task-scaffold:../../../external-profiles/task-scaffold'
+            )
+
+            Set-Location (Split-Path -Parent $task)
+            ctx load './task/.ctx' | Should -BeTrue
+            Set-Location $task
+            Invoke-CtxAutoLoad | Out-Null  # what the prompt hook runs after cd
+
+            (ctx check) | Should -BeTrue
+        }
+
         It 'supports absolute root directives and leaves both root env vars untouched' {
             Remove-Item Env:\AI_CTX_PROFILES_CONFIG_ROOT -ErrorAction SilentlyContinue
             Remove-Item Env:\AI_CTX_PROFILES_EXTERNAL_PROFILES_ROOT -ErrorAction SilentlyContinue
