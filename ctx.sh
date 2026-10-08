@@ -402,7 +402,7 @@ _ctx_clear() {
         if [ -z "$dir_of_file" ]; then
             local ctx_file
             if ctx_file="$(_ctx_find_ctx_file)"; then
-                dir_of_file="$(CDPATH= cd -P -- "$(dirname -- "$ctx_file")" && pwd -P)"
+                dir_of_file="$(realpath -e -- "$(dirname -- "$ctx_file")")"
             fi
         fi
 
@@ -546,7 +546,7 @@ ctx() {
             fi
             # Same normalization as the parser, so the auto-load hook sees the
             # folder ctx load just activated (#75).
-            load_dir="$(CDPATH= cd -P -- "$(dirname -- "$load_file")" && pwd -P)" || return 1
+            load_dir="$(realpath -e -- "$(dirname -- "$load_file")")" || return 1
             if _ctx_load_ctx_file "$load_file"; then
                 _ctx_auto_load_dir="$load_dir"
             else
@@ -833,7 +833,7 @@ _ctx_auto_load_hook() {
     if ctx_file="$(_ctx_find_ctx_file)"; then
         local dir_of_file
         # Same filesystem-order normalization as the parser and ctx load (#75).
-        dir_of_file="$(CDPATH= cd -P -- "$(dirname -- "$ctx_file")" && pwd -P)" || return 1
+        dir_of_file="$(realpath -e -- "$(dirname -- "$ctx_file")")" || return 1
         if _ctx_ctx_file_has_noautoload "$ctx_file"; then
             # File explicitly opts out of auto-loading. If we previously
             # had this file loaded (e.g. flag was added after loading),
@@ -1696,10 +1696,12 @@ _ctx_parse_ctx_file() {
     local -a dirs=() names=() pairs=()
     local -A seen_labels=() seen_targets=()
     _ctx_external_profiles_root >/dev/null || return 1
-    # Normalize in filesystem order (cd -P/pwd -P), the way the kernel resolves the
-    # path this file is read from, so `ctx load ./task/.ctx`, auto-load, and check
-    # agree and the workspace is named after the real folder, not "." (#75).
-    dir_of_file="$(CDPATH= cd -P -- "$(dirname -- "$ctx_file")" && pwd -P)" || return 1
+    # Normalize in filesystem order (realpath), the way the kernel resolves the path
+    # this file is read from, so `ctx load ./task/.ctx`, auto-load, and check agree
+    # and the workspace is named after the real folder, not "." (#75). Never cd here:
+    # zsh runs chpwd hooks (including _ctx_auto_load_hook) even for a cd inside
+    # command substitution, and user-defined cd wrappers would run too.
+    dir_of_file="$(realpath -e -- "$(dirname -- "$ctx_file")")" || return 1
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"; [ -z "$line" ] && continue
         case "$line" in '#'*) continue ;; esac

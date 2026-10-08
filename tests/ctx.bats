@@ -4096,3 +4096,41 @@ _setup_check_home() {
     [ "$status" -eq 0 ]
     [ ! -e "$phys/physical.code-workspace" ]
 }
+
+@test "issue75: zsh auto-load hook is not re-entered by .ctx folder normalization (zsh-gated)" {
+    if ! command -v zsh >/dev/null 2>&1; then
+        skip "zsh is not installed"
+    fi
+
+    local proj="$HOME/project-zsh-issue75" quiet="$HOME/project-zsh-issue75-noautoload"
+    mkdir -p "$proj/profiles/team/.github/instructions" "$quiet"
+    echo "# team instructions" > "$proj/profiles/team/.github/instructions/team.instructions.md"
+    printf 'team:profiles/team\n' > "$proj/.ctx"
+    printf 'noautoload\n' > "$quiet/.ctx"
+
+    # zsh runs chpwd hooks even for a cd inside command substitution, so a cd-based
+    # folder normalization re-enters _ctx_auto_load_hook; timeout bounds a hang.
+    local zsh_path
+    zsh_path="$(command -v zsh)"
+    run timeout --kill-after=5s 60s env PATH="/usr/local/bin:/usr/bin:/bin:$PATH" "$zsh_path" -f -c '
+        cd "$2" || exit 90
+        source "$1" >/dev/null 2>&1 || exit 91
+        [[ ${chpwd_functions[(Ie)_ctx_auto_load_hook]} -gt 0 ]] || exit 89
+        marker="$4"
+        functions -c _ctx_auto_load_hook _ctx_issue75_hook
+        _ctx_auto_load_hook() { (( ZSH_SUBSHELL == 0 )) || print -r -- nested >> "$marker"; _ctx_issue75_hook "$@"; }
+        cd "$HOME" || exit 92
+        ctx load "$3/.ctx" >/dev/null 2>&1 || exit 93
+        [ "$_ctx_auto_load_dir" = "$(realpath "$3")" ] || exit 94
+        cd "$3" || exit 95
+        [ "$AI_CTX_PROFILES" = team ] || exit 96
+        _ctx_auto_load_dir=""
+        ctx clear --all >/dev/null 2>&1 || exit 97
+        [ ! -e "$3/project-zsh-issue75.code-workspace" ] || exit 98
+        [ ! -e "$marker" ] || exit 88
+        print -r -- zsh-issue75-ok
+    ' -- "$CTX_SRC" "$quiet" "$proj" "$TEST_TMP/zsh-nested-hook"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "zsh-issue75-ok" ]
+}
