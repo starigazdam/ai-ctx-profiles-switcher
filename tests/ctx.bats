@@ -4062,3 +4062,20 @@ _setup_check_home() {
     [ -f "$task/task.code-workspace" ]
     [ ! -e "$task/..code-workspace" ]
 }
+
+@test "issue75: a link/.. .ctx path anchors relative entries at the physically read folder" {
+    local phys="$TEST_TMP/physical" logical="$TEST_TMP/logical"
+    mkdir -p "$phys/child" "$phys/profiles/team/.github/instructions" "$logical"
+    echo "# team instructions" > "$phys/profiles/team/.github/instructions/team.instructions.md"
+    ln -s "$phys/child" "$logical/link"
+    printf 'team:profiles/team\n' > "$phys/.ctx"
+
+    ctx load "$logical/link/../.ctx" >/dev/null
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$(realpath "$phys/profiles/team")" ]
+    [ -f "$phys/physical.code-workspace" ]
+    cd "$phys"
+    [ -z "$(_ctx_auto_load_hook 2>&1)" ]
+    run ctx check
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS workspace"* ]]
+}
