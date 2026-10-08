@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     ctx - Portable context switcher for GitHub Copilot CLI (PowerShell edition)
