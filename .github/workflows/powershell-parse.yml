@@ -1,0 +1,42 @@
+name: powershell-parse
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  powershell-parse:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse scripts under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          Write-Output ("PSVersion: " + $PSVersionTable.PSVersion)
+          Write-Output ("ANSI code page: " + [System.Text.Encoding]::Default.CodePage)
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            Write-Output "This step must run under Windows PowerShell 5.1 (major version 5)."
+            exit 1
+          }
+          $files = @('ctx.ps1', 'install.ps1')
+          $hadError = $false
+          foreach ($f in $files) {
+            $abs = Join-Path (Get-Location).Path $f
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($abs, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $hadError = $true
+              foreach ($e in $errors) {
+                Write-Output ($f + ":" + $e.Extent.StartLineNumber + ":" + $e.Extent.StartColumnNumber + " " + $e.Message)
+              }
+            }
+          }
+          if ($hadError) {
+            exit 1
+          }
+          Write-Output "ctx.ps1 and install.ps1 parsed with 0 errors."
