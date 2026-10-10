@@ -540,7 +540,9 @@ establish that branch and no specific host version is claimed. Windows
 PowerShell 5.1 all-canonical present-empty behavior remains unverified and is
 tracked by
 [#63](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/63); the
-repository's CI exercises `pwsh`, not Windows PowerShell 5.1.
+repository's CI runs its Pester suites under `pwsh`. The standalone
+`powershell-parse` workflow runs Windows PowerShell 5.1, but only to check
+that `ctx.ps1` and `install.ps1` parse.
 
 ### Integration modes
 

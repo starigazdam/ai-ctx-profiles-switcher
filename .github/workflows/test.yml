@@ -5,6 +5,7 @@ on:
     paths:
       - 'ctx.sh'
       - 'ctx.ps1'
+      - 'install.ps1'
       - 'src/Ctx/**'
       - 'tests/**'
       - 'openspec/**'
@@ -13,6 +14,7 @@ on:
     paths:
       - 'ctx.sh'
       - 'ctx.ps1'
+      - 'install.ps1'
       - 'src/Ctx/**'
       - 'tests/**'
       - 'openspec/**'
