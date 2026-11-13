@@ -4,7 +4,7 @@
 
 ### Requirement: .ctx file format and parsing
 
-The system SHALL parse a `.ctx` file as lines of the form `<name>:<path>`. Blank lines and lines starting with `#` SHALL be ignored. The name and path on each side of the first `:` SHALL be trimmed of surrounding whitespace. A line may instead be a bare `noautoload` directive (case-insensitive), a reserved `home:` directive, or a reserved `harness:` directive specified by the `claude-harness` capability. Each entry's target must be an existing directory, and the whole file must be validated before any state changes. The mode selector SHALL introduce no new `.ctx` line type: a line such as `mode:` or `copilot-mode:` SHALL be parsed as an ordinary `<name>:<path>` entry, not as a mode selector. The reserved `home:` directive SHALL be valid only under Mode A: when `AI_CTX_PROFILES_COPILOT_MODE` selects Mode B or Mode C and the `.ctx` file contains a `home:` line, the file SHALL be rejected before any state change, with the same invalid-file, previous-context-untouched semantics as other `.ctx` validation errors, and the `home:` line SHALL never be silently ignored or silently reinterpreted for Modes B and C. Parsing, `noautoload`, and hook triggering SHALL otherwise be unchanged by the mode selector. The `harness:` key SHALL be matched case-insensitively, and a `.ctx` entry whose label is `harness` in any case SHALL be rejected with a reserved-directive error rather than parsed as an ordinary entry.
+The system SHALL parse a `.ctx` file as lines of the form `<name>:<path>`. Blank lines and lines starting with `#` SHALL be ignored. The name and path on each side of the first `:` SHALL be trimmed of surrounding whitespace. A line may instead be a bare `noautoload` directive (case-insensitive), a reserved `home:` directive, or a reserved `harness:` directive specified by the `claude-harness` capability. Each entry's target must be an existing directory, and the whole file must be validated before any state changes. The mode selector SHALL introduce no new `.ctx` line type: a line such as `mode:` or `copilot-mode:` SHALL be parsed as an ordinary `<name>:<path>` entry, not as a mode selector. The reserved `home:` directive SHALL be valid only under Mode A: when `AI_CTX_PROFILES_COPILOT_MODE` selects Mode B or Mode C and the `.ctx` file contains a `home:` line, the file SHALL be rejected before any state change, with the same invalid-file, previous-context-untouched semantics as other `.ctx` validation errors, and the `home:` line SHALL never be silently ignored or silently reinterpreted for Modes B and C. Parsing, `noautoload`, and hook triggering SHALL otherwise be unchanged by the mode selector. The `harness:` key SHALL be matched case-insensitively. A line whose label is `harness` in any case SHALL NOT be parsed as an ordinary entry.
 
 #### Scenario: Comments and blank lines are ignored
 
@@ -59,7 +59,7 @@ The system SHALL parse a `.ctx` file as lines of the form `<name>:<path>`. Blank
 #### Scenario: The mode selector adds no new .ctx line type and leaves hooking unchanged
 
 - **WHEN** a `.ctx` file is loaded or auto-loaded under any mode
-- **THEN** the parser accepts exactly the existing line grammar plus the `harness:` directive (no mode directive), and `noautoload` handling and hook triggering are unchanged by the mode selector
+- **THEN** the parser accepts the existing line grammar plus the `harness:` directive, with no mode directive. `noautoload` handling and hook triggering do not change
 
 #### Scenario: harness: is a reserved directive
 
