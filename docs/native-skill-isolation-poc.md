@@ -1,7 +1,8 @@
 # Native skill isolation PoC (issue #83)
 
 Issue: [#83](https://github.com/starigazdam/ai-ctx-profiles-switcher/issues/83)
-Run date: 2026-11-13. Host: Linux 7.0.14, bash 5.2.37, Node 26.7.0, .NET SDK 10.0.400.
+Run date: 2026-11-13. Host: Linux. The exact-head evidence comment prints the
+tool versions.
 
 This PoC does not change `ctx.sh`, `ctx.ps1`, `install.sh` or `install.ps1`.
 No Windows probe ran, so this document makes no Windows or PowerShell claim.
@@ -9,27 +10,34 @@ No Windows probe ran, so this document makes no Windows or PowerShell claim.
 ## How to run
 
 ```sh
-dotnet build src/Ctx/Ctx.csproj --configuration Release   # same step as CI
-unshare -rn experiments/native-isolation/run-probes.sh     # no network
+experiments/native-isolation/run-probes.sh                # clean checkout: P4 skipped
+dotnet build src/Ctx/Ctx.csproj --configuration Release   # CI step; enables P4
+d=$(mktemp -d) && TMPDIR=$d unshare -rnm \
+  experiments/native-isolation/ro-run.sh experiments/native-isolation/run-probes.sh
+ls -A "$d"                                                # empty = no stray write
 ```
 
 The probes do not log in and do not call a model. They write only into one
-`mktemp -d` directory and remove it at exit (`KEEP=1` keeps it). Exit codes:
-0 when every expectation holds, 1 on a mismatch, 2 when `CTX_ENGINE_DLL` is
-missing.
+`mktemp -d` directory and remove it at exit (`KEEP=1` keeps it). The script
+exits 0 when every expectation that ran holds, and 1 on a mismatch. The
+`RESULT` line names each skipped group.
 
+- `ro-run.sh` is the write audit. It removes the network and makes `$HOME`,
+  `/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock`, `/run/shm` and `/run/user/*`
+  read-only. Only `$TMPDIR` stays writable.
 - `CTX_ENGINE_DLL` defaults to the CI build output
-  `src/Ctx/bin/Release/net10.0/Ctx.dll`. `ctx clear` needs it. The script does
-  not build it, because a `dotnet build` writes SDK lock files outside the temp
-  directory.
-- `COPILOT_CMD` selects Copilot CLI. The default `copilot` npm loader runs its
-  bundled 1.0.88 under the fake `HOME`. To pin 1.0.111, use an absolute path:
-  `COPILOT_CMD="node $HOME/.cache/copilot/pkg/linux-x64/1.0.111/index.js"`.
+  `src/Ctx/bin/Release/net10.0/Ctx.dll`. `ctx clear` needs it. When it is
+  missing, P4 prints `SKIP`. The script does not build it, because a
+  `dotnet build` writes into the checkout and into SDK lock directories.
+- `COPILOT_CMD` selects Copilot CLI. On this host, the default `copilot` npm
+  loader ran 1.0.88 under the fake `HOME`. To pin 1.0.111, use an absolute
+  path: `COPILOT_CMD="node $HOME/.cache/copilot/pkg/linux-x64/1.0.111/index.js"`.
 - `CLAUDE_CMD` selects Claude Code. When it is not found, P3 prints `SKIP`.
 
 Each Copilot line prints the built-in count, the fixture count `n`, the
 fixture names and `name:source` pairs (`:off` marks a disabled skill). Each
-exclusion claim also prints `[before n=X -> after n=Y]`. Counts include only
+exclusion or no-effect claim prints `[before n=X -> after n=Y]`, and each
+before value is a checked baseline. Counts include only
 fixture skills (paths in the temp directory). Host skills above the temp
 directory are out of scope.
 
@@ -37,15 +45,14 @@ directory are out of scope.
 
 The PR comment for the reviewed head holds the raw output of these runs:
 
-1. `unshare -rn` with `COPILOT_CMD` pinned to 1.0.111: `RESULT: PASS`, exit 0.
-2. `unshare -rn` with the default `copilot` (1.0.88): `RESULT: PASS`, exit 0.
-3. Write check: run 1 again with no build server alive, then
-   `find /home/hermes /tmp -newer <marker>`. It found no written path outside
-   the temp directory and the Hermes state directory. One earlier check listed an ONNX
-   runtime cache file. A concurrent MemPalace ingest can explain that write.
-4. Mutant: the key misspelled as `ignoredSkillLocationsX` in both writers.
-   P1.1, P1.3, P1.8, P1.9 and P4.1 to P4.3 (after injection) failed. Exit 1.
-   P1.5 and P1.10 still passed, because they expect no effect.
+1. Clean clone, no engine build, default commands: `RESULT: PASS (skipped: P4)`, exit 0.
+2. After the CI build step, under `ro-run.sh`, with `COPILOT_CMD` pinned to
+   1.0.111: `RESULT: PASS`, exit 0. The writable `$TMPDIR` was empty after the run.
+3. The same under `ro-run.sh` with the default `copilot` (1.0.88): `RESULT: PASS`, exit 0.
+4. Mutant: the line `KEY=ignoredSkillsLocations` changed to a wrong key. The
+   checks that expect an effect failed: P1.1, P1.3, P1.8, P1.9 and P4.1 to
+   P4.3 after injection. Exit 1. The no-effect checks (P1.5, P1.10, P1.11)
+   still passed, as expected.
 
 ## Results
 
@@ -56,15 +63,16 @@ gave the stated result. `documented` means vendor text only.
 |---|---|---|---|---|---|
 | P1.0-P1.2 | Copilot CLI | 1.0.111, 1.0.88 | `ignoredSkillsLocations` in `$COPILOT_HOME/settings.json` removes the three listed fixture roots (n=3 to n=0). The built-in count does not change. Without the key, the 3 skills come back. | verified | `run-probes.sh` P1.0-P1.2 |
 | P1.3-P1.4 | Copilot CLI | 1.0.111, 1.0.88 | The ignore list applies only to the home that holds it. A context home with the list shows n=0. The default home after that still shows n=3. | verified | `run-probes.sh` P1.3-P1.4 |
-| P1.5a | Copilot CLI | 1.0.111, 1.0.88 | Inside a git repository, the skill root of an ancestor above the repository root is not listed. | verified | `run-probes.sh` P1.5a |
-| P1.5 | Copilot CLI | 1.0.111, 1.0.88 | In a trusted git repository, `ignoredSkillsLocations` in `.github/copilot/settings.json` has no effect (n=2 stays n=2). Control: `disabledSkills` in the same file turns `g-agents` off, so Copilot read the file. | verified | `run-probes.sh` P1.5 |
+| P1.5a | Copilot CLI | 1.0.111, 1.0.88 | When the working directory is a git repository root, the skill root of an ancestor above it is not listed (n=3 to n=2). | verified | `run-probes.sh` P1.5a |
+| P1.5 | Copilot CLI | 1.0.111, 1.0.88 | In a git repository with `trustedFolders` set in `config.json`, `ignoredSkillsLocations` in `.github/copilot/settings.json` has no effect (n=2 stays n=2). Control: `disabledSkills` in the same file turns `g-agents` off, so Copilot read the file. The probe does not show the trust state itself. | verified | `run-probes.sh` P1.5 |
 | P1.6 | Copilot CLI | 1.0.111, 1.0.88 | `COPILOT_SKILLS_DIRS` adds a root with `source: custom`. It removes no other root. | verified | `run-probes.sh` P1.6 |
 | P1.7 | Copilot CLI | 1.0.111, 1.0.88 | With a custom `COPILOT_HOME`, the fixture skills in `~/.copilot/skills` and `~/.agents/skills` are not listed. The fixture ancestor skill stays (`source: inherited`). | verified | `run-probes.sh` P1.7 |
 | P1.8-P1.9 | Copilot CLI | 1.0.111, 1.0.88 | An ignore entry is a path prefix. A parent directory hides every skill root below it. That includes a `COPILOT_SKILLS_DIRS` root. | verified | `run-probes.sh` P1.8-P1.9 |
 | P1.10 | Copilot CLI | 1.0.111, 1.0.88 | A glob entry (`<dir>/*/skills`) has no effect. | verified | `run-probes.sh` P1.10 |
-| P1.d | Copilot CLI | 1.0.111 help | The key name is the flat `ignoredSkillsLocations`. The web docs show `skills.ignoredLocations`. | documented | `copilot help config` |
+| P1.11 | Copilot CLI | 1.0.111, 1.0.88 | A string prefix that is not a parent directory (`<tmp>/an` for `<tmp>/anc`) has no effect. Prefixes match whole path components. | verified | `run-probes.sh` P1.11 |
+| P1.d | Copilot CLI | 1.0.111 help | The key name in the help text is the flat `ignoredSkillsLocations`. Issue #83 reports that the web docs show `skills.ignoredLocations`. This PoC did not check the web page. | documented | `copilot help config` |
 | P2.0 | Copilot CLI | 1.0.111, 1.0.88 | `copilot --add-dir <profile> skill list --json` exits 0 and does not list the profile skills. | verified | `run-probes.sh` P2.0 |
-| P2.1 | Copilot CLI | 1.0.111 | In an interactive session, `--add-dir <profile>` loads the profile's `.github/skills`, `.agents/skills` and `.claude/skills`. `/skills` shows all three as `Repository`. The only trust prompt is "Confirm folder trust" for the working directory. No login and no model call. | verified | "P2 session" below |
+| P2.1 | Copilot CLI | 1.0.111 | In an interactive session, `--add-dir <profile>` loads the profile's `.github/skills`, `.agents/skills` and `.claude/skills`. `/skills` shows all three as `Repository`. At start, the capture shows a "Confirm folder trust" prompt. No login and no model call. | verified | "P2 session" below |
 | P3.0 | Claude Code | 2.1.292 | Not signed in, the stream-json `init` event lists the skills. The result is then "Not logged in", so no model call happens. Each P3 check requires that result. | verified | `run-probes.sh` P3.0 |
 | P3.1 | Claude Code | 2.1.292 | `--add-dir <profile>` adds `<profile>/.claude/skills` to the `init` list. | verified | `run-probes.sh` P3.1 |
 | P3.2 | Claude Code | 2.1.292 | `--setting-sources project` removes `~/.claude/skills` (n=3 to n=2). Ancestor `.claude/skills` and `--add-dir` skills stay. | verified | `run-probes.sh` P3.2 |
@@ -72,9 +80,9 @@ gave the stated result. `documented` means vendor text only.
 | P3.5 | Claude Code | 2.1.292 | With `name-only`, the skill stays in the `init` list. | verified | `run-probes.sh` P3.5 |
 | P3.6 | Claude Code | 2.1.292 | With `disableBundledSkills: true`, the total drops (35 to 21 on this host). The fixture skills stay. | verified | `run-probes.sh` P3.6 |
 | P3.7-P3.8 | Claude Code | 2.1.292 | `--plugin-dir` adds a plugin skill as `prof:pl-skill`. `skillOverrides` does not remove it, by bare name or by `plugin:skill` name. | verified | `run-probes.sh` P3.7-P3.8 |
-| P3.9 | Claude Code | 2.1.323 docs | Without the `user` source, subscription auth still works, because auth is not a setting source. | documented | not run: `claude auth status` reports `loggedIn: false` on this host |
-| P3.10 | Claude Code | 2.1.323 docs | `CLAUDE.md` from `--add-dir` needs `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. `claudeMdExcludes` takes globs of `CLAUDE.md` paths. Bundled skills are the skills that `disableBundledSkills` removes. | documented | none |
-| P3.11 | Claude Code | 2.1.323 docs | `--bare` removes subscription OAuth, so it is not usable for `ctx`. | documented | none |
+| P3.9 | Claude Code | 2.1.323 docs, as issue #83 reports them | Without the `user` source, subscription auth still works, because auth is not a setting source. | documented | not run: `claude auth status` reports `loggedIn: false` on this host |
+| P3.10 | Claude Code | 2.1.323 docs, as issue #83 reports them | `CLAUDE.md` from `--add-dir` needs `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. `claudeMdExcludes` takes globs of `CLAUDE.md` paths. Bundled skills are the skills that `disableBundledSkills` removes. | documented | none |
+| P3.11 | Claude Code | 2.1.323 docs, as issue #83 reports them | `--bare` removes subscription OAuth, so it is not usable for `ctx`. | documented | none |
 | P4.1-P4.3 | Copilot CLI + `ctx.sh` | 1.0.111, 1.0.88; develop `2645f99` | Real `ctx.sh` in Mode C (`ephemeral-clean`): `ctx alpha`, `ctx beta`, `ctx alpha`. Each activation gives a new home in the temp directory. The home has no `settings.json`, and the ancestor skill is visible (n=2). The PoC then writes an ignore list for the ancestor root (n=2 to n=1). Only the profile skill stays. | verified | `run-probes.sh` P4.1-P4.3 |
 | P4.4-P4.6 | Copilot CLI + `ctx.sh` | 1.0.111, 1.0.88; develop `2645f99` | `ctx clear` unsets `COPILOT_HOME` and `COPILOT_SKILLS_DIRS`. The default home then shows the 3 fixture skills again. The default `settings.json` is absent after P4. | verified | `run-probes.sh` P4.4-P4.6 |
 
@@ -92,9 +100,14 @@ Fixture: a profile with one skill in each of `.github/skills`, `.agents/skills`
 and `.claude/skills`, and a fake `HOME` with no login.
 
 ```sh
-tmux new-session -d -s p2 -x 160 -y 50 "unshare -rn env -i PATH=$PATH \
-  TERM=xterm-256color HOME=<tmp>/home COPILOT_AUTO_UPDATE=false \
-  node $HOME/.cache/copilot/pkg/linux-x64/1.0.111/index.js --add-dir <tmp>/prof/A"
+X=$(mktemp -d); P=$X/prof/A
+for s in .github .agents .claude; do
+  n=a-${s#.}; mkdir -p "$P/$s/skills/$n" "$X/home" "$X/ws"
+  printf -- '---\nname: %s\ndescription: canary %s\n---\nbody\n' "$n" "$n" >"$P/$s/skills/$n/SKILL.md"
+done
+tmux new-session -d -s p2 -c "$X/ws" -x 160 -y 50 "unshare -rn env -i PATH=$PATH \
+  TERM=xterm-256color HOME=$X/home TMPDIR=$X COPILOT_AUTO_UPDATE=false \
+  node $HOME/.cache/copilot/pkg/linux-x64/1.0.111/index.js --add-dir $P"
 tmux send-keys -t p2 Enter          # answer "Confirm folder trust" with 1. Yes
 tmux send-keys -t p2 /skills Enter
 tmux send-keys -t p2 / a-           # filter the list
@@ -102,7 +115,7 @@ tmux capture-pane -p -t p2
 ```
 
 Captured result: `✓ a-agents Repository`, `✓ a-claude Repository`,
-`✓ a-github Repository`. The PR comment for the reviewed head holds the
+`✓ a-github Repository`. The capture does not show the full prompt history. The PR comment for the reviewed head holds the
 capture. The P2 session check is not in `run-probes.sh`, because a TUI capture
 is not deterministic.
 
@@ -125,10 +138,13 @@ Reasons:
    Thus exclusion needs a per-context `settings.json`.
 2. Mode C creates a new, empty home for each activation. A file written there
    did not reach the next activation or the default home (P4.1 to P4.6).
-3. Under a custom home, the personal fixture roots are absent (P1.7). Inside
-   a git repository, ancestors above the repository root are absent (P1.5a).
-   Thus the list must cover only ancestor roots between the working directory
-   and the repository root, or above it when there is no repository.
+3. Under a custom home, the personal fixture roots are absent (P1.7). At a git
+   repository root, ancestors above it are absent (P1.5a). Thus the list must
+   cover the ancestor roots that Copilot still lists. Outside a repository,
+   these are the skill roots of all ancestors. Inside a repository, the roots
+   between the working directory and the repository root are project roots.
+   This PoC did not test that case. The follow-up must decide if `ctx` hides
+   project roots.
 
 Mode scope:
 

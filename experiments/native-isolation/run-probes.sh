@@ -5,15 +5,16 @@
 # COPILOT_HOME, profiles, ctx config). They do not log in and do not call a model.
 # To prove "no network", run the script under a network-less namespace:
 #   unshare -rn experiments/native-isolation/run-probes.sh
-# Exit 0 = every expectation held; 1 = at least one mismatch; 2 = missing prerequisite.
+# Exit 0 = every expectation that ran held; 1 = at least one mismatch.
+# The RESULT line names skipped probe groups (P3 without claude, P4 without the engine).
 #
 #   COPILOT_CMD     command that starts Copilot CLI (default: copilot). Use an
 #                   absolute path; the variable is word-split, not tilde-expanded:
 #                   COPILOT_CMD="node $HOME/.cache/copilot/pkg/linux-x64/1.0.111/index.js"
 #   CLAUDE_CMD      Claude Code command (default: claude). Not found = P3 SKIP.
 #   CTX_ENGINE_DLL  .NET 10 engine for `ctx clear` (default: the CI build output
-#                   src/Ctx/bin/Release/net10.0/Ctx.dll). Build it first with
-#                   `dotnet build src/Ctx/Ctx.csproj --configuration Release`.
+#                   src/Ctx/bin/Release/net10.0/Ctx.dll). Not found = P4 SKIP.
+#                   Build it with `dotnet build src/Ctx/Ctx.csproj --configuration Release`.
 #   KEEP=1          keep the temp directory for inspection
 #
 # Counts include only fixture skills (paths in the temp dir) and built-in
@@ -24,8 +25,9 @@ COPILOT_CMD="${COPILOT_CMD:-copilot}"
 CLAUDE_CMD="${CLAUDE_CMD:-claude}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CTX_ENGINE_DLL="${CTX_ENGINE_DLL:-$REPO/src/Ctx/bin/Release/net10.0/Ctx.dll}"
-[ -f "$CTX_ENGINE_DLL" ] || { echo "MISSING CTX_ENGINE_DLL=$CTX_ENGINE_DLL (run: dotnet build src/Ctx/Ctx.csproj --configuration Release)"; exit 2; }
-export CTX_ENGINE_DLL
+skipped=""
+if [ -f "$CTX_ENGINE_DLL" ]; then CTX_ENGINE_DLL="$(cd "$(dirname "$CTX_ENGINE_DLL")" && pwd)/$(basename "$CTX_ENGINE_DLL")"; export CTX_ENGINE_DLL
+else skipped="$skipped P4"; fi
 T="$(mktemp -d)"
 if [ "${KEEP:-0}" = 1 ]; then echo "temp: $T"; else trap 'rm -rf "$T"' EXIT; fi
 
@@ -82,7 +84,15 @@ check() {
 # has <label> <needle> <actual>: an extra assertion on the src field.
 has() { case " $3 " in *"$2"*) printf 'PASS %-38s %s\n' "$1" "$2" ;; *) printf 'FAIL %-38s missing %s in: %s\n' "$1" "$2" "$3"; fail=1 ;; esac; }
 
-ignore_json() { python3 -c 'import json,sys; print(json.dumps({"ignoredSkillsLocations": sys.argv[1:]}))' "$@"; }
+KEY=ignoredSkillsLocations
+# settings_json [--disable <name>] <path>...: a settings.json with the ignore list.
+settings_json() { python3 -c '
+import json, sys
+a = sys.argv[2:]; d = {}
+if a[:1] == ["--disable"]: d["disabledSkills"] = [a[1]]; a = a[2:]
+d[sys.argv[1]] = a
+print(json.dumps(d))' "$KEY" "$@"; }
+ignore_json() { settings_json "$@"; }
 GLOBALS=("$H/.copilot/skills" "$H/.agents/skills" "$T/anc/.agents/skills")
 ALL3="anc-canary,g-agents,g-copilot"
 
@@ -102,6 +112,7 @@ check "P1.2 settings removed -> restored" "$ALL3" "$(list)" "$B"
 # Per-home scope: an ignore list in a context home does not reach the default home.
 mkdir -p "$T/ctxhome"; echo '{}' >"$T/ctxhome/settings.json"
 ctxbase="$(list COPILOT_HOME="$T/ctxhome")"
+check "P1.3 baseline: context home" "anc-canary" "$ctxbase" "$B"
 ignore_json "${GLOBALS[@]:1}" >"$T/ctxhome/settings.json"
 check "P1.3 context home ignore list" "-" "$(list COPILOT_HOME="$T/ctxhome")" "$B" "$ctxbase"
 check "P1.4 default home after (no leak)" "$ALL3" "$(list)" "$B"
@@ -110,13 +121,12 @@ check "P1.4 default home after (no leak)" "$ALL3" "$(list)" "$B"
 # in the same file turns g-agents off, so Copilot read the file.
 git -C "$WS" init -q
 gitbase="$(list)"
-check "P1.5a git repo: no ancestor above root" "g-agents,g-copilot" "$gitbase" "$B"
+check "P1.5a git repo: no ancestor above root" "g-agents,g-copilot" "$gitbase" "$B" "$base"
 mkdir -p "$WS/.github/copilot"
 echo "{\"trustedFolders\":[\"$WS\"]}" >"$H/.copilot/config.json"
-python3 -c 'import json,sys; print(json.dumps({"disabledSkills":["g-agents"],"ignoredSkillsLocations":sys.argv[1:]}))' \
-    "${GLOBALS[@]}" >"$WS/.github/copilot/settings.json"
+settings_json --disable g-agents "${GLOBALS[@]}" >"$WS/.github/copilot/settings.json"
 out="$(list)"
-check "P1.5 trusted repo ignore list: no effect" "g-agents,g-copilot" "$out" "$B" "$gitbase"
+check "P1.5 repo ignore list: no effect" "g-agents,g-copilot" "$out" "$B" "$gitbase"
 has "P1.5 control: repo disabledSkills read" "g-agents:personal-agents:off" "$out"
 rm -rf "$WS/.github" "$WS/.git" "$H/.copilot/config.json"
 
@@ -128,9 +138,10 @@ has "P1.6 source of alpha-skill" "alpha-skill:custom" "$out"
 # --- P1.7-P1.10: custom-home scope and prefix semantics --------------------
 mkdir -p "$T/emptyhome"; echo '{}' >"$T/emptyhome/settings.json"
 out="$(list COPILOT_HOME="$T/emptyhome")"
-check "P1.7 custom home: no personal roots" "anc-canary" "$out" "$B"
+check "P1.7 custom home: no personal roots" "anc-canary" "$out" "$B" "$base"
 has "P1.7 source of anc-canary" "anc-canary:inherited" "$out"
 eb="$(list COPILOT_HOME="$T/emptyhome" COPILOT_SKILLS_DIRS="$PROF/alpha/.github/skills")"
+check "P1.8 baseline: custom home + alpha" "alpha-skill,anc-canary" "$eb" "$B"
 ignore_json "$T/anc" >"$T/emptyhome/settings.json"
 check "P1.8 parent dir prefix hides anc" "alpha-skill" \
     "$(list COPILOT_HOME="$T/emptyhome" COPILOT_SKILLS_DIRS="$PROF/alpha/.github/skills")" "$B" "$eb"
@@ -139,6 +150,9 @@ check "P1.9 prefix also hides SKILLS_DIRS" "-" \
     "$(list COPILOT_HOME="$T/emptyhome" COPILOT_SKILLS_DIRS="$PROF/alpha/.github/skills")" "$B" "$eb"
 ignore_json "$T/anc/*/skills" >"$T/emptyhome/settings.json"
 check "P1.10 glob entry: no effect" "alpha-skill,anc-canary" \
+    "$(list COPILOT_HOME="$T/emptyhome" COPILOT_SKILLS_DIRS="$PROF/alpha/.github/skills")" "$B" "$eb"
+ignore_json "$T/an" >"$T/emptyhome/settings.json"   # a string prefix of $T/anc, not a parent
+check "P1.11 string prefix (not parent): no effect" "alpha-skill,anc-canary" \
     "$(list COPILOT_HOME="$T/emptyhome" COPILOT_SKILLS_DIRS="$PROF/alpha/.github/skills")" "$B" "$eb"
 
 # --- P2.0: `skill list` does not apply --add-dir (session check: see the doc) ---
@@ -164,7 +178,9 @@ p4() {
             prev="$COPILOT_HOME"
             # No state from an earlier step: the new home has no settings.json,
             # and the ancestor skill is still visible before the injection.
-            [ ! -e "$COPILOT_HOME/settings.json" ] || { echo "FAIL $1: settings.json already in new home"; fail=1; }
+            if [ -e "$COPILOT_HOME/settings.json" ] || [ -L "$COPILOT_HOME/settings.json" ]; then
+                echo "FAIL $1: settings.json already in new home"; fail=1; return
+            fi
             envargs; local before; before="$(list "${args[@]}")"
             check "$1 before injection" "$3" "$before" "$B"
             ignore_json "$T/anc/.agents/skills" >"$COPILOT_HOME/settings.json"
@@ -180,9 +196,13 @@ p4() {
         exit "$fail"
     ) || fail=1
 }
-p4
-if [ ! -e "$H/.copilot/settings.json" ]; then echo "PASS P4.6 default settings.json absent after P4"
-else echo "FAIL P4.6 default settings.json present after P4"; fail=1; fi
+if [ -n "$CTX_ENGINE_DLL" ] && [ -f "$CTX_ENGINE_DLL" ]; then
+    p4
+    if [ ! -e "$H/.copilot/settings.json" ]; then echo "PASS P4.6 default settings.json absent after P4"
+    else echo "FAIL P4.6 default settings.json present after P4"; fail=1; fi
+else
+    echo "SKIP P4 CTX_ENGINE_DLL not found: $CTX_ENGINE_DLL"
+fi
 
 # --- P3: Claude Code skill visibility, read from the stream-json init event ---
 # Not signed in: the init event lists skills, then the result is "Not logged in".
@@ -219,6 +239,7 @@ print("client=%s total=%d n=%d fixture=%s" % (init.get("claude_code_version"), l
     check "P3.0 baseline (not logged in)" "anc-claude,g-claude" "$cb"
     check "P3.1 --add-dir profile" "alpha-claude,anc-claude,g-claude" "$(cl --add-dir "$PROF/alpha")"
     pb="$(cl --add-dir "$PROF/alpha")"
+    check "P3.2 baseline: --add-dir" "alpha-claude,anc-claude,g-claude" "$pb"
     check "P3.2 --setting-sources project" "alpha-claude,anc-claude" \
         "$(cl --setting-sources project --add-dir "$PROF/alpha")" "" "$pb"
     check "P3.3 skillOverrides off (user)" "anc-claude" "$(cl --settings '{"skillOverrides":{"g-claude":"off"}}')" "" "$cb"
@@ -229,12 +250,14 @@ print("client=%s total=%d n=%d fixture=%s" % (init.get("claude_code_version"), l
     nb="$(field total "$cb")"; na="$(field total "$after")"
     check "P3.6 disableBundledSkills (total $nb->$na)" "anc-claude,g-claude" "$after"
     [ "$na" -lt "$nb" ] 2>/dev/null || { echo "FAIL P3.6 total did not drop"; fail=1; }
-    check "P3.7 --plugin-dir adds plugin skill" "anc-claude,g-claude,prof:pl-skill" "$(cl --plugin-dir "$T/plug")"
+    plb="$(cl --plugin-dir "$T/plug")"
+    check "P3.7 --plugin-dir adds plugin skill" "anc-claude,g-claude,prof:pl-skill" "$plb"
     check "P3.8 skillOverrides skips plugins" "anc-claude,g-claude,prof:pl-skill" \
-        "$(cl --plugin-dir "$T/plug" --settings '{"skillOverrides":{"pl-skill":"off","prof:pl-skill":"off"}}')"
+        "$(cl --plugin-dir "$T/plug" --settings '{"skillOverrides":{"pl-skill":"off","prof:pl-skill":"off"}}')" "" "$plb"
 else
-    echo "SKIP P3 claude not found (set CLAUDE_CMD)"
+    echo "SKIP P3 claude not found (set CLAUDE_CMD)"; skipped="$skipped P3"
 fi
 
-if [ "$fail" = 0 ]; then echo "RESULT: PASS"; else echo "RESULT: FAIL"; fi
+if [ "$fail" = 0 ]; then r=PASS; else r=FAIL; fi
+echo "RESULT: $r${skipped:+ (skipped:$skipped)}"
 exit "$fail"

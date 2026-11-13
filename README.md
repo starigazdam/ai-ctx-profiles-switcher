@@ -390,12 +390,13 @@ repeated each time and is never automated or persisted by `ctx`. In short:
 
 Update (issue #83, verified with Copilot CLI 1.0.111 and 1.0.88 on Linux):
 Copilot CLI has a negative skill-root filter, `ignoredSkillsLocations`.
-Copilot reads it from `$COPILOT_HOME/settings.json`. In a trusted repository,
-the same key in `.github/copilot/settings.json` had no effect. Each entry is a
+Copilot reads it from `$COPILOT_HOME/settings.json`. In a repository listed in
+`trustedFolders`, the same key in `.github/copilot/settings.json` had no
+effect. Each entry is a
 path prefix, so a parent directory hides every skill root below it. With a
 custom `COPILOT_HOME`, the probe skills in `~/.copilot/skills` and
 `~/.agents/skills` were not listed. The ancestor (`inherited`) skill stayed.
-Inside a git repository, ancestors above the repository root were not listed.
+At a git repository root, ancestors above it were not listed.
 `ctx` does not use the filter yet. The PoC decision is to use it in Mode C
 only. In Mode A and Mode B it would go into the shared user `settings.json`.
 See [`docs/native-skill-isolation-poc.md`](docs/native-skill-isolation-poc.md).
@@ -629,9 +630,9 @@ feature does not fix them:
 - Concurrent contexts are last-reconciliation-wins.
 - There is no built-in or durable per-context skill exclusion in any mode.
   `copilot skill disable` writes to the single `settings.json` symlink, so
-  every Mode A context shares the result. Copilot CLI reads its negative skill-root filter
-  (`ignoredSkillsLocations`) only from `$COPILOT_HOME/settings.json`. In Mode A
-  that file is the shared one. `ctx` does not use the filter in any mode yet
+  every Mode A context shares the result.
+  Copilot CLI reads its negative skill-root filter (`ignoredSkillsLocations`)
+  from `$COPILOT_HOME/settings.json`. In Mode A that file is the shared one. `ctx` does not use the filter in any mode yet
   (see [Skill discovery](#skill-discovery)).
 - **Local TOCTOU gap:** Mode A path checks, including rechecks before creating
   the synthetic home and before `ctx clear --all` recursively deletes it, are
