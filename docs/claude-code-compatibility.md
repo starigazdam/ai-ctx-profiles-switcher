@@ -93,7 +93,7 @@ Probed with the real Claude Code 2.1.292, not signed in, with no network (`unsha
 |---|---|---|---|
 | `--setting-sources project` | verified | Removes `~/.claude/skills`. Keeps ancestor `.claude/skills` and `--add-dir` skills. | Usable to drop user skills. Not a full filter, because ancestor roots stay. Auth with the `user` source dropped is not verified (no signed-in session). |
 | `--add-dir <dir>` | verified | Loads `<dir>/.claude/skills`. | Usable to attach a profile with no projection. `CLAUDE.md` from that directory needs `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` (documented only). |
-| `skillOverrides` | verified | `off` removes a skill from the list, also with `--setting-sources project`. With `name-only`, the skill stays in the list. Plugin skills are not affected. | Usable per session through `--settings` JSON. No user settings file changes. |
+| `skillOverrides` | verified | `off` removes a skill from the list, also with `--setting-sources project`. With `name-only`, the skill stays in the list. Plugin skills are not affected. | Usable per session through `--settings` JSON. It needs no user settings file edit. |
 | `disableBundledSkills` | verified | The total drops (35 to 21 on this host). The fixture skills stay. | Optional. |
 | `--plugin-dir <dir>` | verified | Adds the plugin skills as `<plugin>:<skill>`. | Possible profile shape. Its skills cannot be hidden with `skillOverrides`. |
 | `claudeMdExcludes` | documented | Globs of `CLAUDE.md` paths to skip. | Not tested. |

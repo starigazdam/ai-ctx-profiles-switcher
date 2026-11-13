@@ -10,21 +10,24 @@ No Windows probe ran, so this document makes no Windows or PowerShell claim.
 ## How to run
 
 ```sh
-experiments/native-isolation/run-probes.sh                # clean checkout: P4 skipped
-dotnet build src/Ctx/Ctx.csproj --configuration Release   # CI step; enables P4
-d=$(mktemp -d) && TMPDIR=$d unshare -rnm \
+dotnet build src/Ctx/Ctx.csproj --configuration Release   # CI step; without it P4 is skipped
+d=$(mktemp -d) && TMPDIR=$d \
   experiments/native-isolation/ro-run.sh experiments/native-isolation/run-probes.sh
-ls -A "$d"                                                # empty = no stray write
+ls -A "$d"                                                # empty = nothing left behind
 ```
+
+Only this form is shown to run offline. A bare `run-probes.sh` call does not
+remove the network.
 
 The probes do not log in and do not call a model. They write only into one
 `mktemp -d` directory and remove it at exit (`KEEP=1` keeps it). The script
 exits 0 when every expectation that ran holds, and 1 on a mismatch. The
 `RESULT` line names each skipped group.
 
-- `ro-run.sh` is the write audit. `unshare -rnm` removes the network, and
-  `ro-run.sh` fails when an interface other than `lo` exists. It then remounts
-  every mount read-only. Only `$TMPDIR`, `/proc`, `/sys`, `/dev/pts`,
+- `ro-run.sh` is the write confinement. It starts itself under `unshare -rnm`,
+  which removes the network. Inside, it first fails when its mount namespace
+  is the outer one, or when an interface other than `lo` exists. It then
+  remounts every mount read-only. Only `$TMPDIR`, `/proc`, `/sys`, `/dev/pts`,
   `/dev/mqueue` and device nodes stay writable. It fails when another
   writable mount stays, and it prints the list of writable mounts.
 - `CTX_ENGINE_DLL` defaults to the CI build output
@@ -38,8 +41,9 @@ exits 0 when every expectation that ran holds, and 1 on a mismatch. The
 
 Each Copilot line prints the built-in count, the fixture count `n`, the
 fixture names and `name:source` pairs (`:off` marks a disabled skill). Each
-exclusion or no-effect claim prints `[before n=X -> after n=Y]`, and each
-before value is a checked baseline. P3.6 prints the totals instead. Counts include only
+exclusion claim, and each no-effect claim of an exclusion setting, prints
+`[before n=X -> after n=Y]`. Each before value is a checked baseline. P3.6
+prints the totals instead. Counts include only
 fixture skills (paths in the temp directory). Host skills above the temp
 directory are out of scope.
 
@@ -54,8 +58,8 @@ The PR comment for the reviewed head holds the raw output of these runs:
 3. The same under `ro-run.sh` with the default `copilot` (1.0.88): `RESULT: PASS`, exit 0.
 4. Mutant: the line `KEY=ignoredSkillsLocations` changed to a wrong key. The
    checks that expect an effect failed: P1.1, P1.3, P1.8, P1.9 and P4.1 to
-   P4.3 after injection. Exit 1. The no-effect checks (P1.5, P1.10, P1.11)
-   still passed, as expected.
+   P4.3 after injection. Exit 1. The log shows only `FAIL` and `RESULT` lines.
+   No `FAIL` line names the no-effect checks (P1.5, P1.10, P1.11).
 
 ## Results
 
@@ -163,6 +167,10 @@ Mode scope:
 
 `settings.json` symlink consequence: no change. Mode A keeps the shared
 symlink. Mode C has no symlink, and its `settings.json` is a private file.
+
+Out of scope: P2.1 shows a fourth attach path. `copilot --add-dir <profile>`
+loads all three profile skill roots in a session. The issue allows only the
+three options below, so the follow-up must assess `--add-dir` separately.
 
 Rejected options:
 
