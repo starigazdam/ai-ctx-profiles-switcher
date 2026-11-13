@@ -39,8 +39,10 @@ The PR comment for the reviewed head holds the raw output of these runs:
 
 1. `unshare -rn` with `COPILOT_CMD` pinned to 1.0.111: `RESULT: PASS`, exit 0.
 2. `unshare -rn` with the default `copilot` (1.0.88): `RESULT: PASS`, exit 0.
-3. A `find /home/hermes /tmp -newer <marker>` check after run 1 found no
-   written path outside the temp directory and the Hermes state directory.
+3. Write check: run 1 again with no build server alive, then
+   `find /home/hermes /tmp -newer <marker>`. It found no written path outside
+   the temp directory and the Hermes state directory. One earlier check listed an ONNX
+   runtime cache file. A concurrent MemPalace ingest can explain that write.
 4. Mutant: the key misspelled as `ignoredSkillLocationsX` in both writers.
    P1.1, P1.3, P1.8, P1.9 and P4.1 to P4.3 (after injection) failed. Exit 1.
    P1.5 and P1.10 still passed, because they expect no effect.
