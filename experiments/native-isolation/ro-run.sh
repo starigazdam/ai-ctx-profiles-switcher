@@ -1,20 +1,25 @@
 #!/bin/sh
 # Write confinement for run-probes.sh: run a command with no network, and with every
 # mount read-only except $TMPDIR, kernel pseudo file systems and device nodes.
-# It always starts the command through `unshare -rnm` (new user, network and mount
-# namespaces). There is no path to the remounts without unshare.
+# By default it starts the command through `unshare -rnm` (new user, network and
+# mount namespaces). There is no path to the remounts without unshare.
 #   d=$(mktemp -d) && TMPDIR=$d experiments/native-isolation/ro-run.sh \
 #       experiments/native-isolation/run-probes.sh; ls -A "$d"   # empty = nothing left behind
-# RO_RUN_UNSHARE (default -rnm) exists only to test the inner guards: with -rm the
+# RO_RUN_UNSHARE is test-only. It accepts -rnm (default), -rm or -rn. With -rm the
 # network guard must stop the run, with -rn the mount namespace guard must stop it.
 set -e
 [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ] || { echo "ro-run: set TMPDIR to an existing directory"; exit 3; }
 [ $# -gt 0 ] || { echo "ro-run: usage: ro-run.sh <command> [args...]"; exit 3; }
+flags="${RO_RUN_UNSHARE:--rnm}"
+case "$flags" in -rnm|-rm|-rn) ;; *) echo "ro-run: RO_RUN_UNSHARE must be -rnm, -rm or -rn"; exit 3 ;; esac
+outer="$(readlink /proc/self/ns/mnt)"
+[ -n "$outer" ] || { echo "ro-run: cannot read the outer mount namespace id"; exit 3; }
 
 # shellcheck disable=SC2016  # $-expansion happens in the inner shell
 inner='
 set -e
 outer="$1"; shift
+[ -n "$outer" ] || { echo "ro-run: no outer mount namespace id"; exit 3; }
 # Guards before any remount: a private mount namespace, and no interface but lo.
 [ "$(readlink /proc/self/ns/mnt)" != "$outer" ] \
     || { echo "ro-run: not in a private mount namespace"; exit 3; }
@@ -44,5 +49,4 @@ echo "ro-run: all mounts read-only except $TMPDIR, /proc, /sys, /dev/pts, /dev/m
 echo "ro-run: writable mounts: $(rwlist | tr "\n" " ")"
 exec "$@"
 '
-# shellcheck disable=SC2086  # RO_RUN_UNSHARE is a flag word
-exec unshare ${RO_RUN_UNSHARE:--rnm} sh -c "$inner" ro-run "$(readlink /proc/self/ns/mnt)" "$@"
+exec unshare "$flags" sh -c "$inner" ro-run "$outer" "$@"
