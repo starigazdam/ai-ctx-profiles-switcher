@@ -87,7 +87,7 @@ The offline PoC in [`experiments/claude-code-compat/README.md`](../experiments/c
 
 ## Skill isolation mechanisms (issue #83, 2026-11-13)
 
-Probed with the real Claude Code 2.1.292, not signed in, with no network (`unshare -rn`). The stream-json `init` event lists the skills, and the result is then "Not logged in". Thus no model call happens. The results cover only the `init` list of a session that is not signed in. A signed-in session can differ. Commands and results: [`native-skill-isolation-poc.md`](native-skill-isolation-poc.md), script [`experiments/native-isolation/run-probes.sh`](../experiments/native-isolation/run-probes.sh).
+Probed with the real Claude Code 2.1.292, not signed in, with no network (through `experiments/native-isolation/ro-run.sh`, which uses `unshare -rnm`). The stream-json `init` event lists the skills, and the result is then "Not logged in". Thus no model call happens. The results cover only the `init` list of a session that is not signed in. A signed-in session can differ. Commands and results: [`native-skill-isolation-poc.md`](native-skill-isolation-poc.md), script [`experiments/native-isolation/run-probes.sh`](../experiments/native-isolation/run-probes.sh).
 
 | Mechanism | Evidence | Result | ctx assessment |
 |---|---|---|---|

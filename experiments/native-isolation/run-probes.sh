@@ -3,8 +3,8 @@
 #
 # The probes write only into one mktemp directory (fake HOME, fixture
 # COPILOT_HOME, profiles, ctx config). They do not log in and do not call a model.
-# To prove "no network", run the script under a network-less namespace:
-#   unshare -rn experiments/native-isolation/run-probes.sh
+# To prove "no network" and temp-only writes, run it through ro-run.sh:
+#   d=$(mktemp -d) && TMPDIR=$d experiments/native-isolation/ro-run.sh experiments/native-isolation/run-probes.sh
 # Exit 0 = every expectation that ran held; 1 = at least one mismatch.
 # The RESULT line names skipped probe groups (P3 without claude, P4 without the engine).
 #
@@ -115,7 +115,7 @@ ctxbase="$(list COPILOT_HOME="$T/ctxhome")"
 check "P1.3 baseline: context home" "anc-canary" "$ctxbase" "$B"
 ignore_json "${GLOBALS[@]:1}" >"$T/ctxhome/settings.json"
 check "P1.3 context home ignore list" "-" "$(list COPILOT_HOME="$T/ctxhome")" "$B" "$ctxbase"
-check "P1.4 default home after (no leak)" "$ALL3" "$(list)" "$B"
+check "P1.4 default home after (no leak)" "$ALL3" "$(list)" "$B" "$base"
 
 # Repository scope, in a git repository listed in trustedFolders. Positive control: disabledSkills
 # in the same file turns g-agents off, so Copilot read the file.

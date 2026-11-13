@@ -24,10 +24,10 @@ The probes do not log in and do not call a model. They write only into one
 exits 0 when every expectation that ran holds, and 1 on a mismatch. The
 `RESULT` line names each skipped group.
 
-- `ro-run.sh` is the write confinement. It starts itself under `unshare -rnm`,
-  which removes the network. Inside, it first fails when its mount namespace
-  is the outer one, or when an interface other than `lo` exists. It then
-  remounts every mount read-only. Only `$TMPDIR`, `/proc`, `/sys`, `/dev/pts`,
+- `ro-run.sh` is the write confinement. It always runs its inner part through
+  `unshare -rnm`, which removes the network. The inner part first fails when
+  its mount namespace is the outer one, or when an interface other than `lo`
+  exists. It then remounts every mount read-only. Only `$TMPDIR`, `/proc`, `/sys`, `/dev/pts`,
   `/dev/mqueue` and device nodes stay writable. It fails when another
   writable mount stays, and it prints the list of writable mounts.
 - `CTX_ENGINE_DLL` defaults to the CI build output
@@ -169,8 +169,8 @@ Mode scope:
 symlink. Mode C has no symlink, and its `settings.json` is a private file.
 
 Out of scope: P2.1 shows a fourth attach path. `copilot --add-dir <profile>`
-loads all three profile skill roots in a session. The issue allows only the
-three options below, so the follow-up must assess `--add-dir` separately.
+loads all three profile skill roots in a session. The issue allows only its
+three listed options, so the follow-up must assess `--add-dir` separately.
 
 Rejected options:
 
