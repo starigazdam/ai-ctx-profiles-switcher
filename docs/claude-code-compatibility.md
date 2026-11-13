@@ -85,6 +85,22 @@ Existing Copilot behavior remains unchanged. A future provider-neutral model sho
 
 The offline PoC in [`experiments/claude-code-compat/README.md`](../experiments/claude-code-compat/README.md) tests only temporary paths and a fake `claude` executable. It verifies that environment selection and project-local `.claude` artifacts are possible without login. It intentionally does not claim that Claude-managed files are safe to symlink; that requires a version-pinned write experiment.
 
+## Skill isolation mechanisms (issue #83, 2026-11-13)
+
+Probed with the real Claude Code 2.1.292, not signed in. The stream-json `init` event lists the skills before the "Not logged in" result, so no model call happens. Commands and results: [`native-skill-isolation-poc.md`](native-skill-isolation-poc.md), script [`experiments/native-isolation/run-probes.sh`](../experiments/native-isolation/run-probes.sh).
+
+| Mechanism | Evidence | Result | ctx assessment |
+|---|---|---|---|
+| `--setting-sources project` | verified | Removes `~/.claude/skills`. Keeps ancestor `.claude/skills` and `--add-dir` skills. | Usable to drop user skills. Not a full filter, because ancestor roots stay. Auth with the `user` source dropped is not verified (no signed-in session). |
+| `--add-dir <dir>` | verified | Loads `<dir>/.claude/skills`. | Usable to attach a profile with no projection. `CLAUDE.md` from that directory needs `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` (documented only). |
+| `skillOverrides` | verified | `off` hides a skill, also with `--setting-sources project`. `name-only` keeps the name in the list. Plugin skills are not affected. | Usable per session through `--settings` JSON. No user settings file changes. |
+| `disableBundledSkills` | verified | Removes the bundled skills (35 to 21 in the run). | Optional. |
+| `--plugin-dir <dir>` | verified | Adds the plugin skills as `<plugin>:<skill>`. | Possible profile shape. Its skills cannot be hidden with `skillOverrides`. |
+| `claudeMdExcludes` | documented | Globs of `CLAUDE.md` paths to skip. | Not tested. |
+| `--bare`, `--safe-mode` | documented | `--bare` removes subscription OAuth. | Rejected for `ctx`. |
+
+This section adds evidence only. It does not lift the gate of #22.
+
 ## Follow-up issues if support is approved
 
 1. Define provider-neutral profile projection and ownership metadata while preserving current syntax.

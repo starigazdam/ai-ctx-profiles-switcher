@@ -369,9 +369,10 @@ disposable fake `HOME`, the baseline global/inherited skill was enabled;
 disabling the inherited skill in context `alpha` kept `alpha`'s own selected
 skill enabled but disabled the inherited skill in `beta` and, after `ctx
 clear`, outside `ctx` entirely. Second, the CLI's supported skill-name disable
-command offers no negative *skill-root* filter: the docs and help expose no
-skill-root exclusion option, and `COPILOT_SKILLS_DIRS`, where supported, is
-additive rather than an exclusion mechanism.
+command offers no negative *skill-root* filter, and `COPILOT_SKILLS_DIRS`,
+where supported, is additive rather than an exclusion mechanism. (Copilot CLI
+1.0.88 and 1.0.111 have a separate skill-root filter, `ignoredSkillsLocations`;
+see the update at the end of this section.)
 
 How `copilot skill disable` affects outside-`ctx` behavior differs by mode, but
 `ctx` provides no built-in or durable per-context exclusion workflow in any of
@@ -385,7 +386,18 @@ does not provide exclusion. In Mode C a user could manually disable a skill
 name inside that activation's fresh home without changing global settings, but
 the home is recreated on every activation, so the disable would have to be
 repeated each time and is never automated or persisted by `ctx`. In short:
-there is no negative skill-root filter and no ctx-managed durable exclusion.
+`ctx` has no managed durable exclusion today.
+
+Update (issue #83, verified with Copilot CLI 1.0.111 and 1.0.88): Copilot CLI
+now has a negative skill-root filter, `ignoredSkillsLocations`. It works only
+in `$COPILOT_HOME/settings.json`; the same key in a repository
+`.github/copilot/settings.json` had no effect. Each entry is a path prefix, so
+a parent directory hides every skill root below it. Under a custom
+`COPILOT_HOME`, the personal roots `~/.copilot/skills` and `~/.agents/skills`
+are not listed; only ancestor (`inherited`) roots remain. `ctx` does not use
+the filter yet. The PoC decision is to use it in Mode C only, because Mode A
+and Mode B would write it into the shared user `settings.json`. See
+[`docs/native-skill-isolation-poc.md`](docs/native-skill-isolation-poc.md).
 
 #### Inspecting potential skill discovery with `ctx skills`
 
@@ -616,8 +628,10 @@ feature does not fix them:
 - Concurrent contexts are last-reconciliation-wins.
 - There is no built-in or durable per-context skill exclusion in any mode;
   `copilot skill disable` is shared across every Mode A context via the single
-  `settings.json` symlink, and neither Mode A nor Modes B/C offers a negative
-  skill-root filter (see [Skill discovery](#skill-discovery)).
+  `settings.json` symlink. Copilot CLI's negative skill-root filter
+  (`ignoredSkillsLocations`) is read only from `$COPILOT_HOME/settings.json`,
+  so in Mode A it would land in the shared file; `ctx` does not use it in any
+  mode yet (see [Skill discovery](#skill-discovery)).
 - **Local TOCTOU gap:** Mode A path checks, including rechecks before creating
   the synthetic home and before `ctx clear --all` recursively deletes it, are
   preflight validation only—not race protection. A different local user who
