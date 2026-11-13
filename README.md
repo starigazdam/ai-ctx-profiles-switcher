@@ -632,7 +632,8 @@ feature does not fix them:
   `copilot skill disable` writes to the single `settings.json` symlink, so
   every Mode A context shares the result.
   Copilot CLI reads its negative skill-root filter (`ignoredSkillsLocations`)
-  from `$COPILOT_HOME/settings.json`. In Mode A that file is the shared one. `ctx` does not use the filter in any mode yet
+  from `$COPILOT_HOME/settings.json`. In Mode A that file is the shared one.
+  `ctx` does not use the filter in any mode yet
   (see [Skill discovery](#skill-discovery)).
 - **Local TOCTOU gap:** Mode A path checks, including rechecks before creating
   the synthetic home and before `ctx clear --all` recursively deletes it, are

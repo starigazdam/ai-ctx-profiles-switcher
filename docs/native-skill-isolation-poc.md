@@ -22,9 +22,11 @@ The probes do not log in and do not call a model. They write only into one
 exits 0 when every expectation that ran holds, and 1 on a mismatch. The
 `RESULT` line names each skipped group.
 
-- `ro-run.sh` is the write audit. It removes the network and makes `$HOME`,
-  `/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock`, `/run/shm` and `/run/user/*`
-  read-only. Only `$TMPDIR` stays writable.
+- `ro-run.sh` is the write audit. `unshare -rnm` removes the network, and
+  `ro-run.sh` fails when an interface other than `lo` exists. It then remounts
+  every mount read-only. Only `$TMPDIR`, `/proc`, `/sys`, `/dev/pts`,
+  `/dev/mqueue` and device nodes stay writable. It fails when another
+  writable mount stays, and it prints the list of writable mounts.
 - `CTX_ENGINE_DLL` defaults to the CI build output
   `src/Ctx/bin/Release/net10.0/Ctx.dll`. `ctx clear` needs it. When it is
   missing, P4 prints `SKIP`. The script does not build it, because a
@@ -37,7 +39,7 @@ exits 0 when every expectation that ran holds, and 1 on a mismatch. The
 Each Copilot line prints the built-in count, the fixture count `n`, the
 fixture names and `name:source` pairs (`:off` marks a disabled skill). Each
 exclusion or no-effect claim prints `[before n=X -> after n=Y]`, and each
-before value is a checked baseline. Counts include only
+before value is a checked baseline. P3.6 prints the totals instead. Counts include only
 fixture skills (paths in the temp directory). Host skills above the temp
 directory are out of scope.
 
@@ -45,7 +47,8 @@ directory are out of scope.
 
 The PR comment for the reviewed head holds the raw output of these runs:
 
-1. Clean clone, no engine build, default commands: `RESULT: PASS (skipped: P4)`, exit 0.
+1. Clean clone, no engine build, default commands, under `ro-run.sh`:
+   `RESULT: PASS (skipped: P4)`, exit 0. The writable `$TMPDIR` was empty after the run.
 2. After the CI build step, under `ro-run.sh`, with `COPILOT_CMD` pinned to
    1.0.111: `RESULT: PASS`, exit 0. The writable `$TMPDIR` was empty after the run.
 3. The same under `ro-run.sh` with the default `copilot` (1.0.88): `RESULT: PASS`, exit 0.
@@ -69,7 +72,7 @@ gave the stated result. `documented` means vendor text only.
 | P1.7 | Copilot CLI | 1.0.111, 1.0.88 | With a custom `COPILOT_HOME`, the fixture skills in `~/.copilot/skills` and `~/.agents/skills` are not listed. The fixture ancestor skill stays (`source: inherited`). | verified | `run-probes.sh` P1.7 |
 | P1.8-P1.9 | Copilot CLI | 1.0.111, 1.0.88 | An ignore entry is a path prefix. A parent directory hides every skill root below it. That includes a `COPILOT_SKILLS_DIRS` root. | verified | `run-probes.sh` P1.8-P1.9 |
 | P1.10 | Copilot CLI | 1.0.111, 1.0.88 | A glob entry (`<dir>/*/skills`) has no effect. | verified | `run-probes.sh` P1.10 |
-| P1.11 | Copilot CLI | 1.0.111, 1.0.88 | A string prefix that is not a parent directory (`<tmp>/an` for `<tmp>/anc`) has no effect. Prefixes match whole path components. | verified | `run-probes.sh` P1.11 |
+| P1.11 | Copilot CLI | 1.0.111, 1.0.88 | A string prefix that is not a parent directory (`<tmp>/an` for `<tmp>/anc`) has no effect. In this probe, prefixes match whole path components. | verified | `run-probes.sh` P1.11 |
 | P1.d | Copilot CLI | 1.0.111 help | The key name in the help text is the flat `ignoredSkillsLocations`. Issue #83 reports that the web docs show `skills.ignoredLocations`. This PoC did not check the web page. | documented | `copilot help config` |
 | P2.0 | Copilot CLI | 1.0.111, 1.0.88 | `copilot --add-dir <profile> skill list --json` exits 0 and does not list the profile skills. | verified | `run-probes.sh` P2.0 |
 | P2.1 | Copilot CLI | 1.0.111 | In an interactive session, `--add-dir <profile>` loads the profile's `.github/skills`, `.agents/skills` and `.claude/skills`. `/skills` shows all three as `Repository`. At start, the capture shows a "Confirm folder trust" prompt. No login and no model call. | verified | "P2 session" below |
@@ -108,10 +111,10 @@ done
 tmux new-session -d -s p2 -c "$X/ws" -x 160 -y 50 "unshare -rn env -i PATH=$PATH \
   TERM=xterm-256color HOME=$X/home TMPDIR=$X COPILOT_AUTO_UPDATE=false \
   node $HOME/.cache/copilot/pkg/linux-x64/1.0.111/index.js --add-dir $P"
-tmux send-keys -t p2 Enter          # answer "Confirm folder trust" with 1. Yes
-tmux send-keys -t p2 /skills Enter
-tmux send-keys -t p2 / a-           # filter the list
-tmux capture-pane -p -t p2
+sleep 8; tmux send-keys -t p2 Enter   # answer "Confirm folder trust" with 1. Yes
+sleep 4; tmux send-keys -t p2 /skills; sleep 2; tmux send-keys -t p2 Enter
+sleep 4; tmux send-keys -t p2 /; sleep 1; tmux send-keys -t p2 a-   # filter the list
+sleep 2; tmux capture-pane -p -t p2
 ```
 
 Captured result: `✓ a-agents Repository`, `✓ a-claude Repository`,
@@ -122,11 +125,12 @@ is not deterministic.
 ## Design decision
 
 **Decision: option 2 in Mode C, plus a per-activation ignore list. Mode A and
-Mode B stay unchanged.**
+Mode B stay unchanged.** The decision combines option 2 with the ignore file
+of option 1, because option 2 alone gives no exclusion.
 
 Option 2 says "stop the projection, inject `COPILOT_SKILLS_DIRS`". Mode C
 already does both: it does not project skills, and it exports
-`COPILOT_SKILLS_DIRS`. `COPILOT_SKILLS_DIRS` only adds roots (P1.6). Thus the
+`COPILOT_SKILLS_DIRS` (`ctx.sh` `_ctx_compute_skills_dirs_csv`, line 1292). `COPILOT_SKILLS_DIRS` only adds roots (P1.6). Thus the
 proposed change adds one step: on each Mode C activation, `ctx` writes a
 private `settings.json` with `ignoredSkillsLocations` into the new ephemeral
 home. P4 tests this step as a manual injection with the real `ctx.sh`.
@@ -134,14 +138,15 @@ home. P4 tests this step as a manual injection with the real `ctx.sh`.
 Reasons:
 
 1. Copilot reads the ignore list from `$COPILOT_HOME/settings.json` (P1.1 to
-   P1.4). The same key in a trusted repository file has no effect (P1.5).
+   P1.4). The same key in a repository file has no effect (P1.5), with
+   `trustedFolders` set.
    Thus exclusion needs a per-context `settings.json`.
 2. Mode C creates a new, empty home for each activation. A file written there
    did not reach the next activation or the default home (P4.1 to P4.6).
 3. Under a custom home, the personal fixture roots are absent (P1.7). At a git
    repository root, ancestors above it are absent (P1.5a). Thus the list must
    cover the ancestor roots that Copilot still lists. Outside a repository,
-   these are the skill roots of all ancestors. Inside a repository, the roots
+   the probe ancestor stayed listed (P1.7). Inside a repository, the roots
    between the working directory and the repository root are project roots.
    This PoC did not test that case. The follow-up must decide if `ctx` hides
    project roots.
@@ -153,8 +158,8 @@ Mode scope:
   `settings.json` stays a symlink to the shared `~/.copilot/settings.json`.
   An ignore list there would go into the shared file. That is a stop gate of
   #83. It would also change every Mode A context and normal use.
-- **Mode B** gets no exclusion. It uses the user's home, so an ignore list
-  would also go into the shared user settings.
+- **Mode B** gets no exclusion. It does not set `COPILOT_HOME` (`ctx.sh`
+  line 622), so an ignore list would also go into the shared user settings.
 
 `settings.json` symlink consequence: no change. Mode A keeps the shared
 symlink. Mode C has no symlink, and its `settings.json` is a private file.
@@ -177,11 +182,10 @@ Limits and follow-up work (not in this issue):
   (`<ancestor>/.agents/skills`, `.claude/skills`, `.github/skills`).
 - The ancestor roots depend on the working directory. A list written at
   activation does not follow a later `cd` into a different tree.
-- The key is not stable vendor surface. The help text and the web docs use
-  different names (P1.d). The follow-up must probe the key on each supported
-  version.
-- Mode C rejects canonical profiles, and its `COPILOT_SKILLS_DIRS` includes
-  only `.github/skills`. Canonical `.agents/skills` support in Mode C is a
+- The help text and the web docs use different names for the key (P1.d).
+  The follow-up must probe the key on each supported version.
+- Mode C rejects canonical profiles (`ctx.sh` line 588), and its
+  `COPILOT_SKILLS_DIRS` includes only `.github/skills` (`ctx.sh` line 1292). Canonical `.agents/skills` support in Mode C is a
   separate change.
 - A Mode C home starts empty, so it has no signed-in account and no session
   history. This PoC does not test sign-in in Mode C.

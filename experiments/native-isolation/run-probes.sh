@@ -117,7 +117,7 @@ ignore_json "${GLOBALS[@]:1}" >"$T/ctxhome/settings.json"
 check "P1.3 context home ignore list" "-" "$(list COPILOT_HOME="$T/ctxhome")" "$B" "$ctxbase"
 check "P1.4 default home after (no leak)" "$ALL3" "$(list)" "$B"
 
-# Repository scope, in a trusted git repository. Positive control: disabledSkills
+# Repository scope, in a git repository listed in trustedFolders. Positive control: disabledSkills
 # in the same file turns g-agents off, so Copilot read the file.
 git -C "$WS" init -q
 gitbase="$(list)"
@@ -156,7 +156,7 @@ check "P1.11 string prefix (not parent): no effect" "alpha-skill,anc-canary" \
     "$(list COPILOT_HOME="$T/emptyhome" COPILOT_SKILLS_DIRS="$PROF/alpha/.github/skills")" "$B" "$eb"
 
 # --- P2.0: `skill list` does not apply --add-dir (session check: see the doc) ---
-check "P2.0 skill list --add-dir: not listed" "$ALL3" "$(list -- --add-dir "$PROF/alpha")" "$B"
+check "P2.0 skill list --add-dir: not listed" "$ALL3" "$(list -- --add-dir "$PROF/alpha")" "$B" "$base"
 
 # --- P4: A -> B -> A with real ctx.sh Mode C, plus a per-activation ignore list ---
 # The ignore-list write below is the PoC step that ctx does NOT do today.
@@ -198,7 +198,7 @@ p4() {
 }
 if [ -n "$CTX_ENGINE_DLL" ] && [ -f "$CTX_ENGINE_DLL" ]; then
     p4
-    if [ ! -e "$H/.copilot/settings.json" ]; then echo "PASS P4.6 default settings.json absent after P4"
+    if [ ! -e "$H/.copilot/settings.json" ] && [ ! -L "$H/.copilot/settings.json" ]; then echo "PASS P4.6 default settings.json absent after P4"
     else echo "FAIL P4.6 default settings.json present after P4"; fail=1; fi
 else
     echo "SKIP P4 CTX_ENGINE_DLL not found: $CTX_ENGINE_DLL"
@@ -245,7 +245,7 @@ print("client=%s total=%d n=%d fixture=%s" % (init.get("claude_code_version"), l
     check "P3.3 skillOverrides off (user)" "anc-claude" "$(cl --settings '{"skillOverrides":{"g-claude":"off"}}')" "" "$cb"
     check "P3.4 project + overrides off (anc)" "alpha-claude" \
         "$(cl --setting-sources project --settings '{"skillOverrides":{"anc-claude":"off"}}' --add-dir "$PROF/alpha")" "" "$pb"
-    check "P3.5 skillOverrides name-only" "anc-claude,g-claude" "$(cl --settings '{"skillOverrides":{"g-claude":"name-only"}}')"
+    check "P3.5 skillOverrides name-only" "anc-claude,g-claude" "$(cl --settings '{"skillOverrides":{"g-claude":"name-only"}}')" "" "$cb"
     after="$(cl --settings '{"disableBundledSkills":true}')"
     nb="$(field total "$cb")"; na="$(field total "$after")"
     check "P3.6 disableBundledSkills (total $nb->$na)" "anc-claude,g-claude" "$after"

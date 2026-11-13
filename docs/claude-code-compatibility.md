@@ -97,7 +97,7 @@ Probed with the real Claude Code 2.1.292, not signed in, with no network (`unsha
 | `disableBundledSkills` | verified | The total drops (35 to 21 on this host). The fixture skills stay. | Optional. |
 | `--plugin-dir <dir>` | verified | Adds the plugin skills as `<plugin>:<skill>`. | Possible profile shape. Its skills cannot be hidden with `skillOverrides`. |
 | `claudeMdExcludes` | documented | Globs of `CLAUDE.md` paths to skip. | Not tested. |
-| `--bare` | documented | Removes subscription OAuth. | Rejected for `ctx`. |
+| `--bare` | documented (as issue #83 reports the docs) | Removes subscription OAuth. | Rejected for `ctx`. |
 | `--safe-mode` | not checked | No claim. | Not assessed. |
 
 This section adds evidence only. It does not lift the gate of #22.
