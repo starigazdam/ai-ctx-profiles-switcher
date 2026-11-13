@@ -32,7 +32,7 @@ Task 0 must verify the three documented items before implementation starts.
 ### D3. Snapshot
 
 - Location: a new unique directory from the Mode C primitive (`mktemp -d` on POSIX; `GetTempPath()` plus a random suffix in PowerShell). Name prefix `ctx-claude.`. Mode 0700 on POSIX. A collision or a link rejects the activation.
-- `CLAUDE.md`: for each profile in `.ctx` order, the line `<!-- ctx profile <n> <label> -->`, a newline, the exact `AGENTS.md` bytes, and a newline when the source does not end with one. No BOM is added. A source BOM is removed only at the start of each source, so the output has no BOM in the middle.
+- `CLAUDE.md`: each profile in `.ctx` order adds the line `<!-- ctx profile <n> <label> -->`, a newline and its exact `AGENTS.md` bytes. A newline follows when the source does not end with one. No BOM is added. A source BOM is removed only at the start of each source, so the output has no BOM in the middle.
 - `@path` imports in `AGENTS.md` are not resolved. The bytes are copied as they are. A relative import then resolves from the snapshot, not from the profile. The README states this limit.
 - `.claude/skills/<name>/`: a copy of each `<profile>/.agents/skills/<name>/` that has a regular `SKILL.md`. Regular files and directories only. A symlink, a junction or another special file anywhere in a selected skill rejects the activation.
 - Two selected skills whose names differ only in case reject the activation. Copilot Mode A uses warn-and-skip; Claude does not, because a skipped skill is not visible to the user at session start.

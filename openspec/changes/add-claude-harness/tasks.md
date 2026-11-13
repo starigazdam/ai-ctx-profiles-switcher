@@ -8,12 +8,13 @@
 ## 1. Grammar
 
 - [ ] 1.1 `ctx.sh` and `ctx.ps1`: parse `harness:` per D1 in the shared `.ctx` parser, before any state change.
-- [ ] 1.2 Bats and Pester: valid values, default, key case, value case, empty value, unknown value, duplicate, `home:` with Claude, legacy profile with Claude, old `harness` entry label.
+- [ ] 1.2 Bats and Pester cases: valid values, the default, key case and value case. Also: empty, unknown and duplicate values, `home:` with Claude, a legacy profile with Claude, and an old `harness` entry label.
 
 ## 2. Snapshot and activation
 
 - [ ] 2.1 Build the snapshot per D3. Check the client per D7. Publish the record per D4 and D5 only after both succeed.
-- [ ] 2.2 Bats and Pester: byte-exact `CLAUDE.md` (LF, CRLF, BOM, no final newline, two profiles in order), skill copy with a supporting asset, case collision, symlink rejection, limits, missing client, removal of a partial snapshot, previous activation kept on each failure.
+- [ ] 2.2 Bats and Pester: byte-exact `CLAUDE.md` for LF, CRLF, BOM, no final newline and two profiles in order. Skill copy with a supporting asset.
+- [ ] 2.2a Bats and Pester failure cases: case collision, symlink, limits, missing client, and removal of a partial snapshot. Each failure keeps the previous activation.
 - [ ] 2.3 Bats and Pester: A then B then A gives three distinct snapshots; B content never appears in an A snapshot.
 
 ## 3. Output, check, current, clear

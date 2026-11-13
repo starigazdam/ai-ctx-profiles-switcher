@@ -4,7 +4,7 @@
 
 ### Requirement: harness directive
 
-The system SHALL accept a reserved `.ctx` directive `harness:<value>`. The key SHALL be matched case-insensitively, and whitespace around the key and the value SHALL be trimmed. The value SHALL be exactly `claude` or `copilot`. A file without the directive SHALL select `copilot`, and `harness:copilot` SHALL behave exactly like a file without the directive. The system SHALL reject the whole file before any state change when the value is empty or unknown, when the file has more than one `harness:` line in any key case, when `harness:claude` appears with a `home:` line, or when a file with `harness:` has no profile entry. Manual activation (`ctx <profile>...`) SHALL NOT select Claude.
+The system SHALL accept a reserved `.ctx` directive `harness:<value>`. The key SHALL be matched case-insensitively, and whitespace around the key and the value SHALL be trimmed. The value SHALL be exactly `claude` or `copilot`. A file without the directive SHALL select `copilot`, and `harness:copilot` SHALL behave exactly like a file without the directive. The system SHALL reject the whole file before any state change in each of these cases: the value is empty or unknown; the file has more than one `harness:` line in any key case; `harness:claude` appears with a `home:` line; the file has `harness:` and no profile entry. Manual activation (`ctx <profile>...`) SHALL NOT select Claude.
 
 #### Scenario: Missing directive keeps Copilot
 
@@ -43,16 +43,16 @@ Before it publishes a Claude activation, the system SHALL require `claude` on `P
 
 Each successful Claude activation SHALL create a new unique private snapshot directory with the Mode C temp-directory primitive and the name prefix `ctx-claude.`. A colliding path or a link SHALL reject the activation. The snapshot SHALL contain only:
 
-- `CLAUDE.md`: for each selected profile in `.ctx` order, the line `<!-- ctx profile <n> <label> -->`, a newline, the `AGENTS.md` bytes with a leading UTF-8 BOM removed, and a newline when those bytes do not end with one. `@path` imports SHALL NOT be resolved.
+- `CLAUDE.md`: each selected profile in `.ctx` order adds the line `<!-- ctx profile <n> <label> -->`, a newline and its `AGENTS.md` bytes. A leading UTF-8 BOM SHALL be removed. A newline SHALL follow when the bytes do not end with one. `@path` imports SHALL NOT be resolved.
 - `.claude/skills/<name>/`: a copy of each `<profile>/.agents/skills/<name>/` directory that contains a regular `SKILL.md`, with all supporting files.
 - `ctx-settings.json`: exactly `{"autoMemoryEnabled": false}` and a newline.
 
-A symlink, junction, or special file in a selected skill, two selected skills whose names differ only in case, more than 2000 files, or more than 32 MiB SHALL fail the activation before publication. On such a failure, the system SHALL remove only the snapshot directory that this call created, without following links. The system SHALL NOT copy hooks, settings, MCP servers, agents, commands, plugins, or credentials into the snapshot, and SHALL NOT write to any source profile.
+The activation SHALL fail before publication in each of these cases: a symlink, junction or special file in a selected skill; two selected skills whose names differ only in case; more than 2000 files; more than 32 MiB. On such a failure, the system SHALL remove only the snapshot directory that this call created, without following links. The system SHALL NOT copy hooks, settings, MCP servers, agents, commands, plugins, or credentials into the snapshot, and SHALL NOT write to any source profile.
 
 #### Scenario: CLAUDE.md holds the selected bytes in order
 
 - **WHEN** a `.ctx` file selects canonical profiles `a` then `b` with `harness:claude`
-- **THEN** `CLAUDE.md` holds the marker line and bytes of `a`, then those of `b`, byte-exact except for a removed leading BOM and an added final newline
+- **THEN** `CLAUDE.md` holds the marker line and bytes of `a`, then those of `b`. Only a leading BOM is removed and only a missing final newline is added
 
 #### Scenario: Skills are copied with their assets
 
@@ -71,7 +71,7 @@ A symlink, junction, or special file in a selected skill, two selected skills wh
 
 ### Requirement: Claude launch guidance
 
-On success, the system SHALL print the client version, each selected profile with its order, label, and resolved path, the snapshot path, a notice that Claude also loads user, ancestor, repository, managed, and built-in sources that `ctx` does not filter, a notice that only a new session uses the selection, and exactly one start command. The Bash/zsh command SHALL be `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir '<snapshot>' --settings '<snapshot>/ctx-settings.json'`, with each `'` in a path written as `'\''`. The PowerShell command SHALL set `$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` to `'1'`, run `claude --add-dir '<snapshot>' --settings '<snapshot>\ctx-settings.json'`, and then remove the variable, with each `'` written as `''`. The system SHALL NOT start Claude, SHALL NOT export `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` in the shell, and SHALL NOT change `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`, or any Claude setting file.
+On success, the system SHALL print the client version and each selected profile with its order, label and resolved path. It SHALL print the snapshot path and exactly one start command. It SHALL print a notice that Claude also loads user, ancestor, repository, managed and built-in sources, which `ctx` does not filter. It SHALL print a notice that only a new session uses the selection. The Bash/zsh command SHALL be `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir '<snapshot>' --settings '<snapshot>/ctx-settings.json'`, with each `'` in a path written as `'\''`. The PowerShell command SHALL set `$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` to `'1'`, run `claude --add-dir '<snapshot>' --settings '<snapshot>\ctx-settings.json'`, and then remove the variable, with each `'` written as `''`. The system SHALL NOT start Claude, SHALL NOT export `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` in the shell, and SHALL NOT change `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`, or any Claude setting file.
 
 #### Scenario: The command is quoted for the shell
 
@@ -85,7 +85,7 @@ On success, the system SHALL print the client version, each selected profile wit
 
 ### Requirement: Claude activation record, switch, and clear
 
-The system SHALL keep the Claude record (harness, ordered labels, resolved paths, snapshot path) in the shell session only. It SHALL publish the record only after the snapshot and the client check succeed, and it SHALL first reset the previous activation as `ctx clear` does today. It SHALL unset only Copilot variables that a previous `ctx` activation set. A Claude activation SHALL NOT create, change, or read a Copilot home. `ctx current` and `ctx clear` SHALL handle a Claude record in the shell without calling the .NET engine. `ctx current` SHALL print the harness and the snapshot path. `ctx clear` and `ctx clear --all` SHALL drop the record and print the retained snapshot path, and SHALL NEVER delete a snapshot. A later Copilot activation SHALL drop the Claude record. A failed activation SHALL keep the previous activation and record unchanged.
+The system SHALL keep the Claude record (harness, ordered labels, resolved paths, snapshot path) in the shell session only. It SHALL publish the record only after the snapshot and the client check succeed. Before it publishes, it SHALL reset the previous activation as `ctx clear` does today. It SHALL unset only Copilot variables that a previous `ctx` activation set. A Claude activation SHALL NOT create, change, or read a Copilot home. `ctx current` and `ctx clear` SHALL handle a Claude record in the shell without calling the .NET engine. `ctx current` SHALL print the harness and the snapshot path. `ctx clear` and `ctx clear --all` SHALL drop the record and print the retained snapshot path, and SHALL NEVER delete a snapshot. A later Copilot activation SHALL drop the Claude record. A failed activation SHALL keep the previous activation and record unchanged.
 
 #### Scenario: Clear keeps the snapshot
 
