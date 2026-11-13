@@ -6,10 +6,12 @@
 
 The system SHALL accept a reserved `.ctx` directive `harness:<value>`. The key SHALL be matched case-insensitively, and whitespace around the key and the value SHALL be trimmed. The value SHALL be exactly `claude` or `copilot`. A file without the directive SHALL select `copilot`, and `harness:copilot` SHALL behave exactly like a file without the directive. The system SHALL reject the whole file before any state change in each of these cases:
 
-- The value is empty or unknown.
-- The file has more than one `harness:` line in any key case.
-- `harness:claude` appears with a `home:` line.
-- The file has `harness:` and no profile entry.
+- The value is empty or unknown. The reason text is `harness-value <value>`.
+- The file has more than one `harness:` line in any key case. The reason text is `harness-duplicate`.
+- `harness:claude` appears with a `home:` line. The reason text is `harness-home`.
+- The file has `harness:` and no profile entry. The reason text is `harness-no-entry`.
+
+Each rejection SHALL use the existing `.ctx` invalid-file diagnostic with that reason text. Existing entry, containment and duplicate-label errors SHALL keep their current messages.
 
 Manual activation (`ctx <profile>...`) SHALL NOT select Claude.
 
@@ -83,7 +85,7 @@ On a failure before publication, the system SHALL remove the snapshot directory 
 - **WHEN** two selected profiles have skills `lint` and `lint`, or `Lint` and `lint`
 - **THEN** the activation fails with `skill-collision`, and no snapshot stays
 
-#### Scenario: Each activation gets its own snapshot
+#### Scenario: Each activation creates a separate snapshot
 
 - **WHEN** a user loads task A, then task B, then task A again
 - **THEN** three distinct snapshots exist, and no content of B appears in either A snapshot
@@ -129,7 +131,7 @@ The Bash/zsh command SHALL be `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 cl
 
 The PowerShell command SHALL save the earlier value of `$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`, set it to `'1'`, and run `claude --add-dir '<snapshot>' --settings '<snapshot>\ctx-settings.json'` in a `try` block. A `finally` block SHALL restore the earlier value, or remove the variable when it was not set. Each `'` in a path SHALL be written as `''`.
 
-The system SHALL NOT start Claude, SHALL NOT export `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` in the shell, and SHALL NOT change `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`, or any Claude setting file. Each error SHALL start with `ctx: error: harness claude: ` and a reason token from the design.
+The system SHALL NOT start Claude, SHALL NOT export `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` in the shell, and SHALL NOT change `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`, or any Claude setting file. Each error of the Claude steps (canonical check, client check, snapshot, reset) SHALL start with `ctx: error: harness claude: ` and a Claude reason token from design D6. Parse errors SHALL use the `.ctx` invalid-file diagnostic.
 
 #### Scenario: The command is quoted for the shell
 

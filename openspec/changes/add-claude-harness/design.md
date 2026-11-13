@@ -82,19 +82,22 @@ ctx: start a NEW Claude session in your work directory (an open session does not
 CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir '<snapshot>' --settings '<snapshot>/ctx-settings.json'
 ```
 
-- The command has no `cd`. The user starts it in the directory where the work is. The snapshot reaches the session through `--add-dir` from any directory.
+- The command has no `cd`. The user starts it in the directory where the work is. Claude loads the snapshot through `--add-dir` from any directory.
 - Bash/zsh quoting: single quotes, with `'` written as `'\''`. The leading assignment applies only to that one command.
 - PowerShell prints one line: `$ctxClaudeMdPrev = $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD; $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1'; try { claude --add-dir '<snapshot>' --settings '<snapshot>\ctx-settings.json' } finally { $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = $ctxClaudeMdPrev }`. A `'` is written as `''`. The `finally` block restores the earlier value. When the variable was not set, the assignment of `$null` removes it again.
 - The settings file avoids JSON quoting through a native command line in Windows PowerShell 5.1.
 - `ctx` itself does not set `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` in the shell.
 
-Errors use one prefix and a fixed reason token:
+Errors have two groups:
+
+- **Step 1 parse errors** use the existing `.ctx` invalid-file diagnostic. Entry resolution, trusted-root containment and duplicate labels keep their current messages. The new `harness:` rules add these fixed reason texts to that diagnostic: `harness-value <value>`, `harness-duplicate`, `harness-home`, `harness-no-entry`. An old entry labelled `harness` is parsed as the directive, so it gets `harness-value`.
+- **Claude errors** (D2 and steps 2 to 4) use one prefix and a fixed reason token:
 
 ```text
 ctx: error: harness claude: <reason> [<detail>]
 ```
 
-Reasons: `client-missing`, `client-failed`, `client-unsupported`, `legacy-profile <label>`, `skill-collision <name>`, `skill-link <path>`, `limit-files <count>`, `limit-bytes <count>`, `snapshot-failed <detail>`, `reset-failed <detail>`.
+Claude reasons: `legacy-profile <label>`, `client-missing`, `client-failed`, `client-unsupported`, `skill-collision <name>`, `skill-link <path>`, `limit-files <count>`, `limit-bytes <count>`, `snapshot-failed <detail>`, `reset-failed <detail>`.
 
 ### D7. Client check
 
