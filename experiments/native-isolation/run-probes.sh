@@ -152,6 +152,8 @@ if command -v "${CLAUDE_CMD%% *}" >/dev/null 2>&1; then
     mkskill "$H/.claude/skills" g-claude
     mkskill "$T/anc/.claude/skills" anc-claude
     mkskill "$PROF/alpha/.claude/skills" alpha-claude
+    mkskill "$T/plug/skills" pl-skill
+    mkdir -p "$T/plug/.claude-plugin"; echo '{"name":"prof","version":"0.0.1"}' >"$T/plug/.claude-plugin/plugin.json"
     cl() {
         (cd "$WS" && echo x | env -i PATH="$PATH" HOME="$H" TMPDIR="$T" CLAUDE_CODE_TMPDIR="$T" DISABLE_TELEMETRY=1 \
             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 $CLAUDE_CMD -p --output-format stream-json --verbose "$@" 2>/dev/null || true) |
@@ -160,8 +162,8 @@ import json, sys
 for line in sys.stdin:
     d = json.loads(line)
     if d.get("subtype") == "init":
-        f = sorted(s for s in d["skills"] if s in ("g-claude", "anc-claude", "alpha-claude"))
-        print("client=%s fixture=%s" % (d.get("claude_code_version"), ",".join(f) or "-"))
+        f = sorted(s for s in d["skills"] if s in ("g-claude", "anc-claude", "alpha-claude", "prof:pl-skill"))
+        print("client=%s total=%d fixture=%s" % (d.get("claude_code_version"), len(d["skills"]), ",".join(f) or "-"))
         break
 else:
     print("client=? fixture=NO-INIT")'
@@ -175,6 +177,13 @@ else:
     check "P3.4 project + overrides off (anc)" "alpha-claude" \
         "$(cl --setting-sources project --settings '{"skillOverrides":{"anc-claude":"off"}}' --add-dir "$PROF/alpha")"
     check "P3.5 skillOverrides name-only" "anc-claude,g-claude" "$(cl --settings '{"skillOverrides":{"g-claude":"name-only"}}')"
+    before="$(cl)"; after="$(cl --settings '{"disableBundledSkills":true}')"
+    nb="${before#*total=}"; nb="${nb%% *}"; na="${after#*total=}"; na="${na%% *}"
+    check "P3.6 disableBundledSkills ($nb->$na)" "anc-claude,g-claude" "$after"
+    [ "$na" -lt "$nb" ] || { echo "FAIL P3.6 total did not drop"; fail=1; }
+    check "P3.7 --plugin-dir adds plugin skill" "anc-claude,g-claude,prof:pl-skill" "$(cl --plugin-dir "$T/plug")"
+    check "P3.8 skillOverrides skips plugins" "anc-claude,g-claude,prof:pl-skill" \
+        "$(cl --plugin-dir "$T/plug" --settings '{"skillOverrides":{"pl-skill":"off","prof:pl-skill":"off"}}')"
 else
     echo "SKIP P3 claude not found (set CLAUDE_CMD)"
 fi
