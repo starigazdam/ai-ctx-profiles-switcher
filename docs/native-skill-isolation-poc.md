@@ -26,7 +26,8 @@ exits 0 when every expectation that ran holds, and 1 on a mismatch. The
 
 - `ro-run.sh` is the write confinement. By default it runs its inner part
   through `unshare -rnm`, which removes the network. The test-only variable
-  `RO_RUN_UNSHARE` accepts only `-rnm`, `-rm` or `-rn`. The inner part first fails when
+  `RO_RUN_UNSHARE` accepts only `-rnm`, `-rm` or `-rn`.
+  Both mount namespace ids must be readable and non-empty. The inner part first fails when
   its mount namespace is the outer one, or when an interface other than `lo`
   exists. It then remounts every mount read-only. Only `$TMPDIR`, `/proc`, `/sys`, `/dev/pts`,
   `/dev/mqueue` and device nodes stay writable. It fails when another

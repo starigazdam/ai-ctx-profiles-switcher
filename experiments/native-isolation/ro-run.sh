@@ -12,7 +12,7 @@ set -e
 [ $# -gt 0 ] || { echo "ro-run: usage: ro-run.sh <command> [args...]"; exit 3; }
 flags="${RO_RUN_UNSHARE:--rnm}"
 case "$flags" in -rnm|-rm|-rn) ;; *) echo "ro-run: RO_RUN_UNSHARE must be -rnm, -rm or -rn"; exit 3 ;; esac
-outer="$(readlink /proc/self/ns/mnt)"
+outer="$(readlink /proc/self/ns/mnt)" || outer=""
 [ -n "$outer" ] || { echo "ro-run: cannot read the outer mount namespace id"; exit 3; }
 
 # shellcheck disable=SC2016  # $-expansion happens in the inner shell
@@ -21,8 +21,9 @@ set -e
 outer="$1"; shift
 [ -n "$outer" ] || { echo "ro-run: no outer mount namespace id"; exit 3; }
 # Guards before any remount: a private mount namespace, and no interface but lo.
-[ "$(readlink /proc/self/ns/mnt)" != "$outer" ] \
-    || { echo "ro-run: not in a private mount namespace"; exit 3; }
+cur="$(readlink /proc/self/ns/mnt)" || cur=""
+[ -n "$cur" ] || { echo "ro-run: cannot read the mount namespace id"; exit 3; }
+[ "$cur" != "$outer" ] || { echo "ro-run: not in a private mount namespace"; exit 3; }
 ifs="$(awk -F: '\''NR > 2 {gsub(/ /, "", $1); if ($1 != "lo") print $1}'\'' /proc/net/dev)"
 [ -z "$ifs" ] || { echo "ro-run: network interfaces present: $ifs"; exit 3; }
 skip() {  # mounts that stay as they are: pseudo file systems and device nodes
