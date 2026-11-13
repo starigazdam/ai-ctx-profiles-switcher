@@ -93,8 +93,8 @@ gave the stated result. `documented` means vendor text only.
 | P3.5 | Claude Code | 2.1.292 | With `name-only`, the skill stays in the `init` list. | verified | `run-probes.sh` P3.5 |
 | P3.6 | Claude Code | 2.1.292 | With `disableBundledSkills: true`, the total drops (35 to 21 on this host). The fixture skills stay. | verified | `run-probes.sh` P3.6 |
 | P3.7-P3.8 | Claude Code | 2.1.292 | `--plugin-dir` adds a plugin skill as `prof:pl-skill`. `skillOverrides` does not remove it, by bare name or by `plugin:skill` name. | verified | `run-probes.sh` P3.7-P3.8 |
-| P3.9 | Claude Code | 2.1.250, signed in (claude.ai, Pro) | Without the `user` source, subscription auth still works. A `--setting-sources project` session reached the model and answered. | verified | `claude-signed-in.sh` P3.2s, P3.4s |
-| P3.0s-P3.8s | Claude Code | 2.1.250, signed in (claude.ai, Pro) | A signed-in session gives the same `init` skill list as the P3.0-P3.8 rows: `--add-dir`, `--setting-sources project`, `skillOverrides` (`off`, `name-only`), `--plugin-dir`, and no override for plugin skills. Each check also requires a model answer. | verified | `claude-signed-in.sh` |
+| P3.9 | Claude Code | 2.1.250, signed in | A session with `--setting-sources project` returned a successful answer (exit 0, `subtype: success`, `is_error: false`, a non-empty answer). | verified | `claude-signed-in.sh` P3.2s, P3.4s |
+| P3.0s-P3.5s, P3.7s-P3.8s | Claude Code | 2.1.250, signed in | These checks repeat P3.0-P3.5, P3.7 and P3.8 in a signed-in session. Each check found the same fixture skill names in the `init` list. Each check also required a successful answer. P3.6 was not repeated. | verified | `claude-signed-in.sh` |
 | P3.10 | Claude Code | 2.1.323 docs, as issue #83 reports them | `CLAUDE.md` from `--add-dir` needs `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. `claudeMdExcludes` takes globs of `CLAUDE.md` paths. Bundled skills are the skills that `disableBundledSkills` removes. | documented | none |
 | P3.11 | Claude Code | 2.1.323 docs, as issue #83 reports them | `--bare` removes subscription OAuth, so it is not usable for `ctx`. | documented | none |
 | P4.1-P4.3 | Copilot CLI + `ctx.sh` | 1.0.111, 1.0.88; develop `2645f99` | Real `ctx.sh` in Mode C (`ephemeral-clean`): `ctx alpha`, `ctx beta`, `ctx alpha`. Each activation gives a new home in the temp directory. The home has no `settings.json`, and the ancestor skill is visible (n=2). The PoC then writes an ignore list for the ancestor root (n=2 to n=1). Only the profile skill stays. | verified | `run-probes.sh` P4.1-P4.3 |
@@ -104,9 +104,9 @@ Limits of the evidence:
 
 - The P4 ignore-list write is a manual PoC step. `ctx.sh` does not do it today.
 - The P3.0-P3.8 rows cover the `init` list of a session that is not signed in.
-  The P3.0s-P3.8s rows repeat them signed in, on one host, one client version
-  (2.1.250) and one Pro account. They show that the session authenticates and
-  answers. They do not test a skill invocation.
+  The signed-in rows repeat eight of them on one host, one client version
+  (2.1.250) and one account. They compare only the fixture skill names, not the
+  full skill list. They do not test a skill invocation.
 - The fixture counts cover only the fixture. They do not give a full
   inventory of an arbitrary host.
 
@@ -211,22 +211,26 @@ Limits and follow-up work (not in this issue):
 - For Claude Code, `--setting-sources project`, `--add-dir` and
   `skillOverrides` change the `init` skill list as P3.1 to P3.4 show.
   Ancestor `.claude/skills` still load under `project`, and `skillOverrides`
-  does not cover plugin skills. The auth claim (P3.9) is verified on 2.1.250
-  (see "Signed-in run"). The #22 contract still governs Claude support in `ctx`.
+  does not cover plugin skills. The signed-in run verifies the auth claim
+  (P3.9) on 2.1.250 (see "Signed-in run"). The #22 contract still governs Claude support in `ctx`.
 
 ## Signed-in run
 
-Host: AIBOX (CT109), user `agent`, Claude Code 2.1.250, `claude auth status`
-reports `loggedIn: true` and `authMethod: claude.ai`.
+The run used a dedicated sandbox account with its own Claude login and Claude
+Code 2.1.250. Before and after the checks, `claude auth status` reported
+`loggedIn: true`, `authMethod: claude.ai` and `subscriptionType: pro`.
 
 ```sh
 CLAUDE_SIGNED_IN_PROBE=1 experiments/native-isolation/claude-signed-in.sh
 ```
 
-Result: 8 `PASS` lines, `RESULT: PASS`, exit 0. After the run,
-`~/.claude/skills` was absent, as before the run, and the login was unchanged.
+Result: 8 `PASS` lines, `RESULT: PASS`, exit 0. The script printed that
+`~/.claude/skills` did not exist before the run. A check after the run found it
+absent. The auth status after the checks was equal to the status before them.
 Without `CLAUDE_SIGNED_IN_PROBE=1`, the script prints `BLOCKED` and exits 2.
-Issue #83 holds the raw output.
+An offline self-check used a fake client. Each check failed for an error
+result, an empty answer, no answer field, and a non-zero exit. The self-check also showed that a dangling `g-global` symlink stops the
+script with exit 2. The PR holds the raw output.
 
 ## Review
 
