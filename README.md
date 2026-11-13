@@ -370,9 +370,9 @@ disabling the inherited skill in context `alpha` kept `alpha`'s own selected
 skill enabled but disabled the inherited skill in `beta` and, after `ctx
 clear`, outside `ctx` entirely. Second, the CLI's supported skill-name disable
 command offers no negative *skill-root* filter, and `COPILOT_SKILLS_DIRS`,
-where supported, is additive rather than an exclusion mechanism. (Copilot CLI
-1.0.88 and 1.0.111 have a separate skill-root filter, `ignoredSkillsLocations`;
-see the update at the end of this section.)
+where supported, is additive rather than an exclusion mechanism. Copilot CLI
+1.0.88 and 1.0.111 have a separate skill-root filter, `ignoredSkillsLocations`.
+See the update at the end of this section.
 
 How `copilot skill disable` affects outside-`ctx` behavior differs by mode, but
 `ctx` provides no built-in or durable per-context exclusion workflow in any of
@@ -628,10 +628,10 @@ feature does not fix them:
 - Concurrent contexts are last-reconciliation-wins.
 - There is no built-in or durable per-context skill exclusion in any mode;
   `copilot skill disable` is shared across every Mode A context via the single
-  `settings.json` symlink. Copilot CLI's negative skill-root filter
-  (`ignoredSkillsLocations`) is read only from `$COPILOT_HOME/settings.json`,
-  so in Mode A it would land in the shared file; `ctx` does not use it in any
-  mode yet (see [Skill discovery](#skill-discovery)).
+  `settings.json` symlink. Copilot CLI reads its negative skill-root filter
+  (`ignoredSkillsLocations`) only from `$COPILOT_HOME/settings.json`. In Mode A
+  that file is the shared one. `ctx` does not use the filter in any mode yet
+  (see [Skill discovery](#skill-discovery)).
 - **Local TOCTOU gap:** Mode A path checks, including rechecks before creating
   the synthetic home and before `ctx clear --all` recursively deletes it, are
   preflight validation only—not race protection. A different local user who
