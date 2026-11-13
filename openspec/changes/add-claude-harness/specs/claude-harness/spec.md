@@ -4,7 +4,14 @@
 
 ### Requirement: harness directive
 
-The system SHALL accept a reserved `.ctx` directive `harness:<value>`. The key SHALL be matched case-insensitively, and whitespace around the key and the value SHALL be trimmed. The value SHALL be exactly `claude` or `copilot`. A file without the directive SHALL select `copilot`, and `harness:copilot` SHALL behave exactly like a file without the directive. The system SHALL reject the whole file before any state change in each of these cases: the value is empty or unknown; the file has more than one `harness:` line in any key case; `harness:claude` appears with a `home:` line; the file has `harness:` and no profile entry. Manual activation (`ctx <profile>...`) SHALL NOT select Claude.
+The system SHALL accept a reserved `.ctx` directive `harness:<value>`. The key SHALL be matched case-insensitively, and whitespace around the key and the value SHALL be trimmed. The value SHALL be exactly `claude` or `copilot`. A file without the directive SHALL select `copilot`, and `harness:copilot` SHALL behave exactly like a file without the directive. The system SHALL reject the whole file before any state change in each of these cases:
+
+- The value is empty or unknown.
+- The file has more than one `harness:` line in any key case.
+- `harness:claude` appears with a `home:` line.
+- The file has `harness:` and no profile entry.
+
+Manual activation (`ctx <profile>...`) SHALL NOT select Claude.
 
 #### Scenario: Missing directive keeps Copilot
 
@@ -47,7 +54,13 @@ Each successful Claude activation SHALL create a new unique private snapshot dir
 - `.claude/skills/<name>/`: a copy of each `<profile>/.agents/skills/<name>/` directory that contains a regular `SKILL.md`, with all supporting files.
 - `ctx-settings.json`: exactly `{"autoMemoryEnabled": false}` and a newline.
 
-The activation SHALL fail before publication in each of these cases: a symlink, junction or special file in a selected skill; two selected skills whose names differ only in case; more than 2000 files; more than 32 MiB. On such a failure, the system SHALL remove only the snapshot directory that this call created, without following links. The system SHALL NOT copy hooks, settings, MCP servers, agents, commands, plugins, or credentials into the snapshot, and SHALL NOT write to any source profile.
+The activation SHALL fail before publication in each of these cases:
+
+- A symlink, junction or special file is in a selected skill.
+- Two selected skills have names that differ only in case.
+- The snapshot has more than 2000 files or more than 32 MiB.
+
+On such a failure, the system SHALL remove only the snapshot directory that this call created, without following links. The system SHALL NOT copy hooks, settings, MCP servers, agents, commands, plugins, or credentials into the snapshot, and SHALL NOT write to any source profile.
 
 #### Scenario: CLAUDE.md holds the selected bytes in order
 
