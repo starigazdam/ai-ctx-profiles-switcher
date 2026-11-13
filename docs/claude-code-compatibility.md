@@ -87,17 +87,18 @@ The offline PoC in [`experiments/claude-code-compat/README.md`](../experiments/c
 
 ## Skill isolation mechanisms (issue #83, 2026-11-13)
 
-Probed with the real Claude Code 2.1.292, not signed in. The stream-json `init` event lists the skills before the "Not logged in" result, so no model call happens. Commands and results: [`native-skill-isolation-poc.md`](native-skill-isolation-poc.md), script [`experiments/native-isolation/run-probes.sh`](../experiments/native-isolation/run-probes.sh).
+Probed with the real Claude Code 2.1.292, not signed in, with no network (`unshare -rn`). The stream-json `init` event lists the skills, and the result is then "Not logged in". Thus no model call happens. The results cover only the `init` list of a session that is not signed in. A signed-in session can differ. Commands and results: [`native-skill-isolation-poc.md`](native-skill-isolation-poc.md), script [`experiments/native-isolation/run-probes.sh`](../experiments/native-isolation/run-probes.sh).
 
 | Mechanism | Evidence | Result | ctx assessment |
 |---|---|---|---|
 | `--setting-sources project` | verified | Removes `~/.claude/skills`. Keeps ancestor `.claude/skills` and `--add-dir` skills. | Usable to drop user skills. Not a full filter, because ancestor roots stay. Auth with the `user` source dropped is not verified (no signed-in session). |
 | `--add-dir <dir>` | verified | Loads `<dir>/.claude/skills`. | Usable to attach a profile with no projection. `CLAUDE.md` from that directory needs `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` (documented only). |
-| `skillOverrides` | verified | `off` hides a skill, also with `--setting-sources project`. `name-only` keeps the name in the list. Plugin skills are not affected. | Usable per session through `--settings` JSON. No user settings file changes. |
-| `disableBundledSkills` | verified | Removes the bundled skills (35 to 21 in the run). | Optional. |
+| `skillOverrides` | verified | `off` removes a skill from the list, also with `--setting-sources project`. With `name-only`, the skill stays in the list. Plugin skills are not affected. | Usable per session through `--settings` JSON. No user settings file changes. |
+| `disableBundledSkills` | verified | The total drops (35 to 21 on this host). The fixture skills stay. | Optional. |
 | `--plugin-dir <dir>` | verified | Adds the plugin skills as `<plugin>:<skill>`. | Possible profile shape. Its skills cannot be hidden with `skillOverrides`. |
 | `claudeMdExcludes` | documented | Globs of `CLAUDE.md` paths to skip. | Not tested. |
-| `--bare`, `--safe-mode` | documented | `--bare` removes subscription OAuth. | Rejected for `ctx`. |
+| `--bare` | documented | Removes subscription OAuth. | Rejected for `ctx`. |
+| `--safe-mode` | not checked | No claim. | Not assessed. |
 
 This section adds evidence only. It does not lift the gate of #22.
 
