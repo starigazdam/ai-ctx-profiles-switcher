@@ -4567,7 +4567,7 @@ exit __LEXIT__
             & chmod +x (Join-Path $Dir 'claude') 2>$null
 
             $cmdHelp = if ($NoSettings) { 'echo --add-dir&' } else { 'echo --add-dir& echo --settings&' }
-            $cmdVersion = if ($HangVersion) { 'timeout /t 300 /nobreak >nul& exit /b 0' } elseif ($VersionFails) { 'echo __VERSION__& exit /b 3' } else { 'echo __VERSION__& exit /b 0' }
+            $cmdVersion = if ($HangVersion) { 'powershell -NoProfile -Command "$PID | Set-Content -Path $env:CTX_CLAUDE_CHILD_PID; Start-Sleep -Seconds 300" & exit /b 0' } elseif ($VersionFails) { 'echo __VERSION__& exit /b 3' } else { 'echo __VERSION__& exit /b 0' }
             $cmd = @'
 @echo off
 if "%~1"=="--version" (__CMDVERSION__)
@@ -4663,7 +4663,10 @@ exit /b 1
             foreach ($item in $items) {
                 $kind = if (Test-CtxClaudeLinkish -Item $item) { 'l' } elseif ($item.PSIsContainer) { 'd' } else { 'f' }
                 $len = if ($item.PSIsContainer) { 0 } else { $item.Length }
-                $lines += "$kind $len $($item.LastWriteTimeUtc.Ticks) $($item.FullName)"
+                # Round 3 (F2): metadata alone misses a same-length rewrite that
+                # restores the timestamp, so regular files carry a content hash.
+                $hash = if ($kind -ceq 'f') { (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } else { '' }
+                $lines += "$kind $len $hash $($item.LastWriteTimeUtc.Ticks) $($item.FullName)"
             }
             return (($lines | Sort-Object) -join "`n")
         }
@@ -5104,6 +5107,17 @@ exit /b 1
         It 'Issue22: a hanging client probe is bounded by the probe deadline' {
             # D7: each probe has a hard ten-second limit, so a client that never
             # answers cannot block ctx.
+            # Round 3 (F1): start from a live activation, so the failed probe
+            # must keep that record and snapshot unchanged.
+            $null = New-CtxTestCanonicalProfile -Name 'base' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# base`n"))
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $baseProj = New-CtxClaudeProject -Name 'claude-hang-base' -Lines @('harness:claude', 'base:@profile')
+            Set-Location $baseProj
+            $null = Invoke-CtxCaptured { ctx load (Join-Path $baseProj '.ctx') }
+            $Script:CtxClaudeActive | Should -BeTrue
+            $snapBefore = $Script:CtxClaudeSnapshot
+            $stateBefore = Get-CtxClaudeState -Path $snapBefore
             $null = New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n"))
             New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin') -HangVersion
             Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
@@ -5126,18 +5140,25 @@ exit /b 1
             $bound = if ($IsWindows -or $env:OS -ceq 'Windows_NT') { 20 } else { 15 }
             ($elapsed -lt $bound) | Should -BeTrue
             @(Get-CtxClaudeSnapshotDirs) | Should -Be $before
-            if (-not ($IsWindows -or $env:OS -ceq 'Windows_NT')) {
-                # The probe process itself must not survive the deadline.
-                (Test-Path -LiteralPath $pidFile) | Should -BeTrue
-                $probePid = [int]([System.IO.File]::ReadAllText($pidFile))
-                $gone = $false
-                for ($i = 0; $i -lt 15; $i++) {
+            $Script:CtxClaudeActive | Should -BeTrue
+            $Script:CtxClaudeSnapshot | Should -Be $snapBefore
+            $env:AI_CTX_PROFILES | Should -Be 'base'
+            (Get-CtxClaudeState -Path $snapBefore) | Should -Be $stateBefore
+            # The probe process itself must not survive the deadline, on every
+            # platform (round 3, F4).
+            (Test-Path -LiteralPath $pidFile) | Should -BeTrue
+            $probePid = [int](([System.IO.File]::ReadAllText($pidFile)).Trim())
+            $gone = $false
+            for ($i = 0; $i -lt 15; $i++) {
+                if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+                    if (-not (Get-Process -Id $probePid -ErrorAction SilentlyContinue)) { $gone = $true; break }
+                } else {
                     & kill -0 $probePid 2>$null
                     if ($LASTEXITCODE -ne 0) { $gone = $true; break }
-                    Start-Sleep -Milliseconds 200
                 }
-                $gone | Should -BeTrue
+                Start-Sleep -Milliseconds 200
             }
+            $gone | Should -BeTrue
         }
         It 'Issue22: a reset failure prints reset-failed, removes the snapshot and publishes no record' {
             $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
@@ -5647,6 +5668,62 @@ exit /b 1
             Assert-NoCtxEngineCall
         }
 
+        It 'Issue22: a dangling skill root link fails the activation with skill-link' {
+            # Round 3 (F6): the link test comes before the container test, so a
+            # dangling link is rejected instead of read as an absent root.
+            if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+                Set-ItResult -Skipped -Because 'POSIX symlink fixture'
+                return
+            }
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'lint'
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $root = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review/.agents/skills'
+            Remove-Item -LiteralPath $root -Recurse -Force
+            & ln -s (Join-Path $Script:TestTmp 'missing-skills-tree') $root
+            $proj = New-CtxClaudeProject -Name 'claude-dangling-root' -Lines @('harness:claude', 'review:@profile')
+            $before = @(Get-CtxClaudeSnapshotDirs)
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: error: harness claude: skill-link '
+            @(Get-CtxClaudeSnapshotDirs) | Should -Be $before
+            $Script:CtxClaudeActive | Should -BeFalse
+        }
+
+        It 'Issue22: ctx check reports a dangling source root link as stale' {
+            # Round 3 (F6): the check side marks a linked root, even a dangling
+            # one, so it cannot pass as an absent selection.
+            if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+                Set-ItResult -Skipped -Because 'POSIX symlink fixture'
+                return
+            }
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'lint'
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $proj = New-CtxClaudeProject -Name 'claude-checkdangling' -Lines @('harness:claude', 'review:@profile')
+            Set-Location $proj
+            $null = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+            $root = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review/.agents/skills'
+            $moved = Join-Path $Script:TestTmp 'dangling-skills-real'
+            Move-Item -LiteralPath $root -Destination $moved
+            & ln -s (Join-Path $Script:TestTmp 'missing-skills-tree') $root
+            $engine = $env:CTX_ENGINE_DLL
+            New-CtxEngineSentinel -Dir (Join-Path $Script:TestTmp 'sentinel-bin')
+            try {
+                $Script:CtxCheckResult = $null
+                $out = Invoke-CtxCaptured { $Script:CtxCheckResult = ctx check }
+            } finally {
+                $env:CTX_ENGINE_DLL = $engine
+            }
+
+            $Script:CtxCheckResult | Should -BeFalse
+            $out | Should -Match ('CHECK FAIL harness:claude stale ' + [regex]::Escape($root))
+            Assert-NoCtxEngineCall
+        }
+
         It 'Issue22: ctx check reports an unreadable snapshot subtree as stale, never a pass' {
             # Round 2 (F4): a subtree that cannot be read must not vanish from
             # the inventory and leave the comparison passing.
@@ -5696,10 +5773,19 @@ exit /b 1
                 Set-ItResult -Skipped -Because 'root reads every path'
                 return
             }
-            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
-            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'lint'
+            # Round 3 (F1): start from a live activation, so a failure that
+            # clears the previous record or snapshot cannot pass.
+            $null = New-CtxTestCanonicalProfile -Name 'base' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# base`n"))
             New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
             Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $baseProj = New-CtxClaudeProject -Name 'claude-unreadable-base' -Lines @('harness:claude', 'base:@profile')
+            Set-Location $baseProj
+            $null = Invoke-CtxCaptured { ctx load (Join-Path $baseProj '.ctx') }
+            $Script:CtxClaudeActive | Should -BeTrue
+            $snapBefore = $Script:CtxClaudeSnapshot
+            $stateBefore = Get-CtxClaudeState -Path $snapBefore
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'lint'
             $proj = New-CtxClaudeProject -Name 'claude-unreadable-root' -Lines @('harness:claude', 'review:@profile')
             $root = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review/.agents/skills'
             $before = @(Get-CtxClaudeSnapshotDirs)
@@ -5712,7 +5798,10 @@ exit /b 1
 
             $out | Should -Match 'ctx: error: harness claude: snapshot-failed '
             @(Get-CtxClaudeSnapshotDirs) | Should -Be $before
-            $Script:CtxClaudeActive | Should -BeFalse
+            $Script:CtxClaudeActive | Should -BeTrue
+            $Script:CtxClaudeSnapshot | Should -Be $snapBefore
+            $env:AI_CTX_PROFILES | Should -Be 'base'
+            (Get-CtxClaudeState -Path $snapBefore) | Should -Be $stateBefore
         }
 
         It 'Issue22: ctx check reports a changed ctx-settings.json as stale harness:claude' {

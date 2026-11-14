@@ -1986,13 +1986,22 @@ _ctx_claude_run() {
     # after the process is reaped, and the terminated status is non-zero, which
     # the caller reports as client-failed / client-unsupported.
     local limit="$1"; shift
-    local out_file pid waited=0 rc grouped=0
+    local out_file pid waited=0 rc grouped=0 group_kind=none
     out_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || return 1
     if command -v setsid >/dev/null 2>&1; then
+        group_kind=setsid
+    elif command -v perl >/dev/null 2>&1; then
+        # macOS has no setsid; perl ships with it and starts the same group.
+        group_kind=perl
+    fi
+    if [ "$group_kind" = setsid ]; then
         grouped=1
         setsid "$@" >"$out_file" 2>&1 &
+    elif [ "$group_kind" = perl ]; then
+        grouped=1
+        perl -e 'setpgrp(0,0); exec @ARGV or exit 127;' -- "$@" >"$out_file" 2>&1 &
     else
-        # No setsid: only the direct child can be stopped. The private file
+        # No group tool: only the direct child can be stopped. The private file
         # still bounds collection, so the caller never blocks past the deadline.
         "$@" >"$out_file" 2>&1 &
     fi
@@ -2020,6 +2029,12 @@ _ctx_claude_run() {
     done
     wait "$pid"
     rc=$?
+    if [ "$grouped" -eq 1 ]; then
+        # The client answered, but a wrapper may have left a descendant behind.
+        # The probe is finished, so the whole group goes now (round 3, F1).
+        kill -TERM -- "-$pid" 2>/dev/null
+        kill -KILL -- "-$pid" 2>/dev/null
+    fi
     cat -- "$out_file" 2>/dev/null
     rm -f -- "$out_file"
     return "$rc"
@@ -2148,13 +2163,14 @@ _ctx_claude_collect_skills() {
             return 1
         fi
         [ -d "$root" ] || continue
-        # A traversal that cannot read the whole directory is a failure, not an
-        # empty selection (round 2, D4).
-        if ! find "$root" -mindepth 1 -maxdepth 1 -print0 >/dev/null 2>&1; then
-            _ctx_claude_error "snapshot-failed $root"
-            return 1
-        fi
+        # The listing that is consumed carries its own status record, so a
+        # partial selection never looks like a complete one (round 2, D4 and
+        # round 3, F4).
+        local list_st=1
         while IFS= read -r -d '' entry; do
+            case "$entry" in
+                $'~\t'*) list_st="${entry#*$'\t'}"; continue ;;
+            esac
             [ -n "$entry" ] || continue
             if [ -L "$entry" ]; then
                 _ctx_claude_error "skill-link $entry"
@@ -2176,7 +2192,12 @@ _ctx_claude_collect_skills() {
                 _ctx_claude_error "snapshot-failed $entry"
                 return 1
             fi
-            bad="$(find "$entry" ! -type f ! -type d -print 2>/dev/null | head -n 1)"
+            bad="$(find "$entry" ! -type f ! -type d -print 2>/dev/null)"
+            if [ "$?" -ne 0 ]; then
+                _ctx_claude_error "snapshot-failed $entry"
+                return 1
+            fi
+            bad="$(printf '%s\n' "$bad" | head -n 1)"
             if [ -n "$bad" ]; then
                 _ctx_claude_error "skill-link $bad"
                 return 1
@@ -2184,7 +2205,11 @@ _ctx_claude_collect_skills() {
             _ctx_claude_pending_skill_names+=("$entry_name")
             _ctx_claude_pending_skill_labels+=("$name")
             _ctx_claude_pending_skill_sources+=("$entry")
-        done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
+        done < <({ find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted; printf '~\t%s\0' "${PIPESTATUS[0]}"; })
+        if [ "$list_st" -ne 0 ]; then
+            _ctx_claude_error "snapshot-failed $root"
+            return 1
+        fi
     done
     return 0
 }
@@ -2194,21 +2219,16 @@ _ctx_claude_check_limits() {
     # the measured count. The traversal is NUL-delimited, so a file name that
     # contains a newline still counts as one file and its real size, and a size
     # that cannot be read fails closed instead of counting as zero.
-    local snap="$1" files=0 bytes=0 size f
+    local snap="$1" files=0 bytes=0 size f st=1
     # A traversal that cannot read every entry fails the snapshot: a partial
-    # count must never pass a limit (round 2, D4).
-    if ! find "$snap" -type f -print0 >/dev/null 2>&1; then
-        _ctx_claude_error "snapshot-failed $snap"
-        return 1
-    fi
+    # count must never pass a limit (round 2, D4). The status of the traversal
+    # that is actually consumed is carried in a final `~` record, so an early
+    # successful probe cannot hide a later failure (round 3, F4).
     while IFS= read -r -d '' f; do
+        case "$f" in
+            $'~\t'*) st="${f#*$'\t'}"; continue ;;
+        esac
         files=$((files + 1))
-    done < <(find "$snap" -type f -print0 2>/dev/null)
-    if [ "$files" -gt 2000 ]; then
-        _ctx_claude_error "limit-files $files"
-        return 1
-    fi
-    while IFS= read -r -d '' f; do
         size="$(wc -c < "$f" 2>/dev/null)" || size=""
         size="${size//[[:space:]]/}"
         case "$size" in
@@ -2218,7 +2238,15 @@ _ctx_claude_check_limits() {
                 ;;
         esac
         bytes=$((bytes + size))
-    done < <(find "$snap" -type f -print0 2>/dev/null)
+    done < <(find "$snap" -type f -print0 2>/dev/null; printf '~\t%s\0' "$?")
+    if [ "$st" -ne 0 ]; then
+        _ctx_claude_error "snapshot-failed $snap"
+        return 1
+    fi
+    if [ "$files" -gt 2000 ]; then
+        _ctx_claude_error "limit-files $files"
+        return 1
+    fi
     if [ "$bytes" -gt 33554432 ]; then
         _ctx_claude_error "limit-bytes $bytes"
         return 1
@@ -2473,7 +2501,15 @@ _ctx_claude_tree_diff() {
     # difference and never a pass (D4). A link or special entry on either side
     # is a difference and is never followed. Read-only: no temporary file.
     (
-        local src="$1" dst="$2" a b type rel
+        local src="$1" dst="$2" a b type rel root
+        # Validate both root entries first: find does not descend a symlinked
+        # root, so two linked roots would read as two empty trees (round 3, F2).
+        for root in "$src" "$dst"; do
+            if [ -L "$root" ] || [ ! -d "$root" ]; then
+                printf '%s\n' "$root"
+                exit 1
+            fi
+        done
         exec 8< <(_ctx_claude_tree_entries "$src") 9< <(_ctx_claude_tree_entries "$dst")
         # Exact inventory first: record by record, in byte order.
         while IFS= read -r -d '' a <&8; do
@@ -2488,10 +2524,21 @@ _ctx_claude_tree_diff() {
                 exit 1
             fi
             type="${a%%$'\t'*}"
-            if [ "$type" = '~' ] && [ "${a#*$'\t'}" != 0 ]; then
-                printf '%s\n' "$dst"
-                exit 1
-            fi
+            case "$type" in
+                d|f) : ;;
+                '~')
+                    if [ "${a#*$'\t'}" != 0 ]; then
+                        printf '%s\n' "$dst"
+                        exit 1
+                    fi
+                    ;;
+                *)
+                    # A matching link or special entry is still a difference:
+                    # the snapshot must hold real files only (round 3, F3).
+                    printf '%s\n' "$dst"
+                    exit 1
+                    ;;
+            esac
         done
         if IFS= read -r -d '' b <&9; then
             _ctx_claude_tree_report "$dst" "$b"
@@ -2503,6 +2550,14 @@ _ctx_claude_tree_diff() {
         while IFS= read -r -d '' a <&8; do
             type="${a%%$'\t'*}"
             rel="${a#*$'\t'}"
+            if [ "$type" = '~' ]; then
+                # This second traversal is the one that is consumed, so its own
+                # status decides: a subtree that became unreadable after the
+                # first pass must not drop files from the byte comparison
+                # (round 3, F4).
+                [ "$rel" = 0 ] || { printf '%s\n' "$dst"; exit 1; }
+                continue
+            fi
             [ "$type" = 'f' ] || continue
             if ! cmp -s -- "$src/$rel" "$dst/$rel"; then
                 printf '%s\n' "$dst/$rel"

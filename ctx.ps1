@@ -2679,12 +2679,14 @@ function Get-CtxClaudeSkills {
     for ($i = 0; $i -lt $Parsed.Dirs.Count; $i++) {
         $label = $Parsed.Names[$i]
         $root = Join-Path $Parsed.Dirs[$i] '.agents/skills'
-        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        # The link test comes first: a dangling link, or a link to a file, is
+        # not an absent skill root (round 3, F6).
         $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
-        if (-not $rootItem -or (Test-CtxClaudeLinkish -Item $rootItem)) {
+        if ($rootItem -and (Test-CtxClaudeLinkish -Item $rootItem)) {
             Write-CtxClaudeError "skill-link $root"
             return $false
         }
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
         try {
             $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | Sort-Object Name)
         } catch {
@@ -2899,14 +2901,14 @@ function Get-CtxClaudeExpectedSkills {
     $list = @()
     for ($i = 0; $i -lt $Parsed.Dirs.Count; $i++) {
         $root = Join-Path $Parsed.Dirs[$i] '.agents/skills'
-        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
         $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
-        if (-not $rootItem -or (Test-CtxClaudeLinkish -Item $rootItem)) {
-            # A linked or unreadable root cannot be traversed as evidence, so it
-            # becomes a '!' marker and the check fails closed (D2, D4).
+        if ($rootItem -and (Test-CtxClaudeLinkish -Item $rootItem)) {
+            # A linked root cannot be traversed as evidence, so it becomes a
+            # '!' marker and the check fails closed (D2, F6).
             $list += [PSCustomObject]@{ Name = '!'; Source = $root }
             continue
         }
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
         try {
             $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | Sort-Object Name)
         } catch {
@@ -2991,11 +2993,13 @@ function Get-CtxClaudeTreeDiff {
         if ($dstEntries[$rel] -cne $type) { return $target }
         if ($type -ceq 'file') {
             try {
-                $a = (Get-FileHash -LiteralPath (Join-Path $Source $rel) -Algorithm SHA256).Hash
-                $b = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+                $a = (Get-FileHash -LiteralPath (Join-Path $Source $rel) -Algorithm SHA256 -ErrorAction Stop).Hash
+                $b = (Get-FileHash -LiteralPath $target -Algorithm SHA256 -ErrorAction Stop).Hash
             } catch {
                 return $target
             }
+            # Two failed reads must not compare equal (round 3, F5).
+            if (-not $a -or -not $b) { return $target }
             if ($a -cne $b) { return $target }
         } elseif ($type -cne 'dir') {
             # A link or special entry: never followed, always a difference.

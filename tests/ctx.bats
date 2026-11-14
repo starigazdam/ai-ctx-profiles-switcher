@@ -4713,6 +4713,18 @@ _claude_load() {
 }
 
 @test "Claude22: a hanging client probe is bounded when timeout is absent" {
+    # Round 3 (D5): the case starts from a live activation, so the failed
+    # activation must keep that record and snapshot unchanged.
+    _make_canonical_profile base $'# base\n'
+    _claude_client
+    _claude_snapshot_root
+    local baseproj snap_before before_record before_snaps
+    baseproj="$(_claude_project claude-hang-base $'harness:claude\nbase:@profile\n')"
+    _claude_load "$baseproj/.ctx"
+    [ "$status" -eq 0 ]
+    snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
+    before_snaps="$(_claude_snapshots)"
     _make_canonical_profile arch $'# arch\n'
     # A client that never answers --version, on a PATH without `timeout` or
     # `setsid`, so the fallback deadline is the only limit (D7: ten seconds per
@@ -4722,7 +4734,10 @@ _claude_load() {
     mkdir -p "$TEST_TMP/hang-bin" "$TEST_TMP/no-timeout-bin"
     cat > "$TEST_TMP/hang-bin/claude" <<'EOF'
 #!/usr/bin/env bash
-if [ "$1" = "--version" ]; then exec sleep 300; fi
+if [ "$1" = "--version" ]; then
+    printf '%s' "$$" > "${CTX_PROBE_CHILD_PID:-/dev/null}"
+    exec sleep 300
+fi
 printf 'Usage: claude\n  --add-dir <dirs>\n  --settings <file>\n'
 EOF
     chmod +x "$TEST_TMP/hang-bin/claude"
@@ -4736,8 +4751,8 @@ EOF
     # would prove the fallback with a tool it is supposed to lack.
     [ ! -e "$TEST_TMP/no-timeout-bin/timeout" ]
     [ ! -e "$TEST_TMP/no-timeout-bin/setsid" ]
-    _claude_snapshot_root
-    local saved_path="$PATH" start elapsed proj
+    local saved_path="$PATH" start elapsed proj alive pid i
+    export CTX_PROBE_CHILD_PID="$TEST_TMP/hang.pid"
     export PATH="$TEST_TMP/no-timeout-bin"
     proj="$(_claude_project claude-hang $'harness:claude\narch:@profile\n')"
 
@@ -4746,13 +4761,86 @@ EOF
     elapsed=$((SECONDS - start))
     PATH="$saved_path"
     export PATH
+    unset CTX_PROBE_CHILD_PID
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"ctx: error: harness claude: client-failed"* ]]
     # Ten-second limit, plus a five-second allowance for scheduling and the
     # one-second poll interval: a 300-second hang may not pass this bound.
     [ "$elapsed" -lt 15 ]
-    [ -z "$(_claude_snapshots)" ]
+    [ "$(_claude_snapshots)" = "$before_snaps" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
+    [ "$_ctx_claude_snapshot" = "$snap_before" ]
+    # The probe process itself must not survive the deadline, on the fallback
+    # path without any group tool (round 3, F4).
+    [ -s "$TEST_TMP/hang.pid" ]
+    pid="$(cat "$TEST_TMP/hang.pid")"
+    alive=1
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || { alive=0; break; }
+        sleep 0.2
+    done
+    [ "$alive" -eq 0 ]
+}
+
+@test "Claude22: a wrapper that exits before its descendant cannot leave it behind" {
+    # Round 3 (F1): the deadline loop can end because the wrapper exited
+    # successfully. The descendant it started must still be stopped, because
+    # the probe owns the whole group.
+    _make_canonical_profile arch $'# arch\n'
+    command -v setsid >/dev/null 2>&1 || skip "no setsid on this host"
+    _claude_snapshot_root
+    mkdir -p "$TEST_TMP/early-bin"
+    cat > "$TEST_TMP/early-bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+    sleep 300 &
+    printf '%s' "$!" > "${CTX_PROBE_CHILD_PID:-/dev/null}"
+    printf '2.1.292 (Claude Code)\n'
+    exit 0
+fi
+printf 'Usage: claude\n  --add-dir <dirs>\n  --settings <file>\n'
+EOF
+    chmod +x "$TEST_TMP/early-bin/claude"
+    local saved_path="$PATH" proj pid alive i
+    export CTX_PROBE_CHILD_PID="$TEST_TMP/early.pid"
+    export PATH="$TEST_TMP/early-bin:$PATH"
+    proj="$(_claude_project claude-early $'harness:claude\narch:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+    PATH="$saved_path"
+    export PATH
+    unset CTX_PROBE_CHILD_PID
+
+    [ "$status" -eq 0 ]
+    [ -n "$_ctx_claude_snapshot" ]
+    [ -s "$TEST_TMP/early.pid" ]
+    pid="$(cat "$TEST_TMP/early.pid")"
+    alive=1
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || { alive=0; break; }
+        sleep 0.2
+    done
+    [ "$alive" -eq 0 ]
+}
+
+@test "Claude22: the tree comparator rejects linked roots and matching links" {
+    # Round 3 (F2, F3): the comparator itself must fail on a linked root and on
+    # a link that appears on both sides, not only on a size or type change.
+    local src="$TEST_TMP/cmp-src" dst="$TEST_TMP/cmp-dst"
+    mkdir -p "$src/ref" "$dst/ref"
+    printf 'a\n' > "$src/ref/f"
+    printf 'a\n' > "$dst/ref/f"
+    _ctx_claude_tree_diff "$src" "$dst" >/dev/null
+    ln -s "f" "$src/ref/l"
+    ln -s "f" "$dst/ref/l"
+    ! _ctx_claude_tree_diff "$src" "$dst" >/dev/null
+    rm -f "$src/ref/l" "$dst/ref/l"
+    mv "$src" "$TEST_TMP/cmp-src-real"
+    mv "$dst" "$TEST_TMP/cmp-dst-real"
+    ln -s "$TEST_TMP/cmp-src-real" "$src"
+    ln -s "$TEST_TMP/cmp-dst-real" "$dst"
+    ! _ctx_claude_tree_diff "$src" "$dst" >/dev/null
 }
 
 @test "Claude22: a wrapper that leaves an inheriting descendant cannot hold the probe past the deadline" {
@@ -5032,7 +5120,9 @@ _claude_state() {
         return 0
     fi
     if [ -L "$root" ] || [ ! -d "$root" ]; then
-        printf 'f %s %s\n' "$(_claude_stat_stamp "$root")" "$root"
+        # A file root is hashed too: metadata alone misses a same-length
+        # rewrite that restores the timestamp (round 3, F3).
+        printf 'f %s %s %s\n' "$(_claude_stat_stamp "$root")" "$(_claude_sha256_file "$root")" "$root"
         return 0
     fi
     find "$root" -print0 2>/dev/null | while IFS= read -r -d '' p; do
@@ -5445,10 +5535,20 @@ _claude_no_engine_calls() {
 
 @test "Claude22: an unreadable skill root fails the activation with snapshot-failed" {
     # Round 2 (D4): an unreadable enumeration is not an empty skill selection.
-    _make_canonical_profile review $'# review\n'
-    _make_canonical_skill review lint
+    # Round 3 (F1): the case starts from a live activation, so a failure that
+    # clears the previous record or snapshot cannot pass.
+    _make_canonical_profile base $'# base\n'
     _claude_client
     _claude_snapshot_root
+    local baseproj snap_before before_record before_snaps
+    baseproj="$(_claude_project claude-unreadable-base $'harness:claude\nbase:@profile\n')"
+    _claude_load "$baseproj/.ctx"
+    [ "$status" -eq 0 ]
+    snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
+    before_snaps="$(_claude_snapshots)"
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
     local proj root
     proj="$(_claude_project claude-unreadable-root $'harness:claude\nreview:@profile\n')"
     root="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills"
@@ -5459,7 +5559,10 @@ _claude_no_engine_calls() {
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"ctx: error: harness claude: snapshot-failed"* ]]
-    [ -z "$(_claude_snapshots)" ]
+    [ "$(_claude_snapshots)" = "$before_snaps" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
+    [ "$_ctx_claude_snapshot" = "$snap_before" ]
+    [ "$AI_CTX_PROFILES" = base ]
 }
 
 @test "Claude22: the snapshot limit check fails closed on an unreadable subtree" {
