@@ -274,6 +274,13 @@ _ctx_current() {
     # hard failure. The recorded mode is passed only when the session-local
     # activation record still matches; the mode is never inferred from
     # AI_CTX_PROFILES_COPILOT_MODE.
+    if [ "$_ctx_claude_active" -eq 1 ]; then
+        # Design D5/D4: the Claude record is shell state, so `current` reports
+        # it in the shell and never calls the engine.
+        printf 'ctx: harness claude (Claude Code %s)\n' "$_ctx_claude_version"
+        printf 'ctx: snapshot %s\n' "$_ctx_claude_snapshot"
+        return 0
+    fi
     if [ -z "${CTX_ENGINE_DLL:-}" ] || [ ! -f "$CTX_ENGINE_DLL" ]; then
         printf 'ctx: error: .NET 10 engine DLL not found: %s\n' "${CTX_ENGINE_DLL:-<unset>}" >&2
         return 1
@@ -351,6 +358,18 @@ _ctx_clear() {
     # place for next time.
     local prev_context="${AI_CTX_PROFILES:-}"
     local cleanup_status=0
+    # A Claude record is shell state with no Copilot activation behind it, so
+    # clear handles it here and never calls the engine (design D5). The
+    # published snapshot is kept and reported (D8); no Copilot variable is
+    # touched beyond what a prior ctx activation set.
+    local claude_snapshot=""
+    local claude_clear=0
+    if [ "$_ctx_claude_active" -eq 1 ]; then
+        claude_clear=1
+        claude_snapshot="$_ctx_claude_snapshot"
+        _ctx_reset_claude_record
+        unset AI_CTX_PROFILES
+    fi
     # Use the recorded mode of the matching activation, NOT the live selector
     # (which may be stale). With no matching record, home ownership is
     # unknown: ctx must never guess a mode from the selector or from the home
@@ -372,8 +391,9 @@ _ctx_clear() {
     # The non---all environment mutations and warning decisions are delegated
     # to the .NET engine via the line protocol. The engine applies the same
     # allowlisted unset operations atomically; on engine failure nothing is
-    # mutated (fail closed) and clear returns non-zero.
-    if ! _ctx_clear_apply_engine "$clear_mode"; then
+    # mutated (fail closed) and clear returns non-zero. A Claude record owns no
+    # Copilot state, so that clear never calls the engine (design D5).
+    if [ "$claude_clear" -eq 0 ] && ! _ctx_clear_apply_engine "$clear_mode"; then
         return 1
     fi
     # No matching activation record: report a present COPILOT_HOME as unknown
@@ -485,6 +505,9 @@ _ctx_clear() {
     export CTX_AUTO_LOAD_DIR=""
     _ctx_auto_load_dir=""
     _ctx_auto_load_home_override=""
+    if [ "$claude_clear" -eq 1 ] && [ -n "$claude_snapshot" ]; then
+        _ctx_report_retained_claude_snapshot "$claude_snapshot"
+    fi
     printf 'AI context cleared.\n'
     return "$cleanup_status"
 }
@@ -758,6 +781,8 @@ _ctx_unset_owned_skills_dirs() {
 _ctx_set_active_record() {
     # $1: the mode that actually activated. Must be called only after the
     # activation succeeded and the environment is fully set up.
+    # A Copilot activation after a Claude one removes the Claude record (D5).
+    _ctx_reset_claude_record
     _ctx_active_mode="$1"
     _ctx_active_context="${AI_CTX_PROFILES:-}"
     _ctx_active_custom_dirs="${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}"
@@ -783,6 +808,7 @@ _ctx_set_active_record() {
 }
 
 _ctx_reset_active_record() {
+    _ctx_reset_claude_record
     _ctx_active_mode=""
     _ctx_active_context=""
     _ctx_active_custom_dirs=""
@@ -793,6 +819,12 @@ _ctx_reset_active_record() {
 _ctx_report_retained_ephemeral_home() {
     # $1: the retained ephemeral home path (never deleted by ctx).
     printf 'ctx: retained ephemeral COPILOT_HOME (not deleted): %s — may contain Copilot auth/session/cache data; moving any needed data out is the user\x27s or workflow\x27s responsibility; it consumes disk until the directory is manually removed\n' "$1"
+}
+
+_ctx_report_retained_claude_snapshot() {
+    # $1: the retained Claude snapshot path. ctx never deletes a published
+    # snapshot (design D8): a running Claude session can still use it.
+    printf 'ctx: retained claude snapshot (not deleted): %s — a running Claude session can still use it; it consumes disk until you remove the directory\n' "$1"
 }
 
 _ctx_ctx_file_has_noautoload() {
@@ -1693,6 +1725,7 @@ _ctx_parse_ctx_file() {
     # are exposed in _ctx_parsed_* globals only after complete validation.
     local ctx_file="$1" dir_of_file line name entry_path resolved_path canonical_path profile_path label_lc
     local ai_context="" first_name="" home_override="" noautoload=0
+    local harness="copilot" harness_seen=0
     local -a dirs=() names=() pairs=()
     local -A seen_labels=() seen_targets=()
     _ctx_external_profiles_root >/dev/null || return 1
@@ -1710,8 +1743,26 @@ _ctx_parse_ctx_file() {
         name="${line%%:*}"; entry_path="${line#*:}"
         name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
         entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"; entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
-        if [ -z "$name" ] || [ -z "$entry_path" ]; then printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2; return 1; fi
+        if [ -z "$name" ] || { [ -z "$entry_path" ] && [ "$(_ctx_lowercase "$name")" != harness ]; }; then printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2; return 1; fi
         label_lc="$(_ctx_lowercase "$name")"
+        if [ "$label_lc" = harness ]; then
+            # Reserved directive (issue #22, design D1), never an ordinary
+            # entry: an old file with an entry labelled `harness` lands here
+            # and is rejected as harness-value. Whitespace is trimmed above and
+            # the value is case-sensitive (claude/copilot only).
+            if [ "$harness_seen" -eq 1 ]; then
+                printf 'ctx: error: invalid .ctx file %s: harness-duplicate\n' "$ctx_file" >&2
+                return 1
+            fi
+            harness_seen=1
+            case "$entry_path" in
+                claude|copilot) harness="$entry_path" ;;
+                *)
+                    printf 'ctx: error: invalid .ctx file %s: harness-value %s\n' "$ctx_file" "$entry_path" >&2
+                    return 1 ;;
+            esac
+            continue
+        fi
         if [ "$label_lc" != home ]; then
             if [ -n "${seen_labels[$label_lc]+set}" ]; then printf 'ctx: error: duplicate .ctx entry label "%s"; first declared as "%s"\n' "$name" "${seen_labels[$label_lc]}" >&2; return 1; fi
             seen_labels[$label_lc]="$name"
@@ -1741,8 +1792,19 @@ _ctx_parse_ctx_file() {
         seen_targets[$canonical_path]="$name"; names+=("$name"); dirs+=("$resolved_path"); pairs+=("$name" "$resolved_path")
         [ -z "$ai_context" ] && { ai_context="$name"; first_name="$name"; } || ai_context="$ai_context+$name"
     done < "$ctx_file"
+    if [ "$harness_seen" -eq 1 ] && [ -n "$home_override" ] && [ "$harness" = claude ]; then
+        # `home:` is Copilot-only (design D1): a Claude activation never reads
+        # or creates a Copilot home, so the combination is rejected here.
+        printf 'ctx: error: invalid .ctx file %s: harness-home\n' "$ctx_file" >&2
+        return 1
+    fi
+    if [ "$harness_seen" -eq 1 ] && [ "${#names[@]}" -eq 0 ]; then
+        printf 'ctx: error: invalid .ctx file %s: harness-no-entry\n' "$ctx_file" >&2
+        return 1
+    fi
     if [ "${#names[@]}" -eq 0 ]; then printf 'ctx: error: .ctx file is empty or invalid: %s\n' "$ctx_file" >&2; return 1; fi
     _ctx_parsed_dir="$dir_of_file"; _ctx_parsed_context="$ai_context"; _ctx_parsed_first_name="$first_name"; _ctx_parsed_home="$home_override"; _ctx_parsed_noautoload="$noautoload"
+    _ctx_parsed_harness="$harness"
     _ctx_parsed_names=("${names[@]}"); _ctx_parsed_dirs=("${dirs[@]}"); _ctx_parsed_pairs=("${pairs[@]}")
 }
 
@@ -1754,6 +1816,13 @@ _ctx_load_ctx_file() {
     # at all, before or after this change.
     local ctx_file="$1" skip_workspace="${2:-}" dirs_csv shared_csv mode skills_dirs_csv
     _ctx_parse_ctx_file "$ctx_file" || return 1
+    if [ "$_ctx_parsed_harness" = claude ]; then
+        # Design D4: the Claude path runs before any Copilot-mode handling and
+        # never reads the Copilot mode selector. `harness:copilot` (the default)
+        # keeps the unchanged Copilot path below.
+        _ctx_claude_activate "$ctx_file"
+        return $?
+    fi
     mode="$(_ctx_validate_copilot_mode)" || return 1
     if [ -n "$_ctx_parsed_home" ] && [ "$mode" != "synthetic-home" ]; then
         printf 'ctx: error: "home:" directive is only valid in synthetic-home mode (active mode: %s); allowed values: synthetic-home, global-user, ephemeral-clean\n' "$mode" >&2
@@ -1849,6 +1918,822 @@ _ctx_load_ctx_file() {
     if [ "$_ctx_parsed_context" = "$_ctx_parsed_first_name" ]; then shared_csv=""; else shared_csv="${_ctx_parsed_context#*+}"; shared_csv="${shared_csv//+/, }"; fi
     _ctx_print_status "$_ctx_parsed_first_name" "$shared_csv"
 }
+
+# --- Issue #22: Claude harness -------------------------------------------
+# Selected by `harness:claude` in a .ctx file (design D1). A Claude activation
+# never creates, reads or changes Copilot state, except the D4 step-4 reset,
+# which reuses the `ctx clear` routine unchanged. The record lives in the shell
+# session only; `AI_CTX_PROFILES` is exported for prompts but is not the source
+# of truth (design D4).
+_ctx_claude_active=0
+_ctx_claude_ctx_file=""
+_ctx_claude_ctx_sha=""
+_ctx_claude_labels=()
+_ctx_claude_dirs=()
+_ctx_claude_snapshot=""
+_ctx_claude_version=""
+_ctx_claude_skill_names=()
+_ctx_claude_skill_labels=()
+_ctx_claude_skill_sources=()
+# The snapshot this call created, before it is published as the record. Kept
+# apart from the record so a failure in step 4 can still remove it.
+_ctx_claude_new_snapshot=""
+# Values for the activation in progress. Step 4 resets the record through the
+# same routine as `ctx clear` (D4), so the version and the skill list must stay
+# here until step 5 publishes them; a record field is never written before
+# that point, and a failed reload cannot overwrite a published record.
+_ctx_claude_pending_version=""
+_ctx_claude_pending_skill_names=()
+_ctx_claude_pending_skill_labels=()
+_ctx_claude_pending_skill_sources=()
+
+_ctx_reset_claude_pending() {
+    _ctx_claude_pending_version=""
+    _ctx_claude_pending_skill_names=()
+    _ctx_claude_pending_skill_labels=()
+    _ctx_claude_pending_skill_sources=()
+}
+
+_ctx_reset_claude_record() {
+    # Session-local record only: a published snapshot is never deleted (D8).
+    # Never touches the pending values: step 4 calls this routine while its own
+    # activation is still in progress.
+    _ctx_claude_active=0
+    _ctx_claude_ctx_file=""
+    _ctx_claude_ctx_sha=""
+    _ctx_claude_labels=()
+    _ctx_claude_dirs=()
+    _ctx_claude_snapshot=""
+    _ctx_claude_version=""
+    _ctx_claude_skill_names=()
+    _ctx_claude_skill_labels=()
+    _ctx_claude_skill_sources=()
+}
+
+_ctx_claude_error() {
+    # $1: a D6 reason token, with its detail where the reason takes one.
+    printf 'ctx: error: harness claude: %s\n' "$1" >&2
+}
+
+_ctx_claude_run() {
+    # $1: seconds limit; remaining args: the client invocation. Only --version
+    # and --help are ever passed, so no session and no model call happen (D7).
+    # A supervisor reports its own PID, which is the session and group id when
+    # a group tool is used, and writes the client status after the client ends.
+    # The caller waits on the supervisor, so a launcher that forks cannot hide
+    # the client (round 4, F1). Output goes to a private file, so a descendant
+    # that inherits stdout cannot hold the caller's capture pipe. A watchdog
+    # stops the group at the deadline: TERM, a short wait, then KILL.
+    local limit="$1"; shift
+    local out_file pid_file st_file sup killer egroup rc grouped=0 st
+    out_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || return 1
+    pid_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || {
+        rm -f -- "$out_file"
+        return 1
+    }
+    st_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || {
+        rm -f -- "$out_file" "$pid_file"
+        return 1
+    }
+    if command -v setsid >/dev/null 2>&1 && setsid -w sh -c 'exit 0' >/dev/null 2>&1; then
+        grouped=1
+        setsid -w sh -c 'pf=$1; sf=$2; shift 2
+            printf "%s" "$$" > "$pf"
+            "$@" &
+            c=$!
+            trap "kill -TERM $c 2>/dev/null" TERM
+            wait "$c"
+            st=$?
+            printf "%s" "$st" > "$sf"' sh "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
+    elif command -v perl >/dev/null 2>&1; then
+        # macOS has no usable setsid; perl starts a real group and reaps it.
+        grouped=1
+        perl -e 'my ($pf,$sf)=@ARGV[0,1]; splice(@ARGV,0,2);
+                 my $pid=fork(); exit 127 unless defined $pid;
+                 if ($pid==0) { setpgrp(0,0); open(my $f,">",$pf) or exit 1;
+                                print $f "$$"; close $f; exec @ARGV; exit 127; }
+                 waitpid($pid,0); my $raw=$?; my $sig=$raw & 127;
+                 my $st=$raw>>8; $st=128+$sig if $sig;
+                 open(my $s,">",$sf) or exit 1; print $s $st; close $s; exit $st;' \
+            "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
+    else
+        # No group tool: the supervisor stops its own client on TERM, so the
+        # direct client is still bounded. The private file bounds collection.
+        sh -c 'pf=$1; sf=$2; shift 2
+            printf "%s" "$$" > "$pf"
+            "$@" &
+            c=$!
+            trap "kill -TERM $c 2>/dev/null; sleep 1; kill -KILL $c 2>/dev/null" TERM
+            wait "$c"
+            st=$?
+            printf "%s" "$st" > "$sf"' sh "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
+    fi
+    sup=$!
+    (
+        sleep "$limit"
+        egroup="$(cat "$pid_file" 2>/dev/null)"
+        [ -n "$egroup" ] || exit 0
+        if [ "$grouped" -eq 1 ]; then
+            kill -TERM -- "-$egroup" 2>/dev/null
+            sleep 1
+            kill -KILL -- "-$egroup" 2>/dev/null
+        else
+            kill -TERM "$egroup" 2>/dev/null
+            sleep 1
+            kill -KILL "$egroup" 2>/dev/null
+        fi
+    ) &
+    killer=$!
+    wait "$sup"
+    rc=$?
+    kill "$killer" 2>/dev/null
+    # The client answered, but a wrapper may have left a descendant behind.
+    # The probe is finished, so the group goes now (round 3, F1).
+    if [ "$grouped" -eq 1 ]; then
+        egroup="$(cat "$pid_file" 2>/dev/null)"
+        if [ -n "$egroup" ]; then
+            kill -TERM -- "-$egroup" 2>/dev/null
+            kill -KILL -- "-$egroup" 2>/dev/null
+        fi
+    fi
+    st="$(cat "$st_file" 2>/dev/null)"
+    case "$st" in
+        ''|*[!0-9]*) : ;;
+        *) rc="$st" ;;
+    esac
+    cat -- "$out_file" 2>/dev/null
+    rm -f -- "$out_file" "$pid_file" "$st_file"
+    return "$rc"
+}
+
+_ctx_claude_client_version() {
+    # The bare version token from `claude --version` output, else its first
+    # trimmed line. ctx prints it and never compares it (D7).
+    local raw="$1" token
+    token="$(printf '%s' "$raw" | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)"
+    if [ -z "$token" ]; then
+        token="$(printf '%s' "$raw" | tr -d '\r' | head -n 1)"
+        token="${token#"${token%%[![:space:]]*}"}"; token="${token%"${token##*[![:space:]]}"}"
+    fi
+    printf '%s\n' "$token"
+}
+
+_ctx_sha256_file() {
+    # sha256 of a file's bytes, for the record (D4). Prints nothing when no
+    # hashing tool exists, which makes `ctx check` fail closed rather than
+    # reporting a match it cannot prove.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$1" 2>/dev/null | cut -d' ' -f1
+    else
+        printf ''
+    fi
+}
+
+_ctx_sha256_stream() {
+    # sha256 of stdin, so D10 can compare the expected bytes without writing
+    # a file. Prints nothing when no hashing tool exists (the caller fails
+    # closed).
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | cut -d' ' -f1
+    else
+        printf ''
+    fi
+}
+
+_ctx_claude_check_client() {
+    # Design D7. Sets the pending version only on success; the record keeps the
+    # version of the snapshot it points at until step 5 publishes the new one.
+    # None of these calls starts a session or calls a model.
+    local out rc version
+    if ! command -v claude >/dev/null 2>&1; then
+        _ctx_claude_error client-missing
+        return 1
+    fi
+    out="$(_ctx_claude_run 10 claude --version 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _ctx_claude_error client-failed
+        return 1
+    fi
+    version="$(_ctx_claude_client_version "$out")"
+    out="$(_ctx_claude_run 10 claude --help 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _ctx_claude_error client-unsupported
+        return 1
+    fi
+    case "$out" in *--add-dir*) : ;; *) _ctx_claude_error client-unsupported; return 1 ;; esac
+    case "$out" in *--settings*) : ;; *) _ctx_claude_error client-unsupported; return 1 ;; esac
+    _ctx_claude_pending_version="$version"
+    return 0
+}
+
+_ctx_claude_write_claude_md() {
+    # $1: output file; remaining args: alternating label/path in .ctx order.
+    # Each profile adds its numbered marker line, a newline and its exact
+    # AGENTS.md bytes. Only a leading BOM is dropped, and a newline is added
+    # only when the source does not end with one (D3). @path imports are copied
+    # as they are, never resolved.
+    local out="$1"; shift
+    _ctx_claude_claude_md_stream "$@" > "$out"
+}
+
+_ctx_claude_claude_md_stream() {
+    # Remaining args: alternating label/path in .ctx order. The same byte
+    # emission as _ctx_claude_write_claude_md, to stdout, so `ctx check` can
+    # compare the expected bytes without writing anything (D10, read-only).
+    local order=0 name path src head3 last
+    while [ "$#" -gt 0 ]; do
+        name="$1"; path="$2"; shift 2
+        order=$((order + 1))
+        src="$path/AGENTS.md"
+        [ -f "$src" ] || return 1
+        printf '<!-- ctx profile %s %s -->\n' "$order" "$name" || return 1
+        head3="$(head -c 3 -- "$src" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+        if [ "$head3" = "efbbbf" ]; then
+            tail -c +4 -- "$src" || return 1
+        else
+            cat -- "$src" || return 1
+        fi
+        last="$(tail -c 1 -- "$src" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+        if [ "$last" != "0a" ]; then
+            printf '\n' || return 1
+        fi
+    done
+    return 0
+}
+
+_ctx_claude_collect_skills() {
+    # Design D3 skill selection: each <profile>/.agents/skills/<name>/ with a
+    # regular SKILL.md is selected; a link or special file anywhere in a
+    # selected skill, or two selected names that collide (case-insensitively),
+    # rejects the activation. A skill without a regular SKILL.md is not
+    # selected and is not inspected. Fills the pending skill lists in .ctx
+    # order (names sorted within a profile for a stable listing); the record is
+    # written only at publication (D4).
+    local name path root entry entry_name lower bad
+    local -A seen=()
+    _ctx_claude_pending_skill_names=()
+    _ctx_claude_pending_skill_labels=()
+    _ctx_claude_pending_skill_sources=()
+    while [ "$#" -gt 0 ]; do
+        name="$1"; path="$2"; shift 2
+        root="$path/.agents/skills"
+        # The root itself must be a real directory: a link (or a file) cannot be
+        # traversed as evidence, so it never passes (round 2, D2).
+        [ ! -L "$root" ] || { _ctx_claude_error "skill-link $root"; return 1; }
+        if [ -e "$root" ] && [ ! -d "$root" ]; then
+            _ctx_claude_error "snapshot-failed $root"
+            return 1
+        fi
+        [ -d "$root" ] || continue
+        # The listing that is consumed carries its own status record, so a
+        # partial selection never looks like a complete one (round 2, D4 and
+        # round 3, F4).
+        local list_st=1 sort_st=1
+        while IFS= read -r -d '' entry; do
+            case "$entry" in
+                $'~~\t'*) sort_st="${entry#*$'\t'}"; continue ;;
+                $'~\t'*) list_st="${entry#*$'\t'}"; continue ;;
+            esac
+            [ -n "$entry" ] || continue
+            if [ -L "$entry" ]; then
+                _ctx_claude_error "skill-link $entry"
+                return 1
+            fi
+            [ -d "$entry" ] || continue
+            [ -f "$entry/SKILL.md" ] && [ ! -L "$entry/SKILL.md" ] || continue
+            entry_name="$(basename "$entry")"
+            lower="$(_ctx_skill_canonical_name "$entry_name")" || {
+                _ctx_claude_error "snapshot-failed skill-name $entry_name"
+                return 1
+            }
+            if [ -n "${seen[$lower]+set}" ]; then
+                _ctx_claude_error "skill-collision $entry_name"
+                return 1
+            fi
+            seen[$lower]="$entry_name"
+            if ! find "$entry" -print0 >/dev/null 2>&1; then
+                _ctx_claude_error "snapshot-failed $entry"
+                return 1
+            fi
+            bad="$(find "$entry" ! -type f ! -type d -print 2>/dev/null)"
+            if [ "$?" -ne 0 ]; then
+                _ctx_claude_error "snapshot-failed $entry"
+                return 1
+            fi
+            bad="$(printf '%s\n' "$bad" | head -n 1)"
+            if [ -n "$bad" ]; then
+                _ctx_claude_error "skill-link $bad"
+                return 1
+            fi
+            _ctx_claude_pending_skill_names+=("$entry_name")
+            _ctx_claude_pending_skill_labels+=("$name")
+            _ctx_claude_pending_skill_sources+=("$entry")
+        done < <({ find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted; printf '~\t%s\0' "${PIPESTATUS[0]}"; })
+        if [ "$list_st" -ne 0 ] || [ "$sort_st" -ne 0 ]; then
+            _ctx_claude_error "snapshot-failed $root"
+            return 1
+        fi
+    done
+    return 0
+}
+
+_ctx_claude_check_limits() {
+    # Design D3: at most 2000 files and 32 MiB in one snapshot. The error gives
+    # the measured count. The traversal is NUL-delimited, so a file name that
+    # contains a newline still counts as one file and its real size, and a size
+    # that cannot be read fails closed instead of counting as zero.
+    local snap="$1" files=0 bytes=0 size f st=1
+    # A traversal that cannot read every entry fails the snapshot: a partial
+    # count must never pass a limit (round 2, D4). The status of the traversal
+    # that is actually consumed is carried in a final `~` record, so an early
+    # successful probe cannot hide a later failure (round 3, F4).
+    while IFS= read -r -d '' f; do
+        case "$f" in
+            $'~\t'*) st="${f#*$'\t'}"; continue ;;
+        esac
+        files=$((files + 1))
+        size="$(wc -c < "$f" 2>/dev/null)" || size=""
+        size="${size//[[:space:]]/}"
+        case "$size" in
+            ''|*[!0-9]*)
+                _ctx_claude_error "snapshot-failed size $f"
+                return 1
+                ;;
+        esac
+        bytes=$((bytes + size))
+    done < <(find "$snap" -type f -print0 2>/dev/null; printf '~\t%s\0' "$?")
+    if [ "$st" -ne 0 ]; then
+        _ctx_claude_error "snapshot-failed $snap"
+        return 1
+    fi
+    if [ "$files" -gt 2000 ]; then
+        _ctx_claude_error "limit-files $files"
+        return 1
+    fi
+    if [ "$bytes" -gt 33554432 ]; then
+        _ctx_claude_error "limit-bytes $bytes"
+        return 1
+    fi
+    return 0
+}
+
+_ctx_claude_remove_new_snapshot() {
+    # Removes only the directory this call created, and never follows a link.
+    local snap="$_ctx_claude_new_snapshot"
+    _ctx_claude_new_snapshot=""
+    [ -n "$snap" ] || return 0
+    if [ -L "$snap" ]; then
+        rm -f -- "$snap"
+    elif [ -d "$snap" ]; then
+        rm -rf -- "$snap"
+    fi
+    return 0
+}
+
+_ctx_claude_build_snapshot() {
+    # Design D3. Creates a new unique snapshot from the Mode C primitive and
+    # fills it with CLAUDE.md, .claude/skills/<name>/ and ctx-settings.json.
+    # On any failure the directory this call created is removed again and the
+    # reason is printed.
+    local snap="" i dest
+    _ctx_claude_new_snapshot="$(mktemp -d "${TMPDIR:-/tmp}/ctx-claude.XXXXXXXXXX" 2>/dev/null)" || {
+        _ctx_claude_new_snapshot=""
+        _ctx_claude_error "snapshot-failed mktemp"
+        return 1
+    }
+    snap="$_ctx_claude_new_snapshot"
+    if [ -L "$snap" ] || [ ! -d "$snap" ]; then
+        _ctx_claude_error "snapshot-failed $snap"
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    chmod 0700 "$snap" 2>/dev/null
+    if ! _ctx_claude_write_claude_md "$snap/CLAUDE.md" "${_ctx_parsed_pairs[@]}"; then
+        _ctx_claude_error "snapshot-failed CLAUDE.md"
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    if ! _ctx_claude_collect_skills "${_ctx_parsed_pairs[@]}"; then
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    i=0
+    while [ "$i" -lt "${#_ctx_claude_pending_skill_names[@]}" ]; do
+        dest="$snap/.claude/skills/${_ctx_claude_pending_skill_names[$i]}"
+        if ! mkdir -p "$snap/.claude/skills" \
+           || ! cp -R -- "${_ctx_claude_pending_skill_sources[$i]}/." "$dest"; then
+            _ctx_claude_error "snapshot-failed skill ${_ctx_claude_pending_skill_names[$i]}"
+            _ctx_claude_remove_new_snapshot
+            return 1
+        fi
+        i=$((i + 1))
+    done
+    if ! printf '{"autoMemoryEnabled": false}\n' > "$snap/ctx-settings.json"; then
+        _ctx_claude_error "snapshot-failed ctx-settings.json"
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    if ! _ctx_claude_check_limits "$snap"; then
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    return 0
+}
+
+_ctx_claude_shell_quote() {
+    # Single-quote for bash/zsh, with a ' written as '\'' (design D6).
+    local text="$1" quote="'\\''"
+    printf "'%s'" "${text//\'/$quote}"
+}
+
+_ctx_print_claude_guidance() {
+    # Design D6. The command has no cd and ctx never starts Claude or exports
+    # the variable itself.
+    local snap="$_ctx_claude_snapshot" i=0
+    printf 'ctx: harness claude (Claude Code %s)\n' "$_ctx_claude_version"
+    while [ "$i" -lt "${#_ctx_claude_labels[@]}" ]; do
+        printf 'ctx: selected %s %s %s\n' "$((i + 1))" "${_ctx_claude_labels[$i]}" "${_ctx_claude_dirs[$i]}"
+        i=$((i + 1))
+    done
+    i=0
+    while [ "$i" -lt "${#_ctx_claude_skill_names[@]}" ]; do
+        printf 'ctx: skill %s from %s\n' "${_ctx_claude_skill_names[$i]}" "${_ctx_claude_skill_labels[$i]}"
+        i=$((i + 1))
+    done
+    printf 'ctx: snapshot %s\n' "$snap"
+    printf 'ctx: ambient: Claude also loads user, ancestor, repository, managed and built-in sources. ctx does not filter them.\n'
+    printf 'ctx: ambient: these sources depend on the directory where you start claude.\n'
+    printf 'ctx: effective context: unknown. ctx lists only the selected inputs.\n'
+    printf 'ctx: memory: ctx-settings.json sets autoMemoryEnabled false. This effect is documented, not verified.\n'
+    printf 'ctx: start a NEW Claude session in your work directory (an open session does not change):\n'
+    printf 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir %s --settings %s\n' \
+        "$(_ctx_claude_shell_quote "$snap")" "$(_ctx_claude_shell_quote "$snap/ctx-settings.json")"
+}
+
+_ctx_claude_activate() {
+    # $1: the .ctx path. Step 1 (parse) is done by the shared parser; this runs
+    # the D2 canonical check and then the D4 steps in order: client check,
+    # snapshot, Copilot reset, publication. A failure in steps 1 to 3 leaves the
+    # previous activation and record untouched; a failure in step 4 removes this
+    # call's snapshot and publishes nothing. Every pending value (version, skill
+    # lists) stays out of the record until step 5, because step 4 resets it.
+    local ctx_file="$1" i=0 name path reset_status=0
+    local -a pairs=("${_ctx_parsed_pairs[@]}") labels=() dirs=()
+    _ctx_reset_claude_pending
+    while [ "$i" -lt "${#pairs[@]}" ]; do
+        name="${pairs[$i]}"; path="${pairs[$((i + 1))]}"
+        i=$((i + 2))
+        if ! _ctx_profile_is_canonical "$path"; then
+            _ctx_claude_error "legacy-profile $name"
+            _ctx_reset_claude_pending
+            return 1
+        fi
+        labels+=("$name"); dirs+=("$path")
+    done
+    if ! _ctx_claude_check_client; then
+        _ctx_reset_claude_pending
+        return 1
+    fi
+    if ! _ctx_claude_build_snapshot; then
+        _ctx_reset_claude_pending
+        return 1
+    fi
+    if [ -n "$_ctx_active_mode" ]; then
+        # Step 4 (D4): the unchanged `ctx clear` routine resets an existing
+        # Copilot activation. This is the only step that may touch Copilot
+        # state.
+        _ctx_clear || reset_status=$?
+        if [ "$reset_status" -ne 0 ]; then
+            _ctx_claude_remove_new_snapshot
+            _ctx_reset_claude_pending
+            _ctx_claude_error "reset-failed $reset_status: the previous Copilot activation was partly reset"
+            return 1
+        fi
+    fi
+    # Step 5: publish the session record.
+    _ctx_claude_active=1
+    _ctx_claude_ctx_file="$ctx_file"
+    _ctx_claude_ctx_sha="$(_ctx_sha256_file "$ctx_file")"
+    _ctx_claude_labels=("${labels[@]}")
+    _ctx_claude_dirs=("${dirs[@]}")
+    _ctx_claude_snapshot="$_ctx_claude_new_snapshot"
+    _ctx_claude_new_snapshot=""
+    _ctx_claude_version="$_ctx_claude_pending_version"
+    _ctx_claude_skill_names=("${_ctx_claude_pending_skill_names[@]}")
+    _ctx_claude_skill_labels=("${_ctx_claude_pending_skill_labels[@]}")
+    _ctx_claude_skill_sources=("${_ctx_claude_pending_skill_sources[@]}")
+    _ctx_reset_claude_pending
+    export AI_CTX_PROFILES="$_ctx_parsed_context"
+    _ctx_print_claude_guidance
+    return 0
+}
+
+_ctx_claude_expected_skills() {
+    # Remaining args: alternating label/path as recorded. Prints one
+    # "<name>\t<source>" line per skill the D3 rule would select from the
+    # recorded paths now, without touching the record: `ctx check` recomputes
+    # the expected tree instead of trusting the activation snapshot (D10).
+    # A skill root or skill directory that is a link, not a directory, or not
+    # fully traversable prints "!\t<path>" instead, so the check fails closed
+    # rather than comparing an empty selection (round 2, D2 and D4).
+    local name path root entry
+    while [ "$#" -gt 0 ]; do
+        name="$1"; path="$2"; shift 2
+        root="$path/.agents/skills"
+        if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
+            printf '!\t%s\n' "$root"
+            continue
+        fi
+        [ -d "$root" ] || continue
+        if ! find "$root" -mindepth 1 -maxdepth 1 -print0 >/dev/null 2>&1; then
+            printf '!\t%s\n' "$root"
+            continue
+        fi
+        local sort_st=1 trav_st=1
+        while IFS= read -r -d '' entry; do
+            case "$entry" in
+                $'~~\t'*) sort_st="${entry#*$'\t'}"; continue ;;
+                $'~\t'*) trav_st="${entry#*$'\t'}"; continue ;;
+            esac
+            [ -n "$entry" ] || continue
+            if [ -L "$entry" ]; then
+                printf '!\t%s\n' "$entry"
+                continue
+            fi
+            [ -d "$entry" ] || continue
+            [ -f "$entry/SKILL.md" ] && [ ! -L "$entry/SKILL.md" ] || continue
+            printf '%s\t%s\n' "$(basename "$entry")" "$entry"
+        done < <({ find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted; printf '~\t%s\0' "${PIPESTATUS[0]}"; })
+        if [ "$sort_st" -ne 0 ] || [ "${trav_st:-1}" -ne 0 ]; then
+            printf '!\t%s\n' "$root"
+        fi
+    done
+}
+
+_ctx_claude_nul_sorted() {
+    # Sorts a NUL-delimited stream bytewise and appends its own status record,
+    # so a consumer can see a failed or truncated sort (round 4, F2). `sort -z`
+    # is not on every platform; without it the stream passes through unchanged.
+    local st
+    if printf 'b\0a\0' | LC_ALL=C sort -z >/dev/null 2>&1; then
+        LC_ALL=C sort -z
+        st=$?
+    else
+        cat
+        st=$?
+    fi
+    printf '~~\t%s\0' "$st"
+}
+
+_ctx_claude_tree_entries() {
+    # $1: a directory. Prints one NUL-terminated "<type>\t<relative name>"
+    # record per entry, byte-sorted: d directory, f regular file, l link,
+    # s other special file. Nothing is followed, and a name is used exactly as
+    # stored, so a case-only or newline-bearing difference stays visible.
+    # The last record is "~\t<find status>" (0x7e sorts after every type
+    # letter): a traversal that could not read a subtree therefore never looks
+    # like an empty one, and the comparison fails closed (round 2, D4).
+    local root="$1" rel st
+    {
+        find "$root" -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' rel; do
+            rel="${rel#"$root"/}"
+            if [ -L "$root/$rel" ]; then
+                printf 'l\t%s\0' "$rel"
+            elif [ -d "$root/$rel" ]; then
+                printf 'd\t%s\0' "$rel"
+            elif [ -f "$root/$rel" ]; then
+                printf 'f\t%s\0' "$rel"
+            else
+                printf 's\t%s\0' "$rel"
+            fi
+        done
+        st=${PIPESTATUS[0]}
+        printf '~\t%s\0' "$st"
+    } | _ctx_claude_nul_sorted
+}
+
+_ctx_claude_tree_report() {
+    # $1: the copy root; $2: a "<type>\t<relative name>" record. Prints the
+    # path a difference is reported at. For a source record that is the copy
+    # path, because that is where the snapshot differs; for a traversal-failure
+    # record it is the copy root itself.
+    local root="$1" type="${2%%$'\t'*}" rel="${2#*$'\t'}"
+    if [ "$type" = '~' ]; then
+        printf '%s\n' "$root"
+    else
+        printf '%s\n' "$root/$rel"
+    fi
+}
+
+_ctx_claude_tree_diff() {
+    # $1: source tree, $2: copy. Prints the first differing path in the copy
+    # and returns 1; returns 0 only when the two trees hold the same entries:
+    # the same exact relative names (compared as sorted inventories, so a
+    # case-only difference on a case-insensitive filesystem cannot satisfy both
+    # sides), the same entry types (so an added or removed empty directory, or
+    # a file replaced by a link, is a difference) and byte-identical regular
+    # files (round 2, D3). A traversal that failed on either side is a
+    # difference and never a pass (D4). A link or special entry on either side
+    # is a difference and is never followed. Read-only: no temporary file.
+    (
+        local src="$1" dst="$2" a b type rel root seen_term=0 seen_trav=0
+        # Validate both root entries first: find does not descend a symlinked
+        # root, so two linked roots would read as two empty trees (round 3, F2).
+        for root in "$src" "$dst"; do
+            if [ -L "$root" ] || [ ! -d "$root" ]; then
+                printf '%s\n' "$root"
+                exit 1
+            fi
+        done
+        exec 8< <(_ctx_claude_tree_entries "$src") 9< <(_ctx_claude_tree_entries "$dst")
+        # Exact inventory first: record by record, in byte order.
+        while IFS= read -r -d '' a <&8; do
+            if ! IFS= read -r -d '' b <&9; then
+                _ctx_claude_tree_report "$dst" "$a"
+                exit 1
+            fi
+            if [ "$a" != "$b" ]; then
+                # Report the copy entry: an extra, renamed or retyped entry in
+                # the snapshot is what the user has to look at.
+                _ctx_claude_tree_report "$dst" "$b"
+                exit 1
+            fi
+            type="${a%%$'\t'*}"
+            case "$type" in
+                d|f) : ;;
+                '~')
+                    if [ "${a#*$'\t'}" != 0 ]; then
+                        printf '%s\n' "$dst"
+                        exit 1
+                    fi
+                    seen_trav=1
+                    ;;
+                '~~')
+                    # The terminal record of the sorting stage: a failed or
+                    # truncated sort is a difference, never an empty tree
+                    # (round 4, F2).
+                    if [ "${a#*$'\t'}" != 0 ]; then
+                        printf '%s\n' "$dst"
+                        exit 1
+                    fi
+                    seen_term=1
+                    ;;
+                *)
+                    # A matching link or special entry is still a difference:
+                    # the snapshot must hold real files only (round 3, F3).
+                    printf '%s\n' "$dst"
+                    exit 1
+                    ;;
+            esac
+        done
+        if IFS= read -r -d '' b <&9; then
+            _ctx_claude_tree_report "$dst" "$b"
+            exit 1
+        fi
+        if [ "$seen_term" -eq 0 ] || [ "$seen_trav" -eq 0 ]; then
+            printf '%s\n' "$dst"
+            exit 1
+        fi
+        # The inventories are equal: compare the bytes of every regular file.
+        exec 8<&-
+        seen_term=0
+        seen_trav=0
+        exec 8< <(_ctx_claude_tree_entries "$src")
+        while IFS= read -r -d '' a <&8; do
+            type="${a%%$'\t'*}"
+            rel="${a#*$'\t'}"
+            if [ "$type" = '~' ]; then
+                # This second traversal is the one that is consumed, so its own
+                # status decides: a subtree that became unreadable after the
+                # first pass must not drop files from the byte comparison
+                # (round 3, F4).
+                [ "$rel" = 0 ] || { printf '%s\n' "$dst"; exit 1; }
+                seen_trav=1
+                continue
+            fi
+            if [ "$type" = '~~' ]; then
+                [ "$rel" = 0 ] || { printf '%s\n' "$dst"; exit 1; }
+                seen_term=1
+                continue
+            fi
+            [ "$type" = 'f' ] || continue
+            if ! cmp -s -- "$src/$rel" "$dst/$rel"; then
+                printf '%s\n' "$dst/$rel"
+                exit 1
+            fi
+        done
+        [ "$seen_term" -eq 1 ] && [ "$seen_trav" -eq 1 ] || { printf '%s\n' "$dst"; exit 1; }
+        exit 0
+    )
+}
+
+_ctx_claude_check() {
+    # $1: nearest .ctx path. Design D10, strictly read-only: every comparison
+    # is against the shell record and the snapshot on disk, so no engine call
+    # and no file change happens. The Copilot checks do not apply.
+    local ctx_file="$1" snap="$_ctx_claude_snapshot" failures=0
+    local name src dest expected actual stale entry i=0
+    local -a pairs=() expected_names=()
+    while [ "$i" -lt "${#_ctx_claude_labels[@]}" ]; do
+        pairs+=("${_ctx_claude_labels[$i]}" "${_ctx_claude_dirs[$i]}")
+        i=$((i + 1))
+    done
+
+    if [ -z "$snap" ] || [ -L "$snap" ] || [ ! -d "$snap" ]; then
+        printf 'CHECK FAIL harness:claude missing\n'
+        printf 'ctx check: FAIL (1)\n'
+        return 1
+    fi
+    # The .ctx path and its bytes: a changed selection, label or root shows
+    # here (D10).
+    if [ "$(realpath -m -- "$ctx_file" 2>/dev/null)" != "$(realpath -m -- "$_ctx_claude_ctx_file" 2>/dev/null)" ] \
+       || [ -z "$_ctx_claude_ctx_sha" ] \
+       || [ "$(_ctx_sha256_file "$ctx_file")" != "$_ctx_claude_ctx_sha" ]; then
+        printf 'CHECK FAIL harness:claude stale %s\n' "$ctx_file"
+        failures=$((failures + 1))
+    fi
+    # The recorded sources still produce the snapshot CLAUDE.md bytes.
+    expected="$(_ctx_claude_claude_md_stream "${pairs[@]}" | _ctx_sha256_stream)"
+    actual="$(_ctx_sha256_file "$snap/CLAUDE.md")"
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+        printf 'CHECK FAIL harness:claude stale %s\n' "$snap/CLAUDE.md"
+        failures=$((failures + 1))
+    fi
+    # The copy side must be real directories: a linked skills root, or a linked
+    # skill directory over an identical tree, compares equal while it hides a
+    # different tree, so it is a stale result and never a pass (round 2, D2).
+    local skills_root="$snap/.claude/skills" skills_ok=1
+    if [ -L "$skills_root" ] || { [ -e "$skills_root" ] && [ ! -d "$skills_root" ]; }; then
+        printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
+        failures=$((failures + 1))
+        skills_ok=0
+    fi
+    if [ "$skills_ok" -eq 1 ]; then
+        while IFS=$'\t' read -r name src; do
+            [ -n "$name" ] || continue
+            if [ "$name" = '!' ]; then
+                # The source side cannot be traversed as evidence (D2, D4).
+                printf 'CHECK FAIL harness:claude stale %s\n' "$src"
+                failures=$((failures + 1))
+                continue
+            fi
+            expected_names+=("$name")
+            dest="$skills_root/$name"
+            if [ -L "$dest" ] || [ ! -d "$dest" ]; then
+                printf 'CHECK FAIL harness:claude stale %s\n' "$dest"
+                failures=$((failures + 1))
+            elif ! stale="$(_ctx_claude_tree_diff "$src" "$dest")"; then
+                printf 'CHECK FAIL harness:claude stale %s\n' "$stale"
+                failures=$((failures + 1))
+            fi
+        done < <(_ctx_claude_expected_skills "${pairs[@]}")
+        # A snapshot skill that the recorded sources no longer select is stale.
+        if [ -d "$skills_root" ]; then
+            if ! find "$skills_root" -mindepth 1 -maxdepth 1 -print0 >/dev/null 2>&1; then
+                printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
+                failures=$((failures + 1))
+            else
+                local sort_st=1 trav_st=1
+                while IFS= read -r -d '' entry; do
+                    case "$entry" in
+                        $'~~\t'*) sort_st="${entry#*$'\t'}"; continue ;;
+                        $'~\t'*) trav_st="${entry#*$'\t'}"; continue ;;
+                    esac
+                    [ -n "$entry" ] || continue
+                    if ! _ctx_in_list "$(basename "$entry")" "${expected_names[@]}"; then
+                        printf 'CHECK FAIL harness:claude stale %s\n' "$entry"
+                        failures=$((failures + 1))
+                    fi
+                done < <({ find "$skills_root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted; printf '~\t%s\0' "${PIPESTATUS[0]}"; })
+                if [ "$sort_st" -ne 0 ] || [ "$trav_st" -ne 0 ]; then
+                    printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
+                    failures=$((failures + 1))
+                fi
+            fi
+        fi
+    fi
+    expected="$(printf '{"autoMemoryEnabled": false}\n' | _ctx_sha256_stream)"
+    actual="$(_ctx_sha256_file "$snap/ctx-settings.json")"
+    if [ -z "$actual" ] || [ "$expected" != "$actual" ]; then
+        printf 'CHECK FAIL harness:claude stale ctx-settings.json\n'
+        failures=$((failures + 1))
+    fi
+    if [ "$failures" -ne 0 ]; then
+        # The Copilot checks do not apply while a Claude record is active.
+        printf 'CHECK SKIP\n'
+        printf 'ctx check: FAIL (%s)\n' "$failures"
+        return 1
+    fi
+    printf 'CHECK PASS harness:claude\n'
+    printf 'CHECK SKIP\n'
+    printf 'ctx check: PASS\n'
+    return 0
+}
+
 _ctx_check_skip_links_and_skills() {
     # Modes B/C and unattributable (no-record) state do not own the Mode-A
     # synthetic-home shared-link or skill-symlink trees; those checks report
@@ -2019,12 +2904,31 @@ _ctx_check() {
     local _p_name _p_path _p_order=0
 
     if ! ctx_file="$(_ctx_find_ctx_file)"; then
+        if [ "$_ctx_claude_active" -eq 1 ]; then
+            # A Claude record with no `.ctx` above the working directory is a
+            # removed selection, not "nothing to check": the record still names
+            # the file it was built from (D10).
+            _ctx_claude_check "$_ctx_claude_ctx_file"
+            return $?
+        fi
         printf 'ctx check: no .ctx file found; nothing to check\n'
         return 0
+    fi
+    if [ "$_ctx_claude_active" -eq 1 ]; then
+        # Design D10: with a Claude record the check is shell-only and
+        # read-only; the Copilot checks below do not apply.
+        _ctx_claude_check "$ctx_file"
+        return $?
     fi
     if ! _ctx_parse_ctx_file "$ctx_file"; then
         printf 'CHECK FAIL parser: invalid .ctx file\n'
         return 1
+    fi
+    if [ "$_ctx_parsed_harness" = claude ]; then
+        # A Claude .ctx without a Claude record in this shell has nothing to
+        # compare against: report that instead of Copilot drift.
+        printf 'CHECK UNKNOWN harness:claude: no local activation record\n'
+        return 0
     fi
     dir_of_file="$_ctx_parsed_dir"; expected_context="$_ctx_parsed_context"; home_override="$_ctx_parsed_home"
     names=("${_ctx_parsed_names[@]}"); dirs=("${_ctx_parsed_dirs[@]}")
