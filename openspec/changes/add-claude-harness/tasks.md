@@ -2,7 +2,7 @@
 
 ## 0. Evidence gate (needs a separate run approval)
 
-Done on 2026-11-13: owner go in #22, `RESULT: PASS` on Claude Code 2.1.250. Evidence: `docs/native-skill-isolation-poc.md`, section "Claude harness task 0".
+Done on 2026-11-13: owner approval in #22, `RESULT: PASS` on Claude Code 2.1.250. Evidence: `docs/native-skill-isolation-poc.md`, section "Claude harness task 0".
 
 - [x] 0.0 Write the probe like `experiments/native-isolation/claude-signed-in.sh`. It is opt-in and runs as a sandbox account. Exit codes: 0 for PASS, 1 for FAIL, 2 for BLOCKED. Each client call has a 60-second limit. Cleanup deletes only owned paths. Run an offline self-check with a fake client first.
 - [x] 0.1 On one named client version, signed in: build a fabricated snapshot by hand (D3). Start `claude -p` with `--add-dir <snapshot>`, `--settings <snapshot>/ctx-settings.json` and `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. The stream-json `init` event must list the snapshot skills.

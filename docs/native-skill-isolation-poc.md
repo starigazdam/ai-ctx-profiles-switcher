@@ -236,7 +236,7 @@ script with exit 2. The PR holds the raw output.
 
 Task 0 of the OpenSpec change `add-claude-harness` tests the native recipe of
 that contract. The owner accepted task 0 in place of #22 packet A Steps 2a and
-2b, and gave the run a go on 2026-11-13.
+2b, and approved the run on 2026-11-13.
 
 ```sh
 CLAUDE_SIGNED_IN_PROBE=1 experiments/native-isolation/claude-harness-task0.sh
@@ -255,7 +255,7 @@ starts with `MARK_`. Each client call has a fixed 60-second limit.
 | T0.2 | Claude Code | 2.1.250, signed in | With `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, the answer contains the marker from the snapshot `CLAUDE.md`. In the comparison run without the variable, the answer did not contain it. | verified | `claude-harness-task0.sh` 0.2, 0.2n |
 | T0.3 | Claude Code | 2.1.250, signed in | `--settings <file>` gives exit 0 and a successful answer. A missing settings file gives exit 1, no result event and the error `Settings file not found: <path>`. Thus the client opens the path. | verified | `claude-harness-task0.sh` 0.3, 0.3n |
 | T0.3m | Claude Code | vendor docs ([memory](https://code.claude.com/docs/en/memory), cited in #22) | `autoMemoryEnabled: false` disables auto-memory. The run does not show that the client reads the key or that no memory write occurs. | documented | none |
-| T0.4 | Claude Code | 2.1.250, signed in | No task-B skill name and no task-B marker appear anywhere in the stdout or stderr of the three task-A runs. Task B has a sibling canonical profile and an earlier snapshot in the same temp directory. | verified | `claude-harness-task0.sh` 0.4 |
+| T0.4 | Claude Code | 2.1.250, signed in | No task-B skill name and no task-B marker appear in the raw stdout and stderr, or in any decoded JSON event, of the three task-A runs. Task B has a sibling canonical profile and an earlier snapshot in the same temp directory. | verified | `claude-harness-task0.sh` 0.4 |
 
 Result: 5 `PASS` lines, `RESULT: PASS`, exit 0. No temp directory stayed after
 the run, and `~/.claude/skills` did not exist. The run used a dedicated sandbox
@@ -264,7 +264,7 @@ account with its own Claude login.
 An offline self-check used a fake client:
 
 - A leaked task-B skill gives `BLOCKED other-task` and exit 2 after the first
-  call. The script makes no further call and tells the operator to ask the
+  model call. This also holds for a JSON-escaped name (`b\u002dsnap`). The script makes no further call and tells the operator to ask the
   owner.
 - A missing marker, an error result or an ignored settings file gives `FAIL`
   and exit 1.

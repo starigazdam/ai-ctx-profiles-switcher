@@ -13,13 +13,15 @@
 #
 # Cases (tasks 0.1 to 0.4):
 #   0.1 the init event lists a-snap
-#   0.2 the answer contains marker A (with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1);
-#       0.2n records the same run without the variable (no pass/fail)
+#   0.2 answer contains marker A (with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1);
+#       0.2n repeats the call without the variable. Marker presence is recorded
+#       only; the comparison call must succeed.
 #   0.3 --settings <file> gives exit 0 and a successful result; 0.3n a missing
 #       settings file gives a non-zero exit, no result event, and the client
 #       error "Settings file not found: <path>" on stderr
-#   0.4 no b-snap, no b-prof, no marker B and no marker P anywhere in the
-#       stdout or stderr of a task-A run. A leak stops the script at once.
+#   0.4 no b-snap, no b-prof, no marker B and no marker P in the raw stdout and
+#       stderr, or in any decoded JSON event, of a task-A run. A leak stops the
+#       script at once.
 #
 # Each client call has a fixed 60-second limit.
 # Exit 0 = PASS; 1 = FAIL; 2 = BLOCKED (refused, setup failed, or other-task leak).
@@ -79,15 +81,20 @@ err = open(errpath, encoding="utf-8", errors="replace").read()
 # 0.4: scan every byte of stdout and stderr, not only the last events.
 leak = int(any(c in raw or c in err for c in ("b-snap", "b-prof", mb, mp)))
 init = res = None
+decoded = []
 for line in open(path, encoding="utf-8", errors="replace"):
     try:
         d = json.loads(line)
     except ValueError:
         continue
+    # Decoded text catches canaries hidden by JSON escapes such as \u002d.
+    decoded.append(json.dumps(d, ensure_ascii=False))
     if d.get("type") == "system" and d.get("subtype") == "init":
         init = d
     if d.get("type") == "result":
         res = d
+canaries = ("b-snap", "b-prof", mb, mp)
+leak = int(leak or any(c in t for c in canaries for t in decoded))
 sk = (init or {}).get("skills", [])
 canary = sorted(s for s in sk if s in ("a-snap", "b-snap", "b-prof"))
 ans = res.get("result") if isinstance(res, dict) and isinstance(res.get("result"), str) else ""
