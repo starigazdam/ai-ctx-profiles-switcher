@@ -758,6 +758,8 @@ _ctx_unset_owned_skills_dirs() {
 _ctx_set_active_record() {
     # $1: the mode that actually activated. Must be called only after the
     # activation succeeded and the environment is fully set up.
+    # A Copilot activation after a Claude one removes the Claude record (D5).
+    _ctx_reset_claude_record
     _ctx_active_mode="$1"
     _ctx_active_context="${AI_CTX_PROFILES:-}"
     _ctx_active_custom_dirs="${COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-}"
@@ -783,6 +785,7 @@ _ctx_set_active_record() {
 }
 
 _ctx_reset_active_record() {
+    _ctx_reset_claude_record
     _ctx_active_mode=""
     _ctx_active_context=""
     _ctx_active_custom_dirs=""
@@ -1693,6 +1696,7 @@ _ctx_parse_ctx_file() {
     # are exposed in _ctx_parsed_* globals only after complete validation.
     local ctx_file="$1" dir_of_file line name entry_path resolved_path canonical_path profile_path label_lc
     local ai_context="" first_name="" home_override="" noautoload=0
+    local harness="copilot" harness_seen=0
     local -a dirs=() names=() pairs=()
     local -A seen_labels=() seen_targets=()
     _ctx_external_profiles_root >/dev/null || return 1
@@ -1710,8 +1714,26 @@ _ctx_parse_ctx_file() {
         name="${line%%:*}"; entry_path="${line#*:}"
         name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
         entry_path="${entry_path#"${entry_path%%[![:space:]]*}"}"; entry_path="${entry_path%"${entry_path##*[![:space:]]}"}"
-        if [ -z "$name" ] || [ -z "$entry_path" ]; then printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2; return 1; fi
+        if [ -z "$name" ] || { [ -z "$entry_path" ] && [ "$(_ctx_lowercase "$name")" != harness ]; }; then printf 'ctx: error: invalid .ctx line in %s (expected <name>:<path>): %s\n' "$ctx_file" "$line" >&2; return 1; fi
         label_lc="$(_ctx_lowercase "$name")"
+        if [ "$label_lc" = harness ]; then
+            # Reserved directive (issue #22, design D1), never an ordinary
+            # entry: an old file with an entry labelled `harness` lands here
+            # and is rejected as harness-value. Whitespace is trimmed above and
+            # the value is case-sensitive (claude/copilot only).
+            if [ "$harness_seen" -eq 1 ]; then
+                printf 'ctx: error: invalid .ctx file %s: harness-duplicate\n' "$ctx_file" >&2
+                return 1
+            fi
+            harness_seen=1
+            case "$entry_path" in
+                claude|copilot) harness="$entry_path" ;;
+                *)
+                    printf 'ctx: error: invalid .ctx file %s: harness-value %s\n' "$ctx_file" "$entry_path" >&2
+                    return 1 ;;
+            esac
+            continue
+        fi
         if [ "$label_lc" != home ]; then
             if [ -n "${seen_labels[$label_lc]+set}" ]; then printf 'ctx: error: duplicate .ctx entry label "%s"; first declared as "%s"\n' "$name" "${seen_labels[$label_lc]}" >&2; return 1; fi
             seen_labels[$label_lc]="$name"
@@ -1741,8 +1763,19 @@ _ctx_parse_ctx_file() {
         seen_targets[$canonical_path]="$name"; names+=("$name"); dirs+=("$resolved_path"); pairs+=("$name" "$resolved_path")
         [ -z "$ai_context" ] && { ai_context="$name"; first_name="$name"; } || ai_context="$ai_context+$name"
     done < "$ctx_file"
+    if [ "$harness_seen" -eq 1 ] && [ -n "$home_override" ] && [ "$harness" = claude ]; then
+        # `home:` is Copilot-only (design D1): a Claude activation never reads
+        # or creates a Copilot home, so the combination is rejected here.
+        printf 'ctx: error: invalid .ctx file %s: harness-home\n' "$ctx_file" >&2
+        return 1
+    fi
+    if [ "$harness_seen" -eq 1 ] && [ "${#names[@]}" -eq 0 ]; then
+        printf 'ctx: error: invalid .ctx file %s: harness-no-entry\n' "$ctx_file" >&2
+        return 1
+    fi
     if [ "${#names[@]}" -eq 0 ]; then printf 'ctx: error: .ctx file is empty or invalid: %s\n' "$ctx_file" >&2; return 1; fi
     _ctx_parsed_dir="$dir_of_file"; _ctx_parsed_context="$ai_context"; _ctx_parsed_first_name="$first_name"; _ctx_parsed_home="$home_override"; _ctx_parsed_noautoload="$noautoload"
+    _ctx_parsed_harness="$harness"
     _ctx_parsed_names=("${names[@]}"); _ctx_parsed_dirs=("${dirs[@]}"); _ctx_parsed_pairs=("${pairs[@]}")
 }
 
@@ -1754,6 +1787,13 @@ _ctx_load_ctx_file() {
     # at all, before or after this change.
     local ctx_file="$1" skip_workspace="${2:-}" dirs_csv shared_csv mode skills_dirs_csv
     _ctx_parse_ctx_file "$ctx_file" || return 1
+    if [ "$_ctx_parsed_harness" = claude ]; then
+        # Design D4: the Claude path runs before any Copilot-mode handling and
+        # never reads the Copilot mode selector. `harness:copilot` (the default)
+        # keeps the unchanged Copilot path below.
+        _ctx_claude_activate "$ctx_file"
+        return $?
+    fi
     mode="$(_ctx_validate_copilot_mode)" || return 1
     if [ -n "$_ctx_parsed_home" ] && [ "$mode" != "synthetic-home" ]; then
         printf 'ctx: error: "home:" directive is only valid in synthetic-home mode (active mode: %s); allowed values: synthetic-home, global-user, ephemeral-clean\n' "$mode" >&2
@@ -1849,6 +1889,342 @@ _ctx_load_ctx_file() {
     if [ "$_ctx_parsed_context" = "$_ctx_parsed_first_name" ]; then shared_csv=""; else shared_csv="${_ctx_parsed_context#*+}"; shared_csv="${shared_csv//+/, }"; fi
     _ctx_print_status "$_ctx_parsed_first_name" "$shared_csv"
 }
+
+# --- Issue #22: Claude harness -------------------------------------------
+# Selected by `harness:claude` in a .ctx file (design D1). A Claude activation
+# never creates, reads or changes Copilot state, except the D4 step-4 reset,
+# which reuses the `ctx clear` routine unchanged. The record lives in the shell
+# session only; `AI_CTX_PROFILES` is exported for prompts but is not the source
+# of truth (design D4).
+_ctx_claude_active=0
+_ctx_claude_ctx_file=""
+_ctx_claude_ctx_sha=""
+_ctx_claude_labels=()
+_ctx_claude_dirs=()
+_ctx_claude_snapshot=""
+_ctx_claude_version=""
+_ctx_claude_skill_names=()
+_ctx_claude_skill_labels=()
+_ctx_claude_skill_sources=()
+# The snapshot this call created, before it is published as the record. Kept
+# apart from the record so a failure in step 4 can still remove it.
+_ctx_claude_new_snapshot=""
+
+_ctx_reset_claude_record() {
+    # Session-local record only: a published snapshot is never deleted (D8).
+    _ctx_claude_active=0
+    _ctx_claude_ctx_file=""
+    _ctx_claude_ctx_sha=""
+    _ctx_claude_labels=()
+    _ctx_claude_dirs=()
+    _ctx_claude_snapshot=""
+    _ctx_claude_version=""
+    _ctx_claude_skill_names=()
+    _ctx_claude_skill_labels=()
+    _ctx_claude_skill_sources=()
+}
+
+_ctx_claude_error() {
+    # $1: a D6 reason token, with its detail where the reason takes one.
+    printf 'ctx: error: harness claude: %s\n' "$1" >&2
+}
+
+_ctx_claude_run() {
+    # $1: seconds limit; remaining args: the client invocation. Only --version
+    # and --help are ever passed, so no session and no model call happen (D7).
+    local limit="$1"; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$limit" "$@"
+    else
+        "$@"
+    fi
+}
+
+_ctx_claude_client_version() {
+    # The bare version token from `claude --version` output, else its first
+    # trimmed line. ctx prints it and never compares it (D7).
+    local raw="$1" token
+    token="$(printf '%s' "$raw" | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)"
+    if [ -z "$token" ]; then
+        token="$(printf '%s' "$raw" | tr -d '\r' | head -n 1)"
+        token="${token#"${token%%[![:space:]]*}"}"; token="${token%"${token##*[![:space:]]}"}"
+    fi
+    printf '%s\n' "$token"
+}
+
+_ctx_sha256_file() {
+    # sha256 of a file's bytes, for the record (D4). Prints nothing when no
+    # hashing tool exists, which makes `ctx check` fail closed rather than
+    # reporting a match it cannot prove.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$1" 2>/dev/null | cut -d' ' -f1
+    else
+        printf ''
+    fi
+}
+
+_ctx_claude_check_client() {
+    # Design D7. Sets _ctx_claude_version only on success. None of these calls
+    # starts a session or calls a model.
+    local out rc version
+    if ! command -v claude >/dev/null 2>&1; then
+        _ctx_claude_error client-missing
+        return 1
+    fi
+    out="$(_ctx_claude_run 10 claude --version 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _ctx_claude_error client-failed
+        return 1
+    fi
+    version="$(_ctx_claude_client_version "$out")"
+    out="$(_ctx_claude_run 10 claude --help 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        _ctx_claude_error client-unsupported
+        return 1
+    fi
+    case "$out" in *--add-dir*) : ;; *) _ctx_claude_error client-unsupported; return 1 ;; esac
+    case "$out" in *--settings*) : ;; *) _ctx_claude_error client-unsupported; return 1 ;; esac
+    _ctx_claude_version="$version"
+    return 0
+}
+
+_ctx_claude_write_claude_md() {
+    # $1: output file; remaining args: alternating label/path in .ctx order.
+    # Each profile adds its numbered marker line, a newline and its exact
+    # AGENTS.md bytes. Only a leading BOM is dropped, and a newline is added
+    # only when the source does not end with one (D3). @path imports are copied
+    # as they are, never resolved.
+    local out="$1"; shift
+    local order=0 name path src head3 last
+    : > "$out" || return 1
+    while [ "$#" -gt 0 ]; do
+        name="$1"; path="$2"; shift 2
+        order=$((order + 1))
+        src="$path/AGENTS.md"
+        [ -f "$src" ] || return 1
+        printf '<!-- ctx profile %s %s -->\n' "$order" "$name" >> "$out" || return 1
+        head3="$(head -c 3 -- "$src" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+        if [ "$head3" = "efbbbf" ]; then
+            tail -c +4 -- "$src" >> "$out" || return 1
+        else
+            cat -- "$src" >> "$out" || return 1
+        fi
+        last="$(tail -c 1 -- "$src" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+        if [ "$last" != "0a" ]; then
+            printf '\n' >> "$out" || return 1
+        fi
+    done
+    return 0
+}
+
+_ctx_claude_collect_skills() {
+    # Design D3 skill selection: each <profile>/.agents/skills/<name>/ with a
+    # regular SKILL.md is selected; a link or special file anywhere in a
+    # selected skill, or two selected names that collide (case-insensitively),
+    # rejects the activation. A skill without a regular SKILL.md is not
+    # selected and is not inspected. Fills the _ctx_claude_skill_* globals in
+    # .ctx order (names sorted within a profile for a stable listing).
+    local name path root entry entry_name lower bad
+    local -A seen=()
+    _ctx_claude_skill_names=()
+    _ctx_claude_skill_labels=()
+    _ctx_claude_skill_sources=()
+    while [ "$#" -gt 0 ]; do
+        name="$1"; path="$2"; shift 2
+        root="$path/.agents/skills"
+        [ -d "$root" ] || continue
+        [ ! -L "$root" ] || { _ctx_claude_error "skill-link $root"; return 1; }
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            if [ -L "$entry" ]; then
+                _ctx_claude_error "skill-link $entry"
+                return 1
+            fi
+            [ -d "$entry" ] || continue
+            [ -f "$entry/SKILL.md" ] && [ ! -L "$entry/SKILL.md" ] || continue
+            entry_name="$(basename "$entry")"
+            lower="$(_ctx_skill_canonical_name "$entry_name")" || {
+                _ctx_claude_error "snapshot-failed skill-name $entry_name"
+                return 1
+            }
+            if [ -n "${seen[$lower]+set}" ]; then
+                _ctx_claude_error "skill-collision $entry_name"
+                return 1
+            fi
+            seen[$lower]="$entry_name"
+            bad="$(find "$entry" ! -type f ! -type d -print 2>/dev/null | head -n 1)"
+            if [ -n "$bad" ]; then
+                _ctx_claude_error "skill-link $bad"
+                return 1
+            fi
+            _ctx_claude_skill_names+=("$entry_name")
+            _ctx_claude_skill_labels+=("$name")
+            _ctx_claude_skill_sources+=("$entry")
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -print 2>/dev/null | LC_ALL=C sort)
+    done
+    return 0
+}
+
+_ctx_claude_check_limits() {
+    # Design D3: at most 2000 files and 32 MiB in one snapshot. The error gives
+    # the measured count.
+    local snap="$1" files bytes size f
+    files="$(find "$snap" -type f -print 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${files:-0}" -gt 2000 ]; then
+        _ctx_claude_error "limit-files $files"
+        return 1
+    fi
+    bytes=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        size="$(wc -c < "$f" 2>/dev/null)" || size=0
+        bytes=$((bytes + size))
+    done < <(find "$snap" -type f -print 2>/dev/null)
+    if [ "$bytes" -gt 33554432 ]; then
+        _ctx_claude_error "limit-bytes $bytes"
+        return 1
+    fi
+    return 0
+}
+
+_ctx_claude_remove_new_snapshot() {
+    # Removes only the directory this call created, and never follows a link.
+    local snap="$_ctx_claude_new_snapshot"
+    _ctx_claude_new_snapshot=""
+    [ -n "$snap" ] || return 0
+    if [ -L "$snap" ]; then
+        rm -f -- "$snap"
+    elif [ -d "$snap" ]; then
+        rm -rf -- "$snap"
+    fi
+    return 0
+}
+
+_ctx_claude_build_snapshot() {
+    # Design D3. Creates a new unique snapshot from the Mode C primitive and
+    # fills it with CLAUDE.md, .claude/skills/<name>/ and ctx-settings.json.
+    # On any failure the directory this call created is removed again and the
+    # reason is printed.
+    local snap="" i dest
+    _ctx_claude_new_snapshot="$(mktemp -d "${TMPDIR:-/tmp}/ctx-claude.XXXXXXXXXX" 2>/dev/null)" || {
+        _ctx_claude_new_snapshot=""
+        _ctx_claude_error "snapshot-failed mktemp"
+        return 1
+    }
+    snap="$_ctx_claude_new_snapshot"
+    if [ -L "$snap" ] || [ ! -d "$snap" ]; then
+        _ctx_claude_error "snapshot-failed $snap"
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    chmod 0700 "$snap" 2>/dev/null
+    if ! _ctx_claude_write_claude_md "$snap/CLAUDE.md" "${_ctx_parsed_pairs[@]}"; then
+        _ctx_claude_error "snapshot-failed CLAUDE.md"
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    if ! _ctx_claude_collect_skills "${_ctx_parsed_pairs[@]}"; then
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    i=0
+    while [ "$i" -lt "${#_ctx_claude_skill_names[@]}" ]; do
+        dest="$snap/.claude/skills/${_ctx_claude_skill_names[$i]}"
+        if ! mkdir -p "$snap/.claude/skills" \
+           || ! cp -R -- "${_ctx_claude_skill_sources[$i]}/." "$dest"; then
+            _ctx_claude_error "snapshot-failed skill ${_ctx_claude_skill_names[$i]}"
+            _ctx_claude_remove_new_snapshot
+            return 1
+        fi
+        i=$((i + 1))
+    done
+    if ! printf '{"autoMemoryEnabled": false}\n' > "$snap/ctx-settings.json"; then
+        _ctx_claude_error "snapshot-failed ctx-settings.json"
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    if ! _ctx_claude_check_limits "$snap"; then
+        _ctx_claude_remove_new_snapshot
+        return 1
+    fi
+    return 0
+}
+
+_ctx_claude_shell_quote() {
+    # Single-quote for bash/zsh, with a ' written as '\'' (design D6).
+    local text="$1" quote="'\\''"
+    printf "'%s'" "${text//\'/$quote}"
+}
+
+_ctx_print_claude_guidance() {
+    # Design D6. The command has no cd and ctx never starts Claude or exports
+    # the variable itself.
+    local snap="$_ctx_claude_snapshot" i=0
+    printf 'ctx: harness claude (Claude Code %s)\n' "$_ctx_claude_version"
+    while [ "$i" -lt "${#_ctx_claude_labels[@]}" ]; do
+        printf 'ctx: selected %s %s %s\n' "$((i + 1))" "${_ctx_claude_labels[$i]}" "${_ctx_claude_dirs[$i]}"
+        i=$((i + 1))
+    done
+    i=0
+    while [ "$i" -lt "${#_ctx_claude_skill_names[@]}" ]; do
+        printf 'ctx: skill %s from %s\n' "${_ctx_claude_skill_names[$i]}" "${_ctx_claude_skill_labels[$i]}"
+        i=$((i + 1))
+    done
+    printf 'ctx: snapshot %s\n' "$snap"
+    printf 'ctx: ambient: Claude also loads user, ancestor, repository, managed and built-in sources. ctx does not filter them.\n'
+    printf 'ctx: ambient: these sources depend on the directory where you start claude.\n'
+    printf 'ctx: effective context: unknown. ctx lists only the selected inputs.\n'
+    printf 'ctx: memory: ctx-settings.json sets autoMemoryEnabled false. This effect is documented, not verified.\n'
+    printf 'ctx: start a NEW Claude session in your work directory (an open session does not change):\n'
+    printf 'CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir %s --settings %s\n' \
+        "$(_ctx_claude_shell_quote "$snap")" "$(_ctx_claude_shell_quote "$snap/ctx-settings.json")"
+}
+
+_ctx_claude_activate() {
+    # $1: the .ctx path. Step 1 (parse) is done by the shared parser; this runs
+    # the D2 canonical check and then the D4 steps in order: client check,
+    # snapshot, Copilot reset, publication. A failure in steps 1 to 3 leaves the
+    # previous activation and record untouched; a failure in step 4 removes this
+    # call's snapshot and publishes nothing.
+    local ctx_file="$1" i=0 name path reset_status=0
+    local -a pairs=("${_ctx_parsed_pairs[@]}") labels=() dirs=()
+    while [ "$i" -lt "${#pairs[@]}" ]; do
+        name="${pairs[$i]}"; path="${pairs[$((i + 1))]}"
+        i=$((i + 2))
+        if ! _ctx_profile_is_canonical "$path"; then
+            _ctx_claude_error "legacy-profile $name"
+            return 1
+        fi
+        labels+=("$name"); dirs+=("$path")
+    done
+    _ctx_claude_check_client || return 1
+    _ctx_claude_build_snapshot || return 1
+    if [ -n "$_ctx_active_mode" ]; then
+        # Step 4 (D4): the unchanged `ctx clear` routine resets an existing
+        # Copilot activation. This is the only step that may touch Copilot
+        # state.
+        _ctx_clear || reset_status=$?
+        if [ "$reset_status" -ne 0 ]; then
+            _ctx_claude_remove_new_snapshot
+            _ctx_claude_error "reset-failed $reset_status: the previous Copilot activation was partly reset"
+            return 1
+        fi
+    fi
+    # Step 5: publish the session record.
+    _ctx_claude_active=1
+    _ctx_claude_ctx_file="$ctx_file"
+    _ctx_claude_ctx_sha="$(_ctx_sha256_file "$ctx_file")"
+    _ctx_claude_labels=("${labels[@]}")
+    _ctx_claude_dirs=("${dirs[@]}")
+    _ctx_claude_snapshot="$_ctx_claude_new_snapshot"
+    _ctx_claude_new_snapshot=""
+    export AI_CTX_PROFILES="$_ctx_parsed_context"
+    _ctx_print_claude_guidance
+    return 0
+}
+
 _ctx_check_skip_links_and_skills() {
     # Modes B/C and unattributable (no-record) state do not own the Mode-A
     # synthetic-home shared-link or skill-symlink trees; those checks report

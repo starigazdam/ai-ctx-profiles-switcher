@@ -4134,3 +4134,570 @@ _setup_check_home() {
     [ "$status" -eq 0 ]
     [ "$output" = "zsh-issue75-ok" ]
 }
+
+# --- Issue #22: Claude harness --------------------------------------------
+# A fake client answers the D7 probes (--version, --help) and records the
+# arguments of a real launch with RS separators, so a test can prove the
+# printed command passes the exact snapshot path to claude.
+
+_claude_client() {
+    # _claude_client [version-output]
+    local version="${1:-2.1.292 (Claude Code)}"
+    mkdir -p "$TEST_TMP/claude-bin"
+    cat > "$TEST_TMP/claude-bin/claude" <<EOF
+#!/usr/bin/env bash
+{ printf '%s\036' "\$@"; } >> "\${CLAUDE_ARGS_LOG:-$TEST_TMP/claude-args.log}"
+if [ "\$1" = "--version" ]; then printf '%s\n' "$version"; exit 0; fi
+if [ "\$1" = "--help" ]; then
+    printf 'Usage: claude\n  --add-dir <dirs>\n  --settings <file>\n'
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/claude-bin/claude"
+    export PATH="$TEST_TMP/claude-bin:$PATH"
+}
+
+_claude_failed_client() {
+    mkdir -p "$TEST_TMP/claude-bin"
+    cat > "$TEST_TMP/claude-bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then printf 'boom\n'; exit 3; fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/claude-bin/claude"
+    export PATH="$TEST_TMP/claude-bin:$PATH"
+}
+
+_claude_unsupported_client() {
+    mkdir -p "$TEST_TMP/claude-bin"
+    cat > "$TEST_TMP/claude-bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then printf '2.1.292\n'; exit 0; fi
+if [ "$1" = "--help" ]; then printf 'Usage: claude\n  --add-dir <dirs>\n'; exit 0; fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/claude-bin/claude"
+    export PATH="$TEST_TMP/claude-bin:$PATH"
+}
+
+_claude_isolated_path() {
+    # A PATH with the utilities ctx needs but without any claude client.
+    local tool target
+    mkdir -p "$TEST_TMP/min-bin"
+    for tool in bash sh realpath mktemp find tr cat head tail od sed grep wc cp mkdir rm dirname basename sort printf env python3; do
+        target="$(command -v "$tool" 2>/dev/null)" || continue
+        ln -sf "$target" "$TEST_TMP/min-bin/$tool"
+    done
+    export PATH="$TEST_TMP/min-bin"
+}
+
+_claude_snapshot_root() {
+    # Private TMPDIR so a test can see every snapshot a call created.
+    mkdir -p "$TEST_TMP/snapshots"
+    export TMPDIR="$TEST_TMP/snapshots"
+}
+
+_claude_snapshots() {
+    find "$TEST_TMP/snapshots" -mindepth 1 -maxdepth 1 -name 'ctx-claude.*' -print 2>/dev/null | sort
+}
+
+_claude_project() {
+    # _claude_project <name> <body> ; prints the project directory
+    local proj="$TEST_TMP/$1"
+    mkdir -p "$proj"
+    printf '%s' "$2" > "$proj/.ctx"
+    printf '%s\n' "$proj"
+}
+
+_claude_snapshot_of() {
+    printf '%s\n' "$1" | sed -n 's/^ctx: snapshot //p'
+}
+
+_claude_load() {
+    # Like `run`, but in the current shell so the activation's exports survive
+    # for the assertions on AI_CTX_PROFILES/COPILOT_HOME and friends.
+    status=0
+    output=""
+    _ctx_load_ctx_file "$1" >"$TEST_TMP/claude-load.out" 2>&1 && status=0 || status=$?
+    output="$(cat "$TEST_TMP/claude-load.out")"
+    return 0
+}
+
+@test "Claude22: harness:claude is a reserved directive, never an entry, and activates Claude" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-grammar $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx: harness claude (Claude Code 2.1.292)"* ]]
+    [[ "$output" != *"harness+"* ]]
+    [ "$AI_CTX_PROFILES" = review ]
+    [ -z "${COPILOT_HOME:-}" ]
+    [ -z "${COPILOT_CUSTOM_INSTRUCTIONS_DIRS+x}" ]
+}
+
+@test "Claude22: a .ctx file without harness: keeps Copilot activation" {
+    _make_canonical_profile review $'# review\n'
+    local proj
+    proj="$(_claude_project claude-default $'review:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[AI Context]"* ]]
+    [ -n "$COPILOT_HOME" ]
+    [ -d "$COPILOT_HOME" ]
+}
+
+@test "Claude22: harness:copilot with key case and whitespace behaves like no directive" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    local plain copilot plain_profiles plain_dirs plain_home
+    plain="$(_claude_project claude-plain $'review:@profile\narch:@profile\n')"
+    copilot="$(_claude_project claude-copilot $'  HARNESS   :   copilot   \nreview:@profile\narch:@profile\n')"
+
+    cd "$plain"
+    _ctx_load_ctx_file "$plain/.ctx" >/dev/null
+    plain_profiles="$AI_CTX_PROFILES"
+    plain_dirs="$COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
+    plain_home="$COPILOT_HOME"
+
+    cd "$copilot"
+    _ctx_load_ctx_file "$copilot/.ctx" >/dev/null
+
+    [ "$AI_CTX_PROFILES" = "$plain_profiles" ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = "$plain_dirs" ]
+    [ "$(basename "$COPILOT_HOME")" = "$(basename "$plain_home")" ]
+}
+
+@test "Claude22: harness: key case is ignored and the value is trimmed" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-keycase $'   HaRnEsS   :   claude   \nreview:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx: harness claude"* ]]
+    [ "$AI_CTX_PROFILES" = review ]
+}
+
+@test "Claude22: harness: value case is exact, so harness:Claude is rejected" {
+    _make_canonical_profile review $'# review\n'
+    local proj
+    proj="$(_claude_project claude-valuecase $'harness:Claude\nreview:@profile\n')"
+    export AI_CTX_PROFILES=previous
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"harness-value Claude"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+}
+
+@test "Claude22: empty and unknown harness values are rejected with harness-value" {
+    _make_canonical_profile review $'# review\n'
+    local proj status
+
+    proj="$(_claude_project claude-emptyval $'harness:\nreview:@profile\n')"
+    _claude_load "$proj/.ctx"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"harness-value"* ]]
+
+    proj="$(_claude_project claude-unknownval $'harness:codex\nreview:@profile\n')"
+    _claude_load "$proj/.ctx"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"harness-value codex"* ]]
+    [ -z "${AI_CTX_PROFILES:-}" ]
+}
+
+@test "Claude22: a second harness: line in any key case is rejected with harness-duplicate" {
+    _make_canonical_profile review $'# review\n'
+    local proj
+    proj="$(_claude_project claude-dup $'harness:copilot\nHARNESS:claude\nreview:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"harness-duplicate"* ]]
+}
+
+@test "Claude22: harness:claude with home: is rejected with harness-home" {
+    _make_canonical_profile review $'# review\n'
+    local proj
+    proj="$(_claude_project claude-home '')"
+    printf 'harness:claude\nhome:%s/claude-home\nreview:@profile\n' "$HOME" > "$proj/.ctx"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"harness-home"* ]]
+    [ ! -d "$HOME/claude-home" ]
+}
+
+@test "Claude22: harness: with no profile entry is rejected with harness-no-entry" {
+    local proj
+    proj="$(_claude_project claude-noentry $'harness:claude\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"harness-no-entry"* ]]
+}
+
+@test "Claude22: a legacy profile with harness:claude is rejected with legacy-profile before any change" {
+    _make_profile review review-skill
+    _claude_client
+    _claude_snapshot_root
+    export AI_CTX_PROFILES=previous COPILOT_CUSTOM_INSTRUCTIONS_DIRS=previous-dirs
+    local proj
+    proj="$(_claude_project claude-legacy $'harness:claude\nreview:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: legacy-profile review"* ]]
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" = previous-dirs ]
+    [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: CLAUDE.md copies LF, CRLF, BOM and no-final-newline bytes exactly" {
+    _make_canonical_profile lfp $'# lf\n'
+    _make_canonical_profile crlfp $'# a\r\n# b'
+    _make_canonical_profile bomb $'\xef\xbb\xbf# bom\n'
+    _make_canonical_profile barep $'# no final newline'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-bytes $'harness:claude\nlfp:@profile\ncrlfp:@profile\nbomb:@profile\nbarep:@profile\n')"
+    cd "$proj"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    [ -n "$snap" ] && [ -f "$snap/CLAUDE.md" ]
+    {
+        printf '<!-- ctx profile 1 lfp -->\n'
+        printf '# lf\n'
+        printf '<!-- ctx profile 2 crlfp -->\n'
+        printf '# a\r\n# b\n'
+        printf '<!-- ctx profile 3 bomb -->\n'
+        printf '# bom\n'
+        printf '<!-- ctx profile 4 barep -->\n'
+        printf '# no final newline\n'
+    } > "$TEST_TMP/expected-claude-md"
+    cmp -s "$snap/CLAUDE.md" "$TEST_TMP/expected-claude-md"
+}
+
+@test "Claude22: CLAUDE.md holds two profiles in .ctx order with numbered markers" {
+    _make_canonical_profile taska $'# task A\n'
+    _make_canonical_profile taskb $'# task B\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-order $'harness:claude\ntaskb:@profile\ntaska:@profile\n')"
+    cd "$proj"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    printf '<!-- ctx profile 1 taskb -->\n# task B\n<!-- ctx profile 2 taska -->\n# task A\n' > "$TEST_TMP/expected-order"
+    cmp -s "$snap/CLAUDE.md" "$TEST_TMP/expected-order"
+    [[ "$output" == *"ctx: selected 1 taskb "* ]]
+    [[ "$output" == *"ctx: selected 2 taska "* ]]
+}
+
+@test "Claude22: skills are copied with supporting assets and the fixed settings file" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref"
+    printf 'payload\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref/data.txt"
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-skills $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    cmp -s "$snap/.claude/skills/lint/SKILL.md" \
+        "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/SKILL.md"
+    cmp -s "$snap/.claude/skills/lint/ref/data.txt" \
+        "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref/data.txt"
+    printf '{"autoMemoryEnabled": false}\n' > "$TEST_TMP/expected-settings.json"
+    cmp -s "$snap/ctx-settings.json" "$TEST_TMP/expected-settings.json"
+    [ "$(find "$snap" -type f | wc -l)" -eq 4 ]
+    [[ "$output" == *"ctx: skill lint from review"* ]]
+}
+
+@test "Claude22: equal skill names reject with skill-collision and remove the snapshot" {
+    _make_profile previous previous-skill
+    ctx previous >/dev/null
+    local previous_home="$COPILOT_HOME"
+    _make_canonical_profile taska $'# A\n'
+    _make_canonical_profile taskb $'# B\n'
+    _make_canonical_skill taska lint
+    _make_canonical_skill taskb lint
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-collide $'harness:claude\ntaska:@profile\ntaskb:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: skill-collision lint"* ]]
+    [ -z "$(_claude_snapshots)" ]
+    # A step-3 failure keeps the previous activation.
+    [ "$AI_CTX_PROFILES" = previous ]
+    [ "$COPILOT_HOME" = "$previous_home" ]
+    [ -d "$previous_home" ]
+}
+
+@test "Claude22: skill names differing only in case reject with skill-collision" {
+    _make_canonical_profile taska $'# A\n'
+    _make_canonical_profile taskb $'# B\n'
+    _make_canonical_skill taska Lint
+    _make_canonical_skill taskb lint
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-casecollide $'harness:claude\ntaska:@profile\ntaskb:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: skill-collision "* ]]
+    [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: a symlink inside a selected skill rejects with skill-link" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    printf 'target\n' > "$TEST_TMP/link-target.txt"
+    ln -s "$TEST_TMP/link-target.txt" "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/cfg"
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-link $'harness:claude\nreview:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: skill-link "*"cfg"* ]]
+    [ -z "$(_claude_snapshots)" ]
+    [ -f "$TEST_TMP/link-target.txt" ]
+}
+
+@test "Claude22: more than 2000 snapshot files rejects with limit-files" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review bulk
+    local dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/bulk"
+    ( cd "$dir" && seq 1 2002 | xargs touch )
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-limitfiles $'harness:claude\nreview:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: limit-files "* ]]
+    [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: more than 32 MiB rejects with limit-bytes" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review bulk
+    truncate -s 34000000 "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/bulk/big.bin"
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-limitbytes $'harness:claude\nreview:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: limit-bytes "* ]]
+    [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: a missing client fails with client-missing before any change" {
+    _make_profile review review-skill
+    ctx review >/dev/null
+    local home="$COPILOT_HOME"
+    _make_canonical_profile arch $'# arch\n'
+    local saved_path="$PATH"
+    _claude_isolated_path
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-noclient $'harness:claude\narch:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+    PATH="$saved_path"
+    export PATH
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: client-missing"* ]]
+    [ "$AI_CTX_PROFILES" = review ]
+    [ "$COPILOT_HOME" = "$home" ]
+    [ -d "$home" ]
+    [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: a failing claude --version fails with client-failed before any change" {
+    _make_profile review review-skill
+    ctx review >/dev/null
+    local home="$COPILOT_HOME"
+    _make_canonical_profile arch $'# arch\n'
+    _claude_failed_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-clientfail $'harness:claude\narch:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: client-failed"* ]]
+    [ "$AI_CTX_PROFILES" = review ]
+    [ "$COPILOT_HOME" = "$home" ]
+    [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: a client without --settings fails with client-unsupported before any change" {
+    _make_profile review review-skill
+    ctx review >/dev/null
+    local home="$COPILOT_HOME"
+    _make_canonical_profile arch $'# arch\n'
+    _claude_unsupported_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-clientunsupported $'harness:claude\narch:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: client-unsupported"* ]]
+    [ "$AI_CTX_PROFILES" = review ]
+    [ "$COPILOT_HOME" = "$home" ]
+    [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: a reset failure removes the new snapshot, publishes no record and prints reset-failed" {
+    _make_profile review review-skill
+    ctx review >/dev/null
+    _make_canonical_profile arch $'# arch\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-resetfail $'harness:claude\narch:@profile\n')"
+    unset CTX_ENGINE_DLL
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: reset-failed"* ]]
+    [ -z "$(_claude_snapshots)" ]
+    [ -z "$_ctx_claude_snapshot" ]
+    [ "$_ctx_claude_active" -eq 0 ]
+}
+
+@test "Claude22: A then B then A creates three distinct snapshots with no B content in A" {
+    _make_canonical_profile taska $'# task A bytes\n'
+    _make_canonical_profile taskb $'# task B marker bytes\n'
+    _make_canonical_skill taska skill-a
+    _make_canonical_skill taskb skill-b
+    _claude_client
+    _claude_snapshot_root
+    local proja projb snap1 snap2 snap3
+    proja="$(_claude_project claude-A $'harness:claude\ntaska:@profile\n')"
+    projb="$(_claude_project claude-B $'harness:claude\ntaskb:@profile\n')"
+
+    run _ctx_load_ctx_file "$proja/.ctx"
+    [ "$status" -eq 0 ]
+    snap1="$(_claude_snapshot_of "$output")"
+
+    run _ctx_load_ctx_file "$projb/.ctx"
+    [ "$status" -eq 0 ]
+    snap2="$(_claude_snapshot_of "$output")"
+
+    run _ctx_load_ctx_file "$proja/.ctx"
+    [ "$status" -eq 0 ]
+    snap3="$(_claude_snapshot_of "$output")"
+
+    [ -n "$snap1" ] && [ -n "$snap2" ] && [ -n "$snap3" ]
+    [ "$snap1" != "$snap2" ]
+    [ "$snap2" != "$snap3" ]
+    [ "$snap1" != "$snap3" ]
+    [ -d "$snap1" ] && [ -d "$snap2" ] && [ -d "$snap3" ]
+    [[ "$(cat "$snap2/CLAUDE.md")" == *"task B marker bytes"* ]]
+    local s
+    for s in "$snap1" "$snap3"; do
+        [[ "$(cat "$s/CLAUDE.md")" != *"task B marker bytes"* ]]
+        [ ! -e "$s/.claude/skills/skill-b" ]
+        [ -e "$s/.claude/skills/skill-a" ]
+    done
+}
+
+@test "Claude22: guidance prints version, selections, skills, snapshot and exactly one start command" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-guidance $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    [[ "$output" == *"ctx: harness claude (Claude Code 2.1.292)"* ]]
+    [[ "$output" == *"ctx: selected 1 review $AI_CTX_PROFILES_CONFIG_ROOT/profiles/review"* ]]
+    [[ "$output" == *"ctx: skill lint from review"* ]]
+    [[ "$output" == *"ctx: snapshot $snap"* ]]
+    [[ "$output" == *"ctx: ambient: Claude also loads user, ancestor, repository, managed and built-in sources. ctx does not filter them."* ]]
+    [[ "$output" == *"ctx: ambient: these sources depend on the directory where you start claude."* ]]
+    [[ "$output" == *"ctx: effective context: unknown. ctx lists only the selected inputs."* ]]
+    [[ "$output" == *"ctx: memory: ctx-settings.json sets autoMemoryEnabled false. This effect is documented, not verified."* ]]
+    [[ "$output" == *"ctx: start a NEW Claude session in your work directory (an open session does not change):"* ]]
+    [ "$(printf '%s\n' "$output" | grep -c '^CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude ')" -eq 1 ]
+    [[ "$output" != *"--setting-sources"* ]]
+    [ -z "${CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD+x}" ]
+}
+
+@test "Claude22: the printed command passes an exotic snapshot path to claude exactly" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    local exotic="$TEST_TMP/we ird'café"
+    mkdir -p "$exotic"
+    export TMPDIR="$exotic"
+    local proj snap cmd expected
+    proj="$(_claude_project claude-quote $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    [[ "$snap" == *"we ird'café"* ]]
+    cmd="$(printf '%s\n' "$output" | tail -n 1)"
+    [[ "$cmd" == *"'\\''"* ]]
+    CLAUDE_ARGS_LOG="$TEST_TMP/launch-args.log" bash -c "$cmd"
+    [ "$status" -eq 0 ]
+    expected="$(printf '%s\036' --add-dir "$snap" --settings "$snap/ctx-settings.json")"
+    [ "$(cat "$TEST_TMP/launch-args.log")" = "$expected" ]
+}

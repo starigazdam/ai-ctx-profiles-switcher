@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 <#
 .SYNOPSIS
     Pester test suite for ctx.ps1 — mirrors tests/ctx.bats (historical design
@@ -108,6 +108,21 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
         $Script:CtxActiveCustomDirs = $null
         $Script:CtxActiveHomeWasSet = $false
         $Script:CtxActiveHomeValue = $null
+        $Script:CtxClaudeActive = $false
+        $Script:CtxClaudeCtxFile = $null
+        $Script:CtxClaudeCtxSha = $null
+        $Script:CtxClaudeLabels = @()
+        $Script:CtxClaudeDirs = @()
+        $Script:CtxClaudeSnapshot = $null
+        $Script:CtxClaudeVersion = $null
+        $Script:CtxClaudeSkillNames = @()
+        $Script:CtxClaudeSkillLabels = @()
+        $Script:CtxClaudeSkillSources = @()
+        $Script:CtxClaudeNewSnapshot = $null
+        # Ignore, not SilentlyContinue: a suppressed error is still appended to
+        # $Error, and this BeforeEach runs for every test.
+        Remove-Item Env:\CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD -ErrorAction Ignore
+        Remove-Item Env:\CTX_CLAUDE_ARGS -ErrorAction Ignore
 
         Set-Location $env:HOME
         . $Script:CtxSrc
@@ -4507,6 +4522,505 @@ Describe 'ctx.ps1 COPILOT_HOME isolation' {
 
             Set-Location $proj
             (ctx check) | Should -BeTrue
+        }
+    }
+    Context 'Issue22: Claude harness' {
+
+        BeforeAll {
+        function Script:New-CtxClaudeStub {
+            # A fake `claude` on PATH that answers the D7 probes. The POSIX shim
+            # also records launch arguments when CTX_CLAUDE_ARGS is set.
+            param(
+                [string]$Dir,
+                [string]$Version = '2.1.292',
+                [switch]$VersionFails,
+                [switch]$NoSettings
+            )
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            $help = if ($NoSettings) { "'--add-dir'" } else { "'--add-dir' '--settings'" }
+            $versionExit = if ($VersionFails) { 3 } else { 0 }
+            $sh = @'
+#!/usr/bin/env bash
+{ printf '%s\036' "$@"; } >> "${CTX_CLAUDE_ARGS:-/dev/null}"
+if [ "$1" = "--version" ]; then printf '%s\n' '__VERSION__'; exit __VEXIT__; fi
+if [ "$1" = "--help" ]; then printf '%s\n' __HELP__; exit 0; fi
+exit 0
+'@
+            $sh = $sh.Replace('__VERSION__', $Version).Replace('__VEXIT__', "$versionExit").Replace('__HELP__', $help).Replace("`r`n", "`n")
+            [System.IO.File]::WriteAllText((Join-Path $Dir 'claude'), $sh)
+            & chmod +x (Join-Path $Dir 'claude') 2>$null
+
+            $cmdHelp = if ($NoSettings) { 'echo --add-dir&' } else { 'echo --add-dir& echo --settings&' }
+            $cmd = @'
+@echo off
+if "%1"=="--version" (echo __VERSION__& exit /b __VEXIT__)
+if "%1"=="--help" (__CMDHELP__ exit /b 0)
+exit /b 0
+'@
+            $cmd = $cmd.Replace('__VERSION__', $Version).Replace('__VEXIT__', "$versionExit").Replace('__CMDHELP__', $cmdHelp)
+            [System.IO.File]::WriteAllText((Join-Path $Dir 'claude.cmd'), $cmd.Replace("`n", "`r`n"))
+        }
+
+        function Script:Add-CtxClaudeStubToPath {
+            param([string]$Dir)
+            $env:PATH = $Dir + [System.IO.Path]::PathSeparator + $env:PATH
+        }
+
+        function Script:Get-CtxClaudeSnapshotDirs {
+            @(Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Filter 'ctx-claude.*' -Directory -Force -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName })
+        }
+
+        function Script:New-CtxClaudeProject {
+            param([string]$Name, [string[]]$Lines)
+            $proj = Join-Path $Script:TestTmp $Name
+            New-Item -ItemType Directory -Path $proj -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $proj '.ctx'), (($Lines -join "`n") + "`n"))
+            return $proj
+        }
+
+        function Script:Invoke-CtxCaptured {
+            # Runs a ctx command with a non-terminating error preference and
+            # returns every stream as one string, like the existing tests do.
+            param([scriptblock]$Script)
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $out = @(& $Script *>&1)
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
+            return ($out | ForEach-Object { "$_" }) -join "`n"
+        }
+        }
+
+        It 'Issue22: harness:claude is a reserved directive and activates Claude' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $proj = New-CtxClaudeProject -Name 'claude-grammar' -Lines @('harness:claude', 'review:@profile')
+            Set-Location $proj
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: harness claude \(Claude Code 2\.1\.292\)'
+            $env:AI_CTX_PROFILES | Should -Be 'review'
+            (Test-Path Env:\COPILOT_HOME) | Should -BeFalse
+            (Test-Path Env:\COPILOT_CUSTOM_INSTRUCTIONS_DIRS) | Should -BeFalse
+            $Script:CtxClaudeActive | Should -BeTrue
+        }
+
+        It 'Issue22: a .ctx file without harness: keeps Copilot activation' {
+            $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+            $proj = New-CtxClaudeProject -Name 'claude-default' -Lines @('review:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match '\[AI Context\]'
+            $env:AI_CTX_PROFILES | Should -Be 'review'
+            Test-Path -LiteralPath (Join-Path $env:COPILOT_HOME 'skills/review-skill') | Should -BeTrue
+            $Script:CtxClaudeActive | Should -BeFalse
+        }
+
+        It 'Issue22: harness:copilot with key case and whitespace equals no directive' {
+            $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+            $null = New-CtxTestProfile -Name 'arch' -Skill 'arch-skill'
+            $plain = New-CtxClaudeProject -Name 'claude-plain' -Lines @('review:@profile', 'arch:@profile')
+            $copilot = New-CtxClaudeProject -Name 'claude-copilot' -Lines @('   HARNESS   :   copilot   ', 'review:@profile', 'arch:@profile')
+
+            $null = Invoke-CtxCaptured { ctx load (Join-Path $plain '.ctx') }
+            $plainProfiles = $env:AI_CTX_PROFILES
+            $plainDirs = $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+            $plainHome = Split-Path -Leaf $env:COPILOT_HOME
+
+            $null = Invoke-CtxCaptured { ctx load (Join-Path $copilot '.ctx') }
+
+            $env:AI_CTX_PROFILES | Should -Be $plainProfiles
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be $plainDirs
+            (Split-Path -Leaf $env:COPILOT_HOME) | Should -Be $plainHome
+            $Script:CtxClaudeActive | Should -BeFalse
+        }
+
+        It 'Issue22: the harness: value is case-sensitive, so harness:Claude is rejected' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            $env:AI_CTX_PROFILES = 'previous'
+            $proj = New-CtxClaudeProject -Name 'claude-valuecase' -Lines @('harness:Claude', 'review:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'harness-value Claude'
+            $env:AI_CTX_PROFILES | Should -Be 'previous'
+        }
+
+        It 'Issue22: empty and unknown harness values are rejected with harness-value' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+
+            $empty = New-CtxClaudeProject -Name 'claude-emptyval' -Lines @('harness:', 'review:@profile')
+            (Invoke-CtxCaptured { ctx load (Join-Path $empty '.ctx') }) | Should -Match 'harness-value'
+
+            $unknown = New-CtxClaudeProject -Name 'claude-unknownval' -Lines @('harness:codex', 'review:@profile')
+            (Invoke-CtxCaptured { ctx load (Join-Path $unknown '.ctx') }) | Should -Match 'harness-value codex'
+        }
+
+        It 'Issue22: a second harness: line in any key case is rejected with harness-duplicate' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            $proj = New-CtxClaudeProject -Name 'claude-dup' -Lines @('harness:copilot', 'HARNESS:claude', 'review:@profile')
+
+            (Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }) | Should -Match 'harness-duplicate'
+        }
+
+        It 'Issue22: harness:claude with home: is rejected with harness-home' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            $proj = New-CtxClaudeProject -Name 'claude-home' -Lines @('harness:claude', ("home:" + (Join-Path $env:HOME 'claude-home')), 'review:@profile')
+
+            (Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }) | Should -Match 'harness-home'
+        }
+
+        It 'Issue22: harness: with no profile entry is rejected with harness-no-entry' {
+            $proj = New-CtxClaudeProject -Name 'claude-noentry' -Lines @('harness:claude')
+
+            (Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }) | Should -Match 'harness-no-entry'
+        }
+
+        It 'Issue22: a legacy profile with harness:claude is rejected with legacy-profile' {
+            $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+            $env:AI_CTX_PROFILES = 'previous'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS = 'previous-dirs'
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-legacy' -Lines @('harness:claude', 'review:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: error: harness claude: legacy-profile review'
+            $env:AI_CTX_PROFILES | Should -Be 'previous'
+            $env:COPILOT_CUSTOM_INSTRUCTIONS_DIRS | Should -Be 'previous-dirs'
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+        }
+
+        It 'Issue22: CLAUDE.md copies LF, CRLF, BOM and no-final-newline bytes exactly' {
+            $null = New-CtxTestCanonicalProfile -Name 'lfp' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# lf`n"))
+            $null = New-CtxTestCanonicalProfile -Name 'crlfp' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# a`r`n# b"))
+            $bomBytes = [byte[]]([byte[]](0xEF, 0xBB, 0xBF) + [System.Text.Encoding]::UTF8.GetBytes("# bom`n"))
+            $null = New-CtxTestCanonicalProfile -Name 'bomb' -AgentsBytes $bomBytes
+            $null = New-CtxTestCanonicalProfile -Name 'barep' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# no final newline"))
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $proj = New-CtxClaudeProject -Name 'claude-bytes' -Lines @('harness:claude', 'lfp:@profile', 'crlfp:@profile', 'bomb:@profile', 'barep:@profile')
+            Set-Location $proj
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $Script:CtxClaudeActive | Should -BeTrue
+            $expected = [System.Text.Encoding]::UTF8.GetBytes("<!-- ctx profile 1 lfp -->`n# lf`n<!-- ctx profile 2 crlfp -->`n# a`r`n# b`n<!-- ctx profile 3 bomb -->`n# bom`n<!-- ctx profile 4 barep -->`n# no final newline`n")
+            Assert-CtxFileBytes -Path (Join-Path $Script:CtxClaudeSnapshot 'CLAUDE.md') -Expected $expected
+        }
+
+        It 'Issue22: CLAUDE.md holds two profiles in .ctx order with numbered markers' {
+            $null = New-CtxTestCanonicalProfile -Name 'taska' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# task A`n"))
+            $null = New-CtxTestCanonicalProfile -Name 'taskb' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# task B`n"))
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $proj = New-CtxClaudeProject -Name 'claude-order' -Lines @('harness:claude', 'taskb:@profile', 'taska:@profile')
+            Set-Location $proj
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $expected = [System.Text.Encoding]::UTF8.GetBytes("<!-- ctx profile 1 taskb -->`n# task B`n<!-- ctx profile 2 taska -->`n# task A`n")
+            Assert-CtxFileBytes -Path (Join-Path $Script:CtxClaudeSnapshot 'CLAUDE.md') -Expected $expected
+            $out | Should -Match 'ctx: selected 1 taskb '
+            $out | Should -Match 'ctx: selected 2 taska '
+        }
+
+        It 'Issue22: skills are copied with supporting assets and the fixed settings bytes' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'lint'
+            $refDir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review/.agents/skills/lint/ref'
+            New-Item -ItemType Directory -Path $refDir -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $refDir 'data.txt'), "payload`n")
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $proj = New-CtxClaudeProject -Name 'claude-skills' -Lines @('harness:claude', 'review:@profile')
+            Set-Location $proj
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $snap = $Script:CtxClaudeSnapshot
+            $skillSrc = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review/.agents/skills/lint'
+            Assert-CtxFileBytes -Path (Join-Path $snap '.claude/skills/lint/SKILL.md') -Expected ([System.IO.File]::ReadAllBytes((Join-Path $skillSrc 'SKILL.md')))
+            Assert-CtxFileBytes -Path (Join-Path $snap '.claude/skills/lint/ref/data.txt') -Expected ([System.IO.File]::ReadAllBytes((Join-Path $refDir 'data.txt')))
+            Assert-CtxFileBytes -Path (Join-Path $snap 'ctx-settings.json') -Expected ([System.Text.Encoding]::UTF8.GetBytes("{`"autoMemoryEnabled`": false}`n"))
+            @(Get-ChildItem -LiteralPath $snap -Recurse -File -Force).Count | Should -Be 4
+            $out | Should -Match 'ctx: skill lint from review'
+        }
+
+        It 'Issue22: equal and case-variant skill names reject with skill-collision' {
+            $null = New-CtxTestProfile -Name 'previous' -Skill 'previous-skill'
+            $null = Invoke-CtxCaptured { ctx previous }
+            $previousHome = $env:COPILOT_HOME
+            $null = New-CtxTestCanonicalProfile -Name 'taska' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# A`n"))
+            $null = New-CtxTestCanonicalProfile -Name 'taskb' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# B`n"))
+            New-CtxTestCanonicalSkill -Profile 'taska' -Skill 'lint'
+            New-CtxTestCanonicalSkill -Profile 'taskb' -Skill 'lint'
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-collide' -Lines @('harness:claude', 'taska:@profile', 'taskb:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: error: harness claude: skill-collision lint'
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+            # A step-3 failure keeps the previous activation.
+            $env:AI_CTX_PROFILES | Should -Be 'previous'
+            $env:COPILOT_HOME | Should -Be $previousHome
+            Test-Path -LiteralPath $previousHome -PathType Container | Should -BeTrue
+
+            Remove-Item -LiteralPath (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/taskb/.agents/skills/lint') -Recurse -Force
+            New-CtxTestCanonicalSkill -Profile 'taskb' -Skill 'Lint'
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+            $out | Should -Match 'ctx: error: harness claude: skill-collision '
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+        }
+
+        It 'Issue22: a link inside a selected skill rejects with skill-link' {
+            if ($IsWindows -or $env:OS -ceq 'Windows_NT') {
+                Set-ItResult -Skipped -Because 'POSIX symlink fixture'
+                return
+            }
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'lint'
+            $target = Join-Path $Script:TestTmp 'link-target.txt'
+            [System.IO.File]::WriteAllText($target, "target`n")
+            & ln -s $target (Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review/.agents/skills/lint/cfg')
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-link' -Lines @('harness:claude', 'review:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: error: harness claude: skill-link '
+            $out | Should -Match 'cfg'
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+            Test-Path -LiteralPath $target | Should -BeTrue
+        }
+
+        It 'Issue22: more than 2000 snapshot files rejects with limit-files' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'bulk'
+            $dir = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review/.agents/skills/bulk'
+            for ($i = 1; $i -le 2002; $i++) { [System.IO.File]::WriteAllText((Join-Path $dir "f$i"), '') }
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-limitfiles' -Lines @('harness:claude', 'review:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: error: harness claude: limit-files '
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+        }
+
+        It 'Issue22: more than 32 MiB rejects with limit-bytes' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'bulk'
+            $big = Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review/.agents/skills/bulk/big.bin'
+            $fs = [System.IO.File]::Open($big, [System.IO.FileMode]::Create)
+            try { $fs.SetLength(34000000) } finally { $fs.Close() }
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-limitbytes' -Lines @('harness:claude', 'review:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: error: harness claude: limit-bytes '
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+        }
+
+        It 'Issue22: a missing client fails with client-missing before any change' {
+            $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+            $null = Invoke-CtxCaptured { ctx review }
+            $copilotHome = $env:COPILOT_HOME
+            $null = New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n"))
+            $minBin = Join-Path $Script:TestTmp 'min-bin'
+            New-Item -ItemType Directory -Path $minBin -Force | Out-Null
+            if (-not ($IsWindows -or $env:OS -ceq 'Windows_NT')) {
+                # Keep the tools the parse needs (the canonical check uses stat),
+                # but no claude client.
+                foreach ($tool in @('stat', 'chmod')) {
+                    $found = Get-Command -Name $tool -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($found) { & ln -s $found.Source (Join-Path $minBin $tool) }
+                }
+            }
+            $savedPath = $env:PATH
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-noclient' -Lines @('harness:claude', 'arch:@profile')
+            $env:PATH = $minBin
+            try {
+                $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+            } finally {
+                $env:PATH = $savedPath
+            }
+
+            $out | Should -Match 'ctx: error: harness claude: client-missing'
+            $env:AI_CTX_PROFILES | Should -Be 'review'
+            $env:COPILOT_HOME | Should -Be $copilotHome
+            Test-Path -LiteralPath $copilotHome -PathType Container | Should -BeTrue
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+        }
+
+        It 'Issue22: a failing claude --version fails with client-failed' {
+            $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+            $null = Invoke-CtxCaptured { ctx review }
+            $copilotHome = $env:COPILOT_HOME
+            $null = New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n"))
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin') -VersionFails
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-clientfail' -Lines @('harness:claude', 'arch:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: error: harness claude: client-failed'
+            $env:AI_CTX_PROFILES | Should -Be 'review'
+            $env:COPILOT_HOME | Should -Be $copilotHome
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+        }
+
+        It 'Issue22: a client without --settings fails with client-unsupported' {
+            $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+            $null = Invoke-CtxCaptured { ctx review }
+            $copilotHome = $env:COPILOT_HOME
+            $null = New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n"))
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin') -NoSettings
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-clientunsupported' -Lines @('harness:claude', 'arch:@profile')
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+
+            $out | Should -Match 'ctx: error: harness claude: client-unsupported'
+            $env:AI_CTX_PROFILES | Should -Be 'review'
+            $env:COPILOT_HOME | Should -Be $copilotHome
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+        }
+
+        It 'Issue22: a reset failure prints reset-failed, removes the snapshot and publishes no record' {
+            $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
+            $null = Invoke-CtxCaptured { ctx review }
+            $null = New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n"))
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $before = Get-CtxClaudeSnapshotDirs
+            $proj = New-CtxClaudeProject -Name 'claude-resetfail' -Lines @('harness:claude', 'arch:@profile')
+            $engine = $env:CTX_ENGINE_DLL
+            Remove-Item Env:\CTX_ENGINE_DLL -ErrorAction SilentlyContinue
+            try {
+                $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+            } finally {
+                $env:CTX_ENGINE_DLL = $engine
+            }
+
+            $out | Should -Match 'ctx: error: harness claude: reset-failed'
+            (Get-CtxClaudeSnapshotDirs) | Should -Be $before
+            $Script:CtxClaudeActive | Should -BeFalse
+            $Script:CtxClaudeSnapshot | Should -BeNullOrEmpty
+        }
+
+        It 'Issue22: A then B then A creates three distinct snapshots without B content in A' {
+            $null = New-CtxTestCanonicalProfile -Name 'taska' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# task A bytes`n"))
+            $null = New-CtxTestCanonicalProfile -Name 'taskb' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# task B marker bytes`n"))
+            New-CtxTestCanonicalSkill -Profile 'taska' -Skill 'skill-a'
+            New-CtxTestCanonicalSkill -Profile 'taskb' -Skill 'skill-b'
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $proja = New-CtxClaudeProject -Name 'claude-A' -Lines @('harness:claude', 'taska:@profile')
+            $projb = New-CtxClaudeProject -Name 'claude-B' -Lines @('harness:claude', 'taskb:@profile')
+
+            $null = Invoke-CtxCaptured { ctx load (Join-Path $proja '.ctx') }
+            $snap1 = $Script:CtxClaudeSnapshot
+            $null = Invoke-CtxCaptured { ctx load (Join-Path $projb '.ctx') }
+            $snap2 = $Script:CtxClaudeSnapshot
+            $null = Invoke-CtxCaptured { ctx load (Join-Path $proja '.ctx') }
+            $snap3 = $Script:CtxClaudeSnapshot
+
+            $snap1 | Should -Not -BeNullOrEmpty
+            $snap2 | Should -Not -BeNullOrEmpty
+            $snap3 | Should -Not -BeNullOrEmpty
+            ($snap1 -ceq $snap2) | Should -BeFalse
+            ($snap2 -ceq $snap3) | Should -BeFalse
+            ($snap1 -ceq $snap3) | Should -BeFalse
+            Test-Path -LiteralPath $snap1 -PathType Container | Should -BeTrue
+            Test-Path -LiteralPath $snap3 -PathType Container | Should -BeTrue
+            [System.IO.File]::ReadAllText((Join-Path $snap2 'CLAUDE.md')) | Should -Match 'task B marker bytes'
+            foreach ($s in @($snap1, $snap3)) {
+                [System.IO.File]::ReadAllText((Join-Path $s 'CLAUDE.md')) | Should -Not -Match 'task B marker bytes'
+                Test-Path -LiteralPath (Join-Path $s '.claude/skills/skill-b') | Should -BeFalse
+                Test-Path -LiteralPath (Join-Path $s '.claude/skills/skill-a') | Should -BeTrue
+            }
+        }
+
+        It 'Issue22: guidance lists version, selection, skills, snapshot and one start command' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxTestCanonicalSkill -Profile 'review' -Skill 'lint'
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $proj = New-CtxClaudeProject -Name 'claude-guidance' -Lines @('harness:claude', 'review:@profile')
+            Set-Location $proj
+
+            $out = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+            $snap = $Script:CtxClaudeSnapshot
+
+            $out | Should -Match 'ctx: harness claude \(Claude Code 2\.1\.292\)'
+            $out | Should -Match ('ctx: selected 1 review ' + [regex]::Escape((Join-Path $env:AI_CTX_PROFILES_CONFIG_ROOT 'profiles/review')))
+            $out | Should -Match 'ctx: skill lint from review'
+            $out | Should -Match ('ctx: snapshot ' + [regex]::Escape($snap))
+            $out | Should -Match 'ctx: ambient: Claude also loads user, ancestor, repository, managed and built-in sources\. ctx does not filter them\.'
+            $out | Should -Match 'ctx: ambient: these sources depend on the directory where you start claude\.'
+            $out | Should -Match 'ctx: effective context: unknown\. ctx lists only the selected inputs\.'
+            $out | Should -Match 'ctx: memory: ctx-settings\.json sets autoMemoryEnabled false\. This effect is documented, not verified\.'
+            $out | Should -Match 'ctx: start a NEW Claude session in your work directory \(an open session does not change\):'
+            $out | Should -Not -Match '--setting-sources'
+            @($out -split "`n" | Where-Object { $_ -like '$ctxClaudeMdPrev*' }).Count | Should -Be 1
+            (Test-Path Env:\CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD) | Should -BeFalse
+        }
+
+        It 'Issue22: the printed command quotes an exotic path and restores or removes the variable' {
+            $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
+            New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
+            $proj = New-CtxClaudeProject -Name 'claude-quote' -Lines @('harness:claude', 'review:@profile')
+            Set-Location $proj
+            $argsLog = Join-Path $Script:TestTmp 'launch-args.log'
+            $env:CTX_CLAUDE_ARGS = $argsLog
+            try {
+                $null = Invoke-CtxCaptured { ctx load (Join-Path $proj '.ctx') }
+                # Repair the recorded paths to a path with a space, a quote and
+                # non-ASCII text, then print the guidance line for it.
+                $exotic = Join-Path $Script:TestTmp "we ird'cafe-unicode"
+                New-Item -ItemType Directory -Path $exotic -Force | Out-Null
+                Copy-Item -LiteralPath (Join-Path $Script:CtxClaudeSnapshot 'CLAUDE.md') -Destination (Join-Path $exotic 'CLAUDE.md')
+                $Script:CtxClaudeSnapshot = $exotic
+                $out = Invoke-CtxCaptured { Write-CtxClaudeGuidance }
+                $line = @($out -split "`n" | Where-Object { $_ -like '$ctxClaudeMdPrev*' })
+                $line.Count | Should -Be 1
+                $line[0] | Should -Match "''"
+                $line[0] | Should -Match ([regex]::Escape($exotic.Replace("'", "''")))
+
+                $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '0'
+                Invoke-Expression ($line[0]) | Out-Null
+                $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD | Should -Be '0'
+
+                Remove-Item Env:\CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD -ErrorAction SilentlyContinue
+                Invoke-Expression ($line[0]) | Out-Null
+                (Test-Path Env:\CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD) | Should -BeFalse
+            } finally {
+                Remove-Item Env:\CTX_CLAUDE_ARGS -ErrorAction SilentlyContinue
+                Remove-Item Env:\CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD -ErrorAction SilentlyContinue
+            }
         }
     }
 }
