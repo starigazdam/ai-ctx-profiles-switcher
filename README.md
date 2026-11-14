@@ -346,16 +346,17 @@ or any Claude setting file, and it does not start Claude. `ctx` builds a private
 snapshot directory (`ctx-claude.*` in the temp directory, mode `0700` on POSIX)
 that holds:
 
-- `CLAUDE.md`: each selected profile in `.ctx` order, with the marker line
-  `<!-- ctx profile <n> <label> -->` and that profile's exact `AGENTS.md` bytes
-  (a leading BOM is dropped, a missing final newline is added);
+- `CLAUDE.md`: one section per selected profile, in `.ctx` order. Each section
+  starts with the marker line `<!-- ctx profile <n> <label> -->`, followed by
+  that profile's exact `AGENTS.md` bytes. A leading BOM is dropped, and a
+  missing final newline is added;
 - `.claude/skills/<name>/`: a copy of each selected `.agents/skills/<name>/`
   that has a regular `SKILL.md`, with its supporting files;
 - `ctx-settings.json`: exactly `{"autoMemoryEnabled": false}`.
 
 It prints the client version, the selection, the copied skills, the snapshot
-path and exactly one start command — start it in the directory where the work
-is (the command has no `cd`):
+path and one start command. Start the command in the directory where the work
+is; it has no `cd`:
 
 Bash / zsh:
 
@@ -370,9 +371,9 @@ $ctxClaudeMdPrev = $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD; $env:CLAUD
 ```
 
 Each form sets `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` for that one
-command only (PowerShell restores the earlier value, or removes the variable
-when it was not set); `ctx` itself never exports it. The variable is what makes
-Claude Code read `CLAUDE.md` from an added directory.
+command only. PowerShell restores the earlier value, or removes the variable
+when it was not set. `ctx` never exports the variable. The variable is what
+makes Claude Code read `CLAUDE.md` from an added directory.
 
 Limits this design accepts:
 
@@ -393,9 +394,9 @@ Limits this design accepts:
   the snapshot this shell activated.
 
 `ctx current` prints the harness and the snapshot path. `ctx clear` and
-`ctx clear --all` remove the Claude record from the shell, print the retained
-snapshot path and leave the snapshot on disk; with a Claude record neither
-command calls the .NET engine. `ctx check` is read-only and prints
+`ctx clear --all` remove the Claude record from the shell. They print the
+retained snapshot path and leave the snapshot on disk. Neither command calls
+the .NET engine with a Claude record. `ctx check` is read-only and prints
 `CHECK PASS harness:claude`, `CHECK FAIL harness:claude stale <path>`,
 `CHECK FAIL harness:claude missing`, or `CHECK SKIP` for the Copilot-only
 checks. An edit in the same directory does not rebuild the snapshot: run
