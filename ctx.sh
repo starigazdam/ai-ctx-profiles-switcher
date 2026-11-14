@@ -1978,65 +1978,90 @@ _ctx_claude_error() {
 _ctx_claude_run() {
     # $1: seconds limit; remaining args: the client invocation. Only --version
     # and --help are ever passed, so no session and no model call happen (D7).
-    # The probe writes its output to a private file and runs in its own process
-    # group (`setsid` when it exists), so neither a hung client nor a wrapper
-    # that leaves an inheriting descendant behind can hold the caller's capture
-    # pipe open past the deadline (round 2, D1). At the deadline the whole
-    # group is stopped: TERM, a short wait, then KILL. The file is read only
-    # after the process is reaped, and the terminated status is non-zero, which
-    # the caller reports as client-failed / client-unsupported.
+    # A supervisor reports its own PID, which is the session and group id when
+    # a group tool is used, and writes the client status after the client ends.
+    # The caller waits on the supervisor, so a launcher that forks cannot hide
+    # the client (round 4, F1). Output goes to a private file, so a descendant
+    # that inherits stdout cannot hold the caller's capture pipe. A watchdog
+    # stops the group at the deadline: TERM, a short wait, then KILL.
     local limit="$1"; shift
-    local out_file pid waited=0 rc grouped=0 group_kind=none
+    local out_file pid_file st_file sup killer egroup rc grouped=0 st
     out_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || return 1
-    if command -v setsid >/dev/null 2>&1; then
-        group_kind=setsid
+    pid_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || {
+        rm -f -- "$out_file"
+        return 1
+    }
+    st_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || {
+        rm -f -- "$out_file" "$pid_file"
+        return 1
+    }
+    if command -v setsid >/dev/null 2>&1 && setsid -w sh -c 'exit 0' >/dev/null 2>&1; then
+        grouped=1
+        setsid -w sh -c 'pf=$1; sf=$2; shift 2
+            printf "%s" "$$" > "$pf"
+            "$@" &
+            c=$!
+            trap "kill -TERM $c 2>/dev/null" TERM
+            wait "$c"
+            st=$?
+            printf "%s" "$st" > "$sf"' sh "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
     elif command -v perl >/dev/null 2>&1; then
-        # macOS has no setsid; perl ships with it and starts the same group.
-        group_kind=perl
-    fi
-    if [ "$group_kind" = setsid ]; then
+        # macOS has no usable setsid; perl starts a real group and reaps it.
         grouped=1
-        setsid "$@" >"$out_file" 2>&1 &
-    elif [ "$group_kind" = perl ]; then
-        grouped=1
-        perl -e 'setpgrp(0,0); exec @ARGV or exit 127;' -- "$@" >"$out_file" 2>&1 &
+        perl -e 'my ($pf,$sf)=@ARGV[0,1]; splice(@ARGV,0,2);
+                 my $pid=fork(); exit 127 unless defined $pid;
+                 if ($pid==0) { setpgrp(0,0); open(my $f,">",$pf) or exit 1;
+                                print $f "$$"; close $f; exec @ARGV; exit 127; }
+                 waitpid($pid,0); my $st=$?>>8;
+                 open(my $s,">",$sf) or exit 1; print $s $st; close $s; exit $st;' \
+            "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
     else
-        # No group tool: only the direct child can be stopped. The private file
-        # still bounds collection, so the caller never blocks past the deadline.
-        "$@" >"$out_file" 2>&1 &
+        # No group tool: the supervisor stops its own client on TERM, so the
+        # direct client is still bounded. The private file bounds collection.
+        sh -c 'pf=$1; sf=$2; shift 2
+            printf "%s" "$$" > "$pf"
+            "$@" &
+            c=$!
+            trap "kill -TERM $c 2>/dev/null" TERM
+            wait "$c"
+            st=$?
+            printf "%s" "$st" > "$sf"' sh "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
     fi
-    pid=$!
-    while kill -0 "$pid" 2>/dev/null; do
-        if [ "$waited" -ge "$limit" ]; then
-            if [ "$grouped" -eq 1 ]; then
-                kill -TERM -- "-$pid" 2>/dev/null
-            else
-                kill -TERM "$pid" 2>/dev/null
-            fi
+    sup=$!
+    (
+        sleep "$limit"
+        egroup="$(cat "$pid_file" 2>/dev/null)"
+        [ -n "$egroup" ] || exit 0
+        if [ "$grouped" -eq 1 ]; then
+            kill -TERM -- "-$egroup" 2>/dev/null
             sleep 1
-            if [ "$grouped" -eq 1 ]; then
-                kill -KILL -- "-$pid" 2>/dev/null
-            else
-                kill -KILL "$pid" 2>/dev/null
-            fi
-            wait "$pid" 2>/dev/null
-            cat -- "$out_file" 2>/dev/null
-            rm -f -- "$out_file"
-            return 124
+            kill -KILL -- "-$egroup" 2>/dev/null
+        else
+            kill -TERM "$egroup" 2>/dev/null
+            sleep 1
+            kill -KILL "$egroup" 2>/dev/null
         fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-    wait "$pid"
+    ) &
+    killer=$!
+    wait "$sup"
     rc=$?
+    kill "$killer" 2>/dev/null
+    # The client answered, but a wrapper may have left a descendant behind.
+    # The probe is finished, so the group goes now (round 3, F1).
     if [ "$grouped" -eq 1 ]; then
-        # The client answered, but a wrapper may have left a descendant behind.
-        # The probe is finished, so the whole group goes now (round 3, F1).
-        kill -TERM -- "-$pid" 2>/dev/null
-        kill -KILL -- "-$pid" 2>/dev/null
+        egroup="$(cat "$pid_file" 2>/dev/null)"
+        if [ -n "$egroup" ]; then
+            kill -TERM -- "-$egroup" 2>/dev/null
+            kill -KILL -- "-$egroup" 2>/dev/null
+        fi
     fi
+    st="$(cat "$st_file" 2>/dev/null)"
+    case "$st" in
+        ''|*[!0-9]*) : ;;
+        *) rc="$st" ;;
+    esac
     cat -- "$out_file" 2>/dev/null
-    rm -f -- "$out_file"
+    rm -f -- "$out_file" "$pid_file" "$st_file"
     return "$rc"
 }
 
@@ -2166,9 +2191,10 @@ _ctx_claude_collect_skills() {
         # The listing that is consumed carries its own status record, so a
         # partial selection never looks like a complete one (round 2, D4 and
         # round 3, F4).
-        local list_st=1
+        local list_st=1 sort_st=1
         while IFS= read -r -d '' entry; do
             case "$entry" in
+                $'~~\t'*) sort_st="${entry#*$'\t'}"; continue ;;
                 $'~\t'*) list_st="${entry#*$'\t'}"; continue ;;
             esac
             [ -n "$entry" ] || continue
@@ -2206,7 +2232,7 @@ _ctx_claude_collect_skills() {
             _ctx_claude_pending_skill_labels+=("$name")
             _ctx_claude_pending_skill_sources+=("$entry")
         done < <({ find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted; printf '~\t%s\0' "${PIPESTATUS[0]}"; })
-        if [ "$list_st" -ne 0 ]; then
+        if [ "$list_st" -ne 0 ] || [ "$sort_st" -ne 0 ]; then
             _ctx_claude_error "snapshot-failed $root"
             return 1
         fi
@@ -2426,7 +2452,11 @@ _ctx_claude_expected_skills() {
             printf '!\t%s\n' "$root"
             continue
         fi
+        local sort_st=1
         while IFS= read -r -d '' entry; do
+            case "$entry" in
+                $'~~\t'*) sort_st="${entry#*$'\t'}"; continue ;;
+            esac
             [ -n "$entry" ] || continue
             if [ -L "$entry" ]; then
                 printf '!\t%s\n' "$entry"
@@ -2436,18 +2466,25 @@ _ctx_claude_expected_skills() {
             [ -f "$entry/SKILL.md" ] && [ ! -L "$entry/SKILL.md" ] || continue
             printf '%s\t%s\n' "$(basename "$entry")" "$entry"
         done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
+        if [ "$sort_st" -ne 0 ]; then
+            printf '!\t%s\n' "$root"
+        fi
     done
 }
 
 _ctx_claude_nul_sorted() {
-    # Sorts a NUL-delimited stream bytewise. `sort -z` is not on every platform;
-    # without it the stream passes through unchanged, so an entry is never lost
-    # because the sort is unavailable (only the listing order differs).
+    # Sorts a NUL-delimited stream bytewise and appends its own status record,
+    # so a consumer can see a failed or truncated sort (round 4, F2). `sort -z`
+    # is not on every platform; without it the stream passes through unchanged.
+    local st
     if printf 'b\0a\0' | LC_ALL=C sort -z >/dev/null 2>&1; then
         LC_ALL=C sort -z
+        st=$?
     else
         cat
+        st=$?
     fi
+    printf '~~\t%s\0' "$st"
 }
 
 _ctx_claude_tree_entries() {
@@ -2501,7 +2538,7 @@ _ctx_claude_tree_diff() {
     # difference and never a pass (D4). A link or special entry on either side
     # is a difference and is never followed. Read-only: no temporary file.
     (
-        local src="$1" dst="$2" a b type rel root
+        local src="$1" dst="$2" a b type rel root seen_term=0
         # Validate both root entries first: find does not descend a symlinked
         # root, so two linked roots would read as two empty trees (round 3, F2).
         for root in "$src" "$dst"; do
@@ -2532,6 +2569,16 @@ _ctx_claude_tree_diff() {
                         exit 1
                     fi
                     ;;
+                '~~')
+                    # The terminal record of the sorting stage: a failed or
+                    # truncated sort is a difference, never an empty tree
+                    # (round 4, F2).
+                    if [ "${a#*$'\t'}" != 0 ]; then
+                        printf '%s\n' "$dst"
+                        exit 1
+                    fi
+                    seen_term=1
+                    ;;
                 *)
                     # A matching link or special entry is still a difference:
                     # the snapshot must hold real files only (round 3, F3).
@@ -2544,8 +2591,13 @@ _ctx_claude_tree_diff() {
             _ctx_claude_tree_report "$dst" "$b"
             exit 1
         fi
+        if [ "$seen_term" -eq 0 ]; then
+            printf '%s\n' "$dst"
+            exit 1
+        fi
         # The inventories are equal: compare the bytes of every regular file.
         exec 8<&-
+        seen_term=0
         exec 8< <(_ctx_claude_tree_entries "$src")
         while IFS= read -r -d '' a <&8; do
             type="${a%%$'\t'*}"
@@ -2558,12 +2610,18 @@ _ctx_claude_tree_diff() {
                 [ "$rel" = 0 ] || { printf '%s\n' "$dst"; exit 1; }
                 continue
             fi
+            if [ "$type" = '~~' ]; then
+                [ "$rel" = 0 ] || { printf '%s\n' "$dst"; exit 1; }
+                seen_term=1
+                continue
+            fi
             [ "$type" = 'f' ] || continue
             if ! cmp -s -- "$src/$rel" "$dst/$rel"; then
                 printf '%s\n' "$dst/$rel"
                 exit 1
             fi
         done
+        [ "$seen_term" -eq 1 ] || { printf '%s\n' "$dst"; exit 1; }
         exit 0
     )
 }
@@ -2634,13 +2692,21 @@ _ctx_claude_check() {
                 printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
                 failures=$((failures + 1))
             else
+                local sort_st=1
                 while IFS= read -r -d '' entry; do
+                    case "$entry" in
+                        $'~~\t'*) sort_st="${entry#*$'\t'}"; continue ;;
+                    esac
                     [ -n "$entry" ] || continue
                     if ! _ctx_in_list "$(basename "$entry")" "${expected_names[@]}"; then
                         printf 'CHECK FAIL harness:claude stale %s\n' "$entry"
                         failures=$((failures + 1))
                     fi
                 done < <(find "$skills_root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
+                if [ "$sort_st" -ne 0 ]; then
+                    printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
+                    failures=$((failures + 1))
+                fi
             fi
         fi
     fi

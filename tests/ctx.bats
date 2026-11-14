@@ -4724,6 +4724,7 @@ _claude_load() {
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
     before_record="$(_claude_record_state)"
+    state_before="$(_claude_state "$snap_before")"
     before_snaps="$(_claude_snapshots)"
     _make_canonical_profile arch $'# arch\n'
     # A client that never answers --version, on a PATH without `timeout` or
@@ -4781,6 +4782,7 @@ EOF
         sleep 0.2
     done
     [ "$alive" -eq 0 ]
+    [ "$state_before" = "$(_claude_state "$snap_before")" ]
 }
 
 @test "Claude22: a wrapper that exits before its descendant cannot leave it behind" {
@@ -5546,6 +5548,7 @@ _claude_no_engine_calls() {
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
     before_record="$(_claude_record_state)"
+    state_before="$(_claude_state "$snap_before")"
     before_snaps="$(_claude_snapshots)"
     _make_canonical_profile review $'# review\n'
     _make_canonical_skill review lint
@@ -5563,6 +5566,7 @@ _claude_no_engine_calls() {
     [ "$before_record" = "$(_claude_record_state)" ]
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
     [ "$AI_CTX_PROFILES" = base ]
+    [ "$state_before" = "$(_claude_state "$snap_before")" ]
 }
 
 @test "Claude22: the snapshot limit check fails closed on an unreadable subtree" {

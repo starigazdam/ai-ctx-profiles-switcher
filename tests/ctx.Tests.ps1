@@ -4670,6 +4670,23 @@ exit /b 1
             }
             return (($lines | Sort-Object) -join "`n")
         }
+        function Script:Get-CtxClaudeRecordState {
+            # Every published record field, in order: a failed activation must
+            # leave all of them unchanged, not only the few a case names
+            # (round 4, F2).
+            return (@(
+                "active=$($Script:CtxClaudeActive)"
+                "ctx_file=$($Script:CtxClaudeCtxFile)"
+                "ctx_sha=$($Script:CtxClaudeCtxSha)"
+                "labels=$(@($Script:CtxClaudeLabels) -join ',')"
+                "dirs=$(@($Script:CtxClaudeDirs) -join ',')"
+                "snapshot=$($Script:CtxClaudeSnapshot)"
+                "version=$($Script:CtxClaudeVersion)"
+                "skill_names=$(@($Script:CtxClaudeSkillNames) -join ',')"
+                "skill_labels=$(@($Script:CtxClaudeSkillLabels) -join ',')"
+                "skill_sources=$(@($Script:CtxClaudeSkillSources) -join ',')"
+            ) -join "`n")
+        }
         }
 
         It 'Issue22: harness:claude is a reserved directive and activates Claude' {
@@ -5118,6 +5135,7 @@ exit /b 1
             $Script:CtxClaudeActive | Should -BeTrue
             $snapBefore = $Script:CtxClaudeSnapshot
             $stateBefore = Get-CtxClaudeState -Path $snapBefore
+            $recordBefore = Get-CtxClaudeRecordState
             $null = New-CtxTestCanonicalProfile -Name 'arch' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# arch`n"))
             New-CtxClaudeStub -Dir (Join-Path $Script:TestTmp 'claude-bin') -HangVersion
             Add-CtxClaudeStubToPath -Dir (Join-Path $Script:TestTmp 'claude-bin')
@@ -5159,6 +5177,7 @@ exit /b 1
                 Start-Sleep -Milliseconds 200
             }
             $gone | Should -BeTrue
+            (Get-CtxClaudeRecordState) | Should -Be $recordBefore
         }
         It 'Issue22: a reset failure prints reset-failed, removes the snapshot and publishes no record' {
             $null = New-CtxTestProfile -Name 'review' -Skill 'review-skill'
@@ -5784,6 +5803,7 @@ exit /b 1
             $Script:CtxClaudeActive | Should -BeTrue
             $snapBefore = $Script:CtxClaudeSnapshot
             $stateBefore = Get-CtxClaudeState -Path $snapBefore
+            $recordBefore = Get-CtxClaudeRecordState
             $null = New-CtxTestCanonicalProfile -Name 'review' -AgentsBytes ([System.Text.Encoding]::UTF8.GetBytes("# review`n"))
             New-CtxTestCanonicalSkill -Profile 'review' -Skill 'lint'
             $proj = New-CtxClaudeProject -Name 'claude-unreadable-root' -Lines @('harness:claude', 'review:@profile')
@@ -5802,6 +5822,7 @@ exit /b 1
             $Script:CtxClaudeSnapshot | Should -Be $snapBefore
             $env:AI_CTX_PROFILES | Should -Be 'base'
             (Get-CtxClaudeState -Path $snapBefore) | Should -Be $stateBefore
+            (Get-CtxClaudeRecordState) | Should -Be $recordBefore
         }
 
         It 'Issue22: ctx check reports a changed ctx-settings.json as stale harness:claude' {
