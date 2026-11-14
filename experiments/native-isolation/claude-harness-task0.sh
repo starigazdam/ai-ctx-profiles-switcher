@@ -16,15 +16,18 @@
 #   0.2 the answer contains marker A (with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1);
 #       0.2n records the same run without the variable (no pass/fail)
 #   0.3 --settings <file> gives exit 0 and a successful result; 0.3n a missing
-#       settings file must not give a successful result
-#   0.4 no b-snap, no b-prof, no marker B and no marker P in any task-A run
+#       settings file gives a non-zero exit, no result event, and the client
+#       error "Settings file not found: <path>" on stderr
+#   0.4 no b-snap, no b-prof, no marker B and no marker P anywhere in the
+#       stdout or stderr of a task-A run. A leak stops the script at once.
 #
+# Each client call has a fixed 60-second limit.
 # Exit 0 = PASS; 1 = FAIL; 2 = BLOCKED (refused, setup failed, or other-task leak).
 set -uo pipefail
 
 [ "${CLAUDE_SIGNED_IN_PROBE:-0}" = 1 ] || { echo "BLOCKED set CLAUDE_SIGNED_IN_PROBE=1 (calls the model, uses the real login)"; exit 2; }
 CLAUDE_CMD="${CLAUDE_CMD:-claude}"
-LIMIT="${CLAUDE_CALL_LIMIT:-60}"
+LIMIT=60
 VAR=CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD
 
 # shellcheck disable=SC2086  # CLAUDE_CMD is a word-split command by design
@@ -59,18 +62,22 @@ PROMPT='List every line of your loaded instructions that starts with MARK_. Repl
 # Prints rc, ok (successful non-empty answer), the canary skills, and markers.
 run() {
     local usevar="$1"; shift
-    local out="$T/run.jsonl" rc
+    local out="$T/run.jsonl" err="$T/run.err" rc
     if [ "$usevar" = 1 ]; then
         # shellcheck disable=SC2086
-        (cd "$WS" && echo "$PROMPT" | env "$VAR=1" timeout "$LIMIT" $CLAUDE_CMD -p --output-format stream-json --verbose "$@" >"$out" 2>/dev/null)
+        (cd "$WS" && echo "$PROMPT" | env "$VAR=1" timeout "$LIMIT" $CLAUDE_CMD -p --output-format stream-json --verbose "$@" >"$out" 2>"$err")
     else
         # shellcheck disable=SC2086
-        (cd "$WS" && echo "$PROMPT" | env -u "$VAR" timeout "$LIMIT" $CLAUDE_CMD -p --output-format stream-json --verbose "$@" >"$out" 2>/dev/null)
+        (cd "$WS" && echo "$PROMPT" | env -u "$VAR" timeout "$LIMIT" $CLAUDE_CMD -p --output-format stream-json --verbose "$@" >"$out" 2>"$err")
     fi
     rc=$?
-    python3 - "$out" "$rc" "$MA" "$MB" "$MP" <<'EOF'
+    python3 - "$out" "$rc" "$MA" "$MB" "$MP" "$err" <<'EOF'
 import json, sys
-path, rc, ma, mb, mp = sys.argv[1:6]
+path, rc, ma, mb, mp, errpath = sys.argv[1:7]
+raw = open(path, encoding="utf-8", errors="replace").read()
+err = open(errpath, encoding="utf-8", errors="replace").read()
+# 0.4: scan every byte of stdout and stderr, not only the last events.
+leak = int(any(c in raw or c in err for c in ("b-snap", "b-prof", mb, mp)))
 init = res = None
 for line in open(path, encoding="utf-8", errors="replace"):
     try:
@@ -87,16 +94,19 @@ ans = res.get("result") if isinstance(res, dict) and isinstance(res.get("result"
 ok = int(rc == "0" and init is not None and res is not None and res.get("subtype") == "success"
          and res.get("is_error") is False and ans.strip() != "")
 marks = [n for n, m in (("A", ma), ("B", mb), ("P", mp)) if m in ans]
-print("rc=%s ok=%d skills=%s marks=%s" % (rc, ok, ",".join(canary) or "-", ",".join(marks) or "-"))
+setmiss = int("Settings file not found:" in err)
+print("rc=%s ok=%d result=%d skills=%s marks=%s leak=%d setmiss=%d" % (
+    rc, ok, int(res is not None), ",".join(canary) or "-", ",".join(marks) or "-", leak, setmiss))
 EOF
 }
 field() { local v=" $2"; v="${v#* "$1"=}"; printf '%s' "${v%% *}"; }
-fail=0; leak=0
+fail=0
 has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
-noleak() {  # noleak <label> <run output>: case 0.4 on every task-A run
-    local s m; s="$(field skills "$2")"; m="$(field marks "$2")"
-    if has "$s" b-snap || has "$s" b-prof || has "$m" B || has "$m" P; then
-        echo "BLOCKED other-task $1: $2"; leak=1
+noleak() {  # noleak <label> <run output>: case 0.4 on every task-A run; a leak stops at once
+    if [ "$(field leak "$2")" != 0 ]; then
+        echo "BLOCKED other-task $1: $2"
+        echo "RESULT: BLOCKED other-task. Stop and ask the owner before any further run."
+        exit 2
     fi
 }
 verdict() {  # verdict <label> <condition 0|1> <run output>
@@ -111,12 +121,13 @@ verdict "0.3 --settings file accepted" "$(field ok "$main")" "$main"
 
 novar="$(run 0 --add-dir "$SA" --settings "$SA/ctx-settings.json")"
 noleak "0.2n without variable" "$novar"
-echo "INFO 0.2n without $VAR: $novar"
+# The comparison run must be observable; its marker result is only recorded.
+verdict "0.2n comparison run observable" "$(field ok "$novar")" "$novar"
+echo "INFO 0.2n without $VAR, marks=$(field marks "$novar")"
 
 bad="$(run 1 --add-dir "$SA" --settings "$T/missing-settings.json")"
 noleak "0.3n missing settings file" "$bad"
-verdict "0.3n missing settings file rejected" "$([ "$(field ok "$bad")" = 0 ] && echo 1 || echo 0)" "$bad"
-
-if [ "$leak" = 1 ]; then echo "RESULT: BLOCKED other-task"; exit 2; fi
+verdict "0.3n missing settings file rejected" \
+    "$([ "$(field rc "$bad")" != 0 ] && [ "$(field result "$bad")" = 0 ] && [ "$(field setmiss "$bad")" = 1 ] && echo 1 || echo 0)" "$bad"
 if [ "$fail" = 0 ]; then echo "RESULT: PASS"; else echo "RESULT: FAIL"; fi
 exit "$fail"

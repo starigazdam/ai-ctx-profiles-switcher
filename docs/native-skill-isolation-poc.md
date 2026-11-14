@@ -245,26 +245,30 @@ CLAUDE_SIGNED_IN_PROBE=1 experiments/native-isolation/claude-harness-task0.sh
 The script builds two snapshots by hand in the D3 layout: task A and an
 earlier task B. It also builds a canonical task-B profile next to the task-A
 workspace. All fixtures are in one temp directory. The script writes nothing to
-`~/.claude`. Each fixture file has a random marker. The prompt asks the model
-to list each loaded instruction line that starts with `MARK_`.
+`~/.claude`. Each instruction file (`CLAUDE.md`, `AGENTS.md`) has a random
+marker. The prompt asks the model to list each loaded instruction line that
+starts with `MARK_`. Each client call has a fixed 60-second limit.
 
 | ID | Client | Version | Claim | Evidence | Command |
 |---|---|---|---|---|---|
 | T0.1 | Claude Code | 2.1.250, signed in | `--add-dir <snapshot>` lists the snapshot skill `a-snap` in the `init` event. | verified | `claude-harness-task0.sh` 0.1 |
-| T0.2 | Claude Code | 2.1.250, signed in | With `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, the answer contains the marker from the snapshot `CLAUDE.md`. Without the variable, the answer does not contain it. | verified | `claude-harness-task0.sh` 0.2, 0.2n |
-| T0.3 | Claude Code | 2.1.250, signed in | `--settings <file>` gives exit 0 and a successful answer. A missing settings file gives exit 1 and no successful answer, so the client reads the path. | verified | `claude-harness-task0.sh` 0.3, 0.3n |
-| T0.3m | Claude Code | 2.1.250 docs | `autoMemoryEnabled: false` disables auto-memory. The run does not show that the client reads the key or that no memory write occurs. | documented | none |
-| T0.4 | Claude Code | 2.1.250, signed in | No task-B skill and no task-B marker appear in a task-A run. Task B has a sibling canonical profile and an earlier snapshot in the same temp directory. | verified | `claude-harness-task0.sh` 0.4 |
+| T0.2 | Claude Code | 2.1.250, signed in | With `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, the answer contains the marker from the snapshot `CLAUDE.md`. In the comparison run without the variable, the answer did not contain it. | verified | `claude-harness-task0.sh` 0.2, 0.2n |
+| T0.3 | Claude Code | 2.1.250, signed in | `--settings <file>` gives exit 0 and a successful answer. A missing settings file gives exit 1, no result event and the error `Settings file not found: <path>`. Thus the client opens the path. | verified | `claude-harness-task0.sh` 0.3, 0.3n |
+| T0.3m | Claude Code | vendor docs ([memory](https://code.claude.com/docs/en/memory), cited in #22) | `autoMemoryEnabled: false` disables auto-memory. The run does not show that the client reads the key or that no memory write occurs. | documented | none |
+| T0.4 | Claude Code | 2.1.250, signed in | No task-B skill name and no task-B marker appear anywhere in the stdout or stderr of the three task-A runs. Task B has a sibling canonical profile and an earlier snapshot in the same temp directory. | verified | `claude-harness-task0.sh` 0.4 |
 
-Result: 4 `PASS` lines, `RESULT: PASS`, exit 0. No temp directory stayed after
+Result: 5 `PASS` lines, `RESULT: PASS`, exit 0. No temp directory stayed after
 the run, and `~/.claude/skills` did not exist. The run used a dedicated sandbox
 account with its own Claude login.
 
 An offline self-check used a fake client:
 
-- A leaked task-B skill gives `BLOCKED other-task` and exit 2.
+- A leaked task-B skill gives `BLOCKED other-task` and exit 2 after the first
+  call. The script makes no further call and tells the operator to ask the
+  owner.
 - A missing marker, an error result or an ignored settings file gives `FAIL`
   and exit 1.
+- An unrelated failure of the missing-settings call gives `FAIL` for 0.3n.
 - A client without `--add-dir` in its help gives `BLOCKED` and exit 2.
 - No opt-in gives `BLOCKED` and exit 2.
 
