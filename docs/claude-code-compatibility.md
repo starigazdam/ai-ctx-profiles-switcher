@@ -87,11 +87,11 @@ The offline PoC in [`experiments/claude-code-compat/README.md`](../experiments/c
 
 ## Skill isolation mechanisms (issue #83, 2026-11-13)
 
-Probed with the real Claude Code 2.1.292, not signed in, with no network (through `experiments/native-isolation/ro-run.sh`, which uses `unshare -rnm`). The stream-json `init` event lists the skills, and the result is then "Not logged in". Thus no model call happens. The results cover only the `init` list of a session that is not signed in. A signed-in session can differ. Commands and results: [`native-skill-isolation-poc.md`](native-skill-isolation-poc.md), script [`experiments/native-isolation/run-probes.sh`](../experiments/native-isolation/run-probes.sh).
+Probed with the real Claude Code 2.1.292, not signed in, with no network (through `experiments/native-isolation/ro-run.sh`, which uses `unshare -rnm`). The stream-json `init` event lists the skills, and the result is then "Not logged in". Thus no model call happens. A second run used Claude Code 2.1.250, signed in, through `experiments/native-isolation/claude-signed-in.sh`. That script calls the model. It found the same fixture skill names for eight of the checks, and each of those sessions returned a successful answer. Commands and results: [`native-skill-isolation-poc.md`](native-skill-isolation-poc.md), script [`experiments/native-isolation/run-probes.sh`](../experiments/native-isolation/run-probes.sh).
 
 | Mechanism | Evidence | Result | ctx assessment |
 |---|---|---|---|
-| `--setting-sources project` | verified | Removes `~/.claude/skills`. Keeps ancestor `.claude/skills` and `--add-dir` skills. | Usable to drop user skills. Not a full filter, because ancestor roots stay. Auth with the `user` source dropped is not verified (no signed-in session). |
+| `--setting-sources project` | verified | Removes `~/.claude/skills`. Keeps ancestor `.claude/skills` and `--add-dir` skills. | Usable to drop user skills. Not a full filter, because ancestor roots stay. A signed-in 2.1.250 session without the `user` source returned a successful answer. The #22 contract keeps the normal setting sources for production guidance. |
 | `--add-dir <dir>` | verified | Loads `<dir>/.claude/skills`. | Usable to attach a profile with no projection. `CLAUDE.md` from that directory needs `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` (documented only). |
 | `skillOverrides` | verified | `off` removes a skill from the list, also with `--setting-sources project`. With `name-only`, the skill stays in the list. Plugin skills are not affected. | Usable per session through `--settings` JSON. It needs no user settings file edit. |
 | `disableBundledSkills` | verified | The total drops (35 to 21 on this host). The fixture skills stay. | Optional. |
