@@ -27,12 +27,12 @@ Done on 2026-11-13: owner approval in #22, `RESULT: PASS` on Claude Code 2.1.250
 ## 3. Output, check, current, clear
 
 - [x] 3.1 Guidance and error lines per D6. Quoting tests for a space, a `'` and non-ASCII text in the snapshot path. A PowerShell test that the printed line restores an earlier value and removes an unset one.
-- [ ] 3.2 `ctx check` per D10. Cases: a changed `.ctx`, `AGENTS.md`, skill file or settings file, and a missing snapshot.
-- [ ] 3.3 `ctx current` shows the harness and the snapshot. `ctx clear` and `ctx clear --all` follow D5. The engine is not called with a Claude record.
-- [ ] 3.4 Switch tests: Copilot to Claude, Claude to Copilot, user-set Copilot variables kept.
+- [x] 3.2 `ctx check` per D10. Cases: a changed `.ctx`, `AGENTS.md`, skill file or settings file, and a missing snapshot.
+- [x] 3.3 `ctx current` shows the harness and the snapshot. `ctx clear` and `ctx clear --all` follow D5. The engine is not called with a Claude record.
+- [x] 3.4 Switch tests: Copilot to Claude, Claude to Copilot, user-set Copilot variables kept.
 
 ## 4. Docs and sync
 
-- [ ] 4.1 README: `harness:claude`, the printed command, ambient sources, the `@path` limit, the memory limit and snapshot retention.
-- [ ] 4.2 Run the full Bats and Pester suites, `bash -n ctx.sh`, the PowerShell parse check and `openspec validate --all --strict`.
+- [x] 4.1 README: `harness:claude`, the printed command, ambient sources, the `@path` limit, the memory limit and snapshot retention.
+- [x] 4.2 Run the full Bats and Pester suites, `bash -n ctx.sh`, the PowerShell parse check and `openspec validate --all --strict`.
 - [ ] 4.3 After the implementation merges, sync the specs and archive this change.

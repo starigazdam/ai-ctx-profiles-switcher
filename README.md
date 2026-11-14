@@ -255,6 +255,9 @@ security:./local-instructions
   synthetic `COPILOT_HOME` is created (see [How it
   works](#how-it-works) below) instead of the centralized default. See
   [Choosing a custom COPILOT_HOME location](#choosing-a-custom-copilot_home-location).
+- A `harness:claude` line switches the whole file to the Claude Code harness
+  instead of Copilot CLI. See [Claude Code harness](#claude-code-harness)
+  below, including its snapshot retention rule.
 
 #### Folder-local profiles roots (PowerShell only)
 
@@ -316,6 +319,87 @@ every selected entry is canonical (see
 [Canonical profiles](#canonical-profiles-agentsmd)). Leaving the directory tree
 (into a location with no `.ctx` file anywhere in its ancestry) automatically
 clears the context.
+
+### Claude Code harness
+
+A `.ctx` file can switch the selection from Copilot CLI to Claude Code with one
+reserved directive:
+
+```
+harness:claude
+review:@profile
+```
+
+- The key is case-insensitive and whitespace around the key and the value is
+  trimmed, but the value is exactly `claude` or `copilot`. Without the directive
+  (or with `harness:copilot`) the file behaves exactly as before this change.
+- `harness:claude` accepts only canonical profiles (a root `AGENTS.md`); a
+  legacy profile rejects the whole file and names it. `home:` is Copilot-only,
+  so `harness:claude` with a `home:` line is rejected.
+- A file with `harness:` must also select at least one profile, and a second
+  `harness:` line in any key case rejects the file.
+- Manual activation (`ctx <profile>...`) never selects Claude; use a `.ctx`
+  file with `ctx load` (or auto-load) instead.
+
+Loading such a file does not change `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`
+or any Claude setting file, and it does not start Claude. `ctx` builds a private
+snapshot directory (`ctx-claude.*` in the temp directory, mode `0700` on POSIX)
+that holds:
+
+- `CLAUDE.md`: each selected profile in `.ctx` order, with the marker line
+  `<!-- ctx profile <n> <label> -->` and that profile's exact `AGENTS.md` bytes
+  (a leading BOM is dropped, a missing final newline is added);
+- `.claude/skills/<name>/`: a copy of each selected `.agents/skills/<name>/`
+  that has a regular `SKILL.md`, with its supporting files;
+- `ctx-settings.json`: exactly `{"autoMemoryEnabled": false}`.
+
+It prints the client version, the selection, the copied skills, the snapshot
+path and exactly one start command — start it in the directory where the work
+is (the command has no `cd`):
+
+Bash / zsh:
+
+```sh
+CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir '<snapshot>' --settings '<snapshot>/ctx-settings.json'
+```
+
+PowerShell:
+
+```powershell
+$ctxClaudeMdPrev = $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD; $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = '1'; try { claude --add-dir '<snapshot>' --settings '<snapshot>\ctx-settings.json' } finally { $env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = $ctxClaudeMdPrev }
+```
+
+Each form sets `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` for that one
+command only (PowerShell restores the earlier value, or removes the variable
+when it was not set); `ctx` itself never exports it. The variable is what makes
+Claude Code read `CLAUDE.md` from an added directory.
+
+Limits this design accepts:
+
+- **Ambient sources still load.** Claude Code also loads user, ancestor,
+  repository, managed and built-in sources, depending on the directory where
+  you start it. `ctx` does not filter or detect them, and the effective context
+  is unknown: treat the selection as a set of inputs, not as a sandbox.
+- **`@path` imports are not resolved.** `AGENTS.md` bytes are copied as they
+  are, so an `@relative/path` import resolves from the snapshot, not from the
+  profile, and usually fails.
+- **Auto-memory is a documented setting only.** `ctx-settings.json` sets
+  `autoMemoryEnabled: false`; `ctx` does not verify that Claude Code honors it
+  and makes no claim that no memory file is written.
+- **Snapshots are kept, with no bound (D8).** `ctx` never deletes a published
+  snapshot, because a running Claude session may still use it and `ctx` cannot
+  know when it ends. Every activation creates a new `ctx-claude.*` directory;
+  remove old ones yourself. `ctx clear` and `ctx clear --all` print the path of
+  the snapshot this shell activated.
+
+`ctx current` prints the harness and the snapshot path. `ctx clear` and
+`ctx clear --all` remove the Claude record from the shell, print the retained
+snapshot path and leave the snapshot on disk; with a Claude record neither
+command calls the .NET engine. `ctx check` is read-only and prints
+`CHECK PASS harness:claude`, `CHECK FAIL harness:claude stale <path>`,
+`CHECK FAIL harness:claude missing`, or `CHECK SKIP` for the Copilot-only
+checks. An edit in the same directory does not rebuild the snapshot: run
+`ctx load` again after `ctx check` reports drift.
 
 ### Skill discovery
 

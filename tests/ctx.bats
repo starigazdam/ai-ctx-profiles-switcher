@@ -4701,3 +4701,293 @@ _claude_load() {
     expected="$(printf '%s\036' --add-dir "$snap" --settings "$snap/ctx-settings.json")"
     [ "$(cat "$TEST_TMP/launch-args.log")" = "$expected" ]
 }
+
+_claude_cmd() {
+    # Like `run`, but in the current shell so the Claude record survives.
+    status=0
+    output=""
+    "$@" >"$TEST_TMP/claude-cmd.out" 2>&1 && status=0 || status=$?
+    output="$(cat "$TEST_TMP/claude-cmd.out")"
+    return 0
+}
+
+_claude_tree_hash() {
+    # A stable hash of every file under $1, so a read-only claim is provable.
+    find "$1" -type f -exec sha256sum {} + 2>/dev/null | LC_ALL=C sort | sha256sum | cut -d' ' -f1
+}
+
+@test "Claude22: ctx check passes with a matching Claude record and changes nothing" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    _claude_client
+    _claude_snapshot_root
+    local proj snap before_ctx before_snap
+    proj="$(_claude_project claude-checkpass $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    before_ctx="$(sha256sum "$proj/.ctx")"
+    before_snap="$(_claude_tree_hash "$snap")"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx check
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK PASS harness:claude"* ]]
+    [[ "$output" != *"CHECK FAIL"* ]]
+    [[ "$output" != *".NET 10 engine"* ]]
+    [ "$before_ctx" = "$(sha256sum "$proj/.ctx")" ]
+    [ "$before_snap" = "$(_claude_tree_hash "$snap")" ]
+}
+
+@test "Claude22: ctx check reports a changed .ctx selection as stale harness:claude" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_profile arch $'# arch\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-checkctx $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    printf 'harness:claude\narch:@profile\n' > "$proj/.ctx"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude stale $proj/.ctx"* ]]
+}
+
+@test "Claude22: ctx check reports a changed AGENTS.md as stale harness:claude" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap before
+    proj="$(_claude_project claude-checkagents $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    before="$(_claude_tree_hash "$snap")"
+    printf '# review edited\n' >> "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude stale $snap/CLAUDE.md"* ]]
+    [ "$before" = "$(_claude_tree_hash "$snap")" ]
+}
+
+@test "Claude22: ctx check reports a changed skill file as stale harness:claude" {
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref"
+    printf 'asset\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref/data.txt"
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-checkskill $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    [ -f "$snap/.claude/skills/lint/ref/data.txt" ]
+    printf 'asset edited\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref/data.txt"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude stale $snap/.claude/skills/lint/ref/data.txt"* ]]
+}
+
+@test "Claude22: ctx check reports a changed ctx-settings.json as stale harness:claude" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-checksettings $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    printf '{"autoMemoryEnabled": true}\n' > "$snap/ctx-settings.json"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude stale ctx-settings.json"* ]]
+}
+
+@test "Claude22: ctx check reports a missing snapshot as CHECK FAIL harness:claude missing" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-checkmissing $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    rm -rf "$snap"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude missing"* ]]
+}
+
+@test "Claude22: a Claude record makes ctx check skip the Copilot checks" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-checkskip $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx check
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^CHECK SKIP$')" -eq 1 ]
+    [[ "$output" != *"CHECK PASS AI_CTX_PROFILES"* ]]
+    [[ "$output" != *"CHECK PASS COPILOT_HOME"* ]]
+    [[ "$output" != *"CHECK UNKNOWN COPILOT_MODE"* ]]
+}
+
+@test "Claude22: ctx check without a Claude record reports CHECK UNKNOWN, not Copilot drift" {
+    _make_canonical_profile review $'# review\n'
+    local proj
+    proj="$(_claude_project claude-checknorecord $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+
+    _claude_cmd ctx check
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CHECK UNKNOWN harness:claude: no local activation record"* ]]
+    [[ "$output" != *"CHECK FAIL"* ]]
+}
+
+@test "Claude22: ctx current shows the harness and the snapshot without the engine" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-current $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx current
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx: harness claude (Claude Code 2.1.292)"* ]]
+    [[ "$output" == *"ctx: snapshot $snap"* ]]
+    [[ "$output" != *".NET 10 engine"* ]]
+}
+
+@test "Claude22: ctx clear removes the Claude record, prints and keeps the snapshot" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-clear $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx clear
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx: retained claude snapshot (not deleted): $snap"* ]]
+    [[ "$output" != *".NET 10 engine"* ]]
+    [ -d "$snap" ]
+    [ -f "$snap/CLAUDE.md" ]
+    [ "$_ctx_claude_active" -eq 0 ]
+    [ -z "$_ctx_claude_snapshot" ]
+    [ -z "${AI_CTX_PROFILES:-}" ]
+}
+
+@test "Claude22: ctx clear --all removes the Claude record, prints and keeps the snapshot" {
+    _make_canonical_profile review $'# review\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj snap
+    proj="$(_claude_project claude-clearall $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    unset CTX_ENGINE_DLL
+
+    _claude_cmd ctx clear --all
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx: retained claude snapshot (not deleted): $snap"* ]]
+    [ -d "$snap" ]
+    [ -f "$snap/CLAUDE.md" ]
+    [ "$_ctx_claude_active" -eq 0 ]
+    [ -z "$_ctx_claude_snapshot" ]
+}
+
+@test "Claude22: a Copilot activation switches to Claude and keeps user Copilot variables" {
+    _make_profile review review-skill
+    _make_canonical_profile arch $'# arch\n'
+    ctx review >/dev/null
+    local copilot_home="$COPILOT_HOME"
+    export COPILOT_SKILLS_DIRS=/user/own/skills
+    _claude_client
+    _claude_snapshot_root
+    local proj
+    proj="$(_claude_project claude-switch $'harness:claude\narch:@profile\n')"
+
+    _claude_load "$proj/.ctx"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ctx: harness claude"* ]]
+    [ "$_ctx_claude_active" -eq 1 ]
+    [ "$AI_CTX_PROFILES" = arch ]
+    [ "$COPILOT_SKILLS_DIRS" = /user/own/skills ]
+    [ -z "$_ctx_active_mode" ]
+    [ ! -e "$copilot_home" ] || [ -d "$copilot_home" ]
+}
+
+@test "Claude22: a Claude activation switches to Copilot and keeps the snapshot" {
+    _make_canonical_profile arch $'# arch\n'
+    _make_profile review review-skill
+    _claude_client
+    _claude_snapshot_root
+    local projclaude projcopilot snap
+    projclaude="$(_claude_project claude-switchfrom $'harness:claude\narch:@profile\n')"
+    projcopilot="$(_claude_project claude-switchto $'review:@profile\n')"
+    cd "$projclaude"
+    _claude_load "$projclaude/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    [ "$_ctx_claude_active" -eq 1 ]
+
+    cd "$projcopilot"
+    _claude_load "$projcopilot/.ctx"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[AI Context]"* ]]
+    [ "$_ctx_claude_active" -eq 0 ]
+    [ -z "$_ctx_claude_snapshot" ]
+    [ -d "$snap" ]
+    [ -f "$snap/CLAUDE.md" ]
+    [ "$AI_CTX_PROFILES" = review ]
+    [ -n "$COPILOT_HOME" ]
+    [ -d "$COPILOT_HOME" ]
+}

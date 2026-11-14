@@ -220,6 +220,13 @@ function Show-CtxCurrent {
     # hard failure. The recorded mode is passed only when the session-local
     # activation record still matches; the mode is never inferred from
     # AI_CTX_PROFILES_COPILOT_MODE.
+    if ($Script:CtxClaudeActive) {
+        # Design D5/D4: the Claude record is shell state, so `current` reports
+        # it in the shell and never calls the engine.
+        Write-Host "ctx: harness claude (Claude Code $($Script:CtxClaudeVersion))"
+        Write-Host "ctx: snapshot $($Script:CtxClaudeSnapshot)"
+        return
+    }
     $engine = $env:CTX_ENGINE_DLL
     if ([string]::IsNullOrWhiteSpace($engine) -or -not (Test-Path -LiteralPath $engine -PathType Leaf)) {
         $reported = if ([string]::IsNullOrWhiteSpace($engine)) { '<unset>' } else { $engine }
@@ -242,6 +249,18 @@ function Clear-CtxContext {
 
     $prevContext = $env:AI_CTX_PROFILES
     $cleanupFailed = $false
+    # A Claude record is shell state with no Copilot activation behind it, so
+    # clear handles it here and never calls the engine (design D5). The
+    # published snapshot is kept and reported (D8); no Copilot variable is
+    # touched beyond what a prior ctx activation set.
+    $claudeSnapshot = $null
+    $claudeClear = $false
+    if ($Script:CtxClaudeActive) {
+        $claudeClear = $true
+        $claudeSnapshot = $Script:CtxClaudeSnapshot
+        Reset-CtxClaudeRecord
+        Remove-Item Env:\AI_CTX_PROFILES -ErrorAction SilentlyContinue
+    }
     # Use the recorded mode of the matching activation, NOT the live selector
     # (which may be stale). With no matching record, home ownership is
     # unknown: ctx must never guess a mode from the selector or from the home
@@ -259,8 +278,9 @@ function Clear-CtxContext {
     }
     # The non---all environment mutations and warning decisions are delegated
     # to the .NET engine via the line protocol. On engine failure nothing is
-    # mutated (fail closed) and clear returns $false.
-    if (-not (Invoke-CtxClearEngine -Mode $clearMode)) {
+    # mutated (fail closed) and clear returns $false. A Claude record owns no
+    # Copilot state, so that clear never calls the engine (design D5).
+    if (-not $claudeClear -and -not (Invoke-CtxClearEngine -Mode $clearMode)) {
         return $false
     }
     # No matching activation record: report a present COPILOT_HOME as unknown
@@ -383,6 +403,9 @@ function Clear-CtxContext {
     Reset-CtxActiveRecord
     $Script:CtxAutoLoadDir = $null
     $Script:CtxAutoLoadHomeOverride = $null
+    if ($claudeClear -and $claudeSnapshot) {
+        Write-CtxRetainedClaudeSnapshot -Path $claudeSnapshot
+    }
     Write-Host "AI context cleared."
     return (-not $cleanupFailed)
 }
@@ -1041,6 +1064,13 @@ function Write-CtxRetainedEphemeralHome {
     # $Path: the retained ephemeral home path (never deleted by ctx).
     param([string]$Path)
     Write-Host "ctx: retained ephemeral COPILOT_HOME (not deleted): $Path — may contain Copilot auth/session/cache data; moving any needed data out is the user's or workflow's responsibility; it consumes disk until the directory is manually removed"
+}
+
+function Write-CtxRetainedClaudeSnapshot {
+    # $Path: the retained Claude snapshot path. ctx never deletes a published
+    # snapshot (design D8): a running Claude session can still use it.
+    param([string]$Path)
+    Write-Host "ctx: retained claude snapshot (not deleted): $Path — a running Claude session can still use it; it consumes disk until you remove the directory"
 }
 
 function Get-CtxCopilotHomeRoot {
@@ -2581,12 +2611,13 @@ function Find-CtxClaudeSpecialEntry {
     return $null
 }
 
-function Set-CtxClaudeMd {
+function Get-CtxClaudeMdBytes {
     # Each profile in .ctx order adds `<!-- ctx profile <n> <label> -->`, a
     # newline and its exact AGENTS.md bytes. Only a leading BOM is dropped and a
     # newline is added only when the bytes do not end with one (design D3).
-    # @path imports are copied as they are, never resolved.
-    param([string]$Target, [object]$Parsed)
+    # @path imports are copied as they are, never resolved. Returns the bytes
+    # so `ctx check` can compare them without writing a file (D10).
+    param([object]$Parsed)
     $stream = New-Object System.IO.MemoryStream
     try {
         for ($i = 0; $i -lt $Parsed.Dirs.Count; $i++) {
@@ -2600,10 +2631,16 @@ function Set-CtxClaudeMd {
             if ($length -gt 0) { $stream.Write($bytes, $start, $length) }
             if ($length -le 0 -or $bytes[$bytes.Length - 1] -ne 0x0A) { $stream.WriteByte(0x0A) }
         }
-        [System.IO.File]::WriteAllBytes($Target, $stream.ToArray())
+        return ,$stream.ToArray()
     } finally {
         $stream.Dispose()
     }
+}
+
+function Set-CtxClaudeMd {
+    # Writes the D3 CLAUDE.md bytes to $Target.
+    param([string]$Target, [object]$Parsed)
+    [System.IO.File]::WriteAllBytes($Target, (Get-CtxClaudeMdBytes -Parsed $Parsed))
 }
 
 function Get-CtxClaudeSkills {
@@ -2805,6 +2842,134 @@ function Invoke-CtxClaudeActivation {
     return $true
 }
 
+function Get-CtxClaudeExpectedSkills {
+    # Recomputes the D3 skill selection from the recorded paths (design D10),
+    # so a skill added or removed after activation is detected. Read-only.
+    param([object]$Parsed)
+    $list = @()
+    for ($i = 0; $i -lt $Parsed.Dirs.Count; $i++) {
+        $root = Join-Path $Parsed.Dirs[$i] '.agents/skills'
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+        $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
+        if (-not $rootItem -or (Test-CtxClaudeLinkish -Item $rootItem)) { continue }
+        foreach ($entry in (Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            if (-not $entry.PSIsContainer) { continue }
+            if (Test-CtxClaudeLinkish -Item $entry) { continue }
+            $skillMd = Join-Path $entry.FullName 'SKILL.md'
+            if (-not (Test-Path -LiteralPath $skillMd -PathType Leaf)) { continue }
+            if (-not (Test-CtxRegularFile -Path $skillMd -AllowHardLinks)) { continue }
+            $list += [PSCustomObject]@{ Name = $entry.Name; Source = $entry.FullName }
+        }
+    }
+    return $list
+}
+
+function Get-CtxClaudeTreeDiff {
+    # Returns the first differing path in the copy, else $null. Every source
+    # file must exist byte-identically in the copy and the copy may hold no
+    # extra file. Read-only.
+    param([string]$Source, [string]$Copy)
+    $srcFiles = @{}
+    foreach ($f in (Get-ChildItem -LiteralPath $Source -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+        $rel = $f.FullName.Substring($Source.Length).TrimStart([char]'\', [char]'/')
+        $srcFiles[$rel] = $f.FullName
+    }
+    foreach ($rel in ($srcFiles.Keys | Sort-Object)) {
+        $dest = Join-Path $Copy $rel
+        if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) { return $dest }
+        $a = (Get-FileHash -LiteralPath $srcFiles[$rel] -Algorithm SHA256).Hash
+        $b = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+        if ($a -cne $b) { return $dest }
+    }
+    foreach ($f in (Get-ChildItem -LiteralPath $Copy -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+        $rel = $f.FullName.Substring($Copy.Length).TrimStart([char]'\', [char]'/')
+        if (-not $srcFiles.ContainsKey($rel)) { return $f.FullName }
+    }
+    return $null
+}
+
+function Test-CtxClaudeCheck {
+    # Design D10, strictly read-only: every comparison is against the shell
+    # record and the snapshot on disk, so no engine call and no file change
+    # happens. The Copilot checks do not apply.
+    param([string]$CtxFile)
+    $snap = $Script:CtxClaudeSnapshot
+    $failures = 0
+    if (-not $snap -or (Test-CtxIsLink -Path $snap) -or -not (Test-Path -LiteralPath $snap -PathType Container)) {
+        Write-Host 'CHECK FAIL harness:claude missing'
+        Write-Host 'ctx check: FAIL (1)'
+        return $false
+    }
+    # The .ctx path and its bytes: a changed selection, label or root shows here.
+    $samePath = $false
+    try {
+        $samePath = ((Resolve-Path -LiteralPath $CtxFile -ErrorAction Stop).ProviderPath -ceq (Resolve-Path -LiteralPath $Script:CtxClaudeCtxFile -ErrorAction Stop).ProviderPath)
+    } catch { $samePath = $false }
+    $sha = $null
+    try { $sha = (Get-FileHash -LiteralPath $CtxFile -Algorithm SHA256).Hash.ToLowerInvariant() } catch { $sha = $null }
+    if (-not $samePath -or -not $Script:CtxClaudeCtxSha -or ($sha -cne $Script:CtxClaudeCtxSha)) {
+        Write-Host "CHECK FAIL harness:claude stale $CtxFile"
+        $failures++
+    }
+    $recorded = [PSCustomObject]@{ Names = @($Script:CtxClaudeLabels); Dirs = @($Script:CtxClaudeDirs); Context = '' }
+    # The recorded sources still produce the snapshot CLAUDE.md bytes.
+    $expected = $null
+    try { $expected = Get-CtxClaudeMdBytes -Parsed $recorded } catch { $expected = $null }
+    $claudeMd = Join-Path $snap 'CLAUDE.md'
+    $sameBytes = $false
+    if ($expected -and (Test-Path -LiteralPath $claudeMd -PathType Leaf)) {
+        $actual = [System.IO.File]::ReadAllBytes($claudeMd)
+        $sameBytes = ([Convert]::ToBase64String($actual) -ceq [Convert]::ToBase64String($expected))
+    }
+    if (-not $sameBytes) {
+        Write-Host "CHECK FAIL harness:claude stale $claudeMd"
+        $failures++
+    }
+    # The expected skill tree, recomputed from the recorded paths.
+    $skillsRoot = Join-Path $snap '.claude/skills'
+    $expectedSkills = @(Get-CtxClaudeExpectedSkills -Parsed $recorded)
+    foreach ($s in $expectedSkills) {
+        $dest = Join-Path $skillsRoot $s.Name
+        if (-not (Test-Path -LiteralPath $dest -PathType Container)) {
+            Write-Host "CHECK FAIL harness:claude stale $dest"
+            $failures++
+            continue
+        }
+        $diff = Get-CtxClaudeTreeDiff -Source $s.Source -Copy $dest
+        if ($diff) {
+            Write-Host "CHECK FAIL harness:claude stale $diff"
+            $failures++
+        }
+    }
+    # A snapshot skill the recorded sources no longer select is stale too.
+    foreach ($d in (Get-ChildItem -LiteralPath $skillsRoot -Directory -Force -ErrorAction SilentlyContinue)) {
+        if (-not ($expectedSkills | Where-Object { $_.Name -ceq $d.Name })) {
+            Write-Host "CHECK FAIL harness:claude stale $($d.FullName)"
+            $failures++
+        }
+    }
+    $settings = Join-Path $snap 'ctx-settings.json'
+    $sameSettings = $false
+    if (Test-Path -LiteralPath $settings -PathType Leaf) {
+        $fixed = [System.Text.Encoding]::UTF8.GetBytes("{`"autoMemoryEnabled`": false}`n")
+        $sameSettings = ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($settings)) -ceq [Convert]::ToBase64String($fixed))
+    }
+    if (-not $sameSettings) {
+        Write-Host 'CHECK FAIL harness:claude stale ctx-settings.json'
+        $failures++
+    }
+    if ($failures -ne 0) {
+        # The Copilot checks do not apply while a Claude record is active.
+        Write-Host 'CHECK SKIP'
+        Write-Host "ctx check: FAIL ($failures)"
+        return $false
+    }
+    Write-Host 'CHECK PASS harness:claude'
+    Write-Host 'CHECK SKIP'
+    Write-Host 'ctx check: PASS'
+    return $true
+}
+
 function Write-CtxSkipLinksAndSkills {
     # Modes B/C and unattributable (no-record) state do not own the Mode-A
     # synthetic-home shared-link or skill-symlink trees; those checks report
@@ -2858,7 +3023,18 @@ function Test-CtxActivation {
     # does not call Import-CtxFile or Set-CtxCopilotHome.
     $ctxFile = Find-CtxFile
     if (-not $ctxFile) { Write-Host 'ctx check: no .ctx file found; nothing to check'; return $true }
+    if ($Script:CtxClaudeActive) {
+        # Design D10: with a Claude record the check is shell-only and
+        # read-only; the Copilot checks below do not apply.
+        return (Test-CtxClaudeCheck -CtxFile $ctxFile)
+    }
     try { $parsed = Parse-CtxFile -CtxFile $ctxFile } catch { Write-Host 'CHECK FAIL parser: invalid .ctx file'; return $false }
+    if ($parsed.Harness -ceq 'claude') {
+        # A Claude .ctx without a Claude record in this shell has nothing to
+        # compare against: report that instead of Copilot drift.
+        Write-Host 'CHECK UNKNOWN harness:claude: no local activation record'
+        return $true
+    }
     $dir = $parsed.Dir; $names = @($parsed.Names); $dirs = @($parsed.Dirs); $homeOverride = $parsed.HomeOverride; $failures = 0
     $expectedContext = $parsed.Context
     # Canonical entries are never listed in COPILOT_CUSTOM_INSTRUCTIONS_DIRS;

@@ -274,6 +274,13 @@ _ctx_current() {
     # hard failure. The recorded mode is passed only when the session-local
     # activation record still matches; the mode is never inferred from
     # AI_CTX_PROFILES_COPILOT_MODE.
+    if [ "$_ctx_claude_active" -eq 1 ]; then
+        # Design D5/D4: the Claude record is shell state, so `current` reports
+        # it in the shell and never calls the engine.
+        printf 'ctx: harness claude (Claude Code %s)\n' "$_ctx_claude_version"
+        printf 'ctx: snapshot %s\n' "$_ctx_claude_snapshot"
+        return 0
+    fi
     if [ -z "${CTX_ENGINE_DLL:-}" ] || [ ! -f "$CTX_ENGINE_DLL" ]; then
         printf 'ctx: error: .NET 10 engine DLL not found: %s\n' "${CTX_ENGINE_DLL:-<unset>}" >&2
         return 1
@@ -351,6 +358,18 @@ _ctx_clear() {
     # place for next time.
     local prev_context="${AI_CTX_PROFILES:-}"
     local cleanup_status=0
+    # A Claude record is shell state with no Copilot activation behind it, so
+    # clear handles it here and never calls the engine (design D5). The
+    # published snapshot is kept and reported (D8); no Copilot variable is
+    # touched beyond what a prior ctx activation set.
+    local claude_snapshot=""
+    local claude_clear=0
+    if [ "$_ctx_claude_active" -eq 1 ]; then
+        claude_clear=1
+        claude_snapshot="$_ctx_claude_snapshot"
+        _ctx_reset_claude_record
+        unset AI_CTX_PROFILES
+    fi
     # Use the recorded mode of the matching activation, NOT the live selector
     # (which may be stale). With no matching record, home ownership is
     # unknown: ctx must never guess a mode from the selector or from the home
@@ -372,8 +391,9 @@ _ctx_clear() {
     # The non---all environment mutations and warning decisions are delegated
     # to the .NET engine via the line protocol. The engine applies the same
     # allowlisted unset operations atomically; on engine failure nothing is
-    # mutated (fail closed) and clear returns non-zero.
-    if ! _ctx_clear_apply_engine "$clear_mode"; then
+    # mutated (fail closed) and clear returns non-zero. A Claude record owns no
+    # Copilot state, so that clear never calls the engine (design D5).
+    if [ "$claude_clear" -eq 0 ] && ! _ctx_clear_apply_engine "$clear_mode"; then
         return 1
     fi
     # No matching activation record: report a present COPILOT_HOME as unknown
@@ -485,6 +505,9 @@ _ctx_clear() {
     export CTX_AUTO_LOAD_DIR=""
     _ctx_auto_load_dir=""
     _ctx_auto_load_home_override=""
+    if [ "$claude_clear" -eq 1 ] && [ -n "$claude_snapshot" ]; then
+        _ctx_report_retained_claude_snapshot "$claude_snapshot"
+    fi
     printf 'AI context cleared.\n'
     return "$cleanup_status"
 }
@@ -796,6 +819,12 @@ _ctx_reset_active_record() {
 _ctx_report_retained_ephemeral_home() {
     # $1: the retained ephemeral home path (never deleted by ctx).
     printf 'ctx: retained ephemeral COPILOT_HOME (not deleted): %s — may contain Copilot auth/session/cache data; moving any needed data out is the user\x27s or workflow\x27s responsibility; it consumes disk until the directory is manually removed\n' "$1"
+}
+
+_ctx_report_retained_claude_snapshot() {
+    # $1: the retained Claude snapshot path. ctx never deletes a published
+    # snapshot (design D8): a running Claude session can still use it.
+    printf 'ctx: retained claude snapshot (not deleted): %s — a running Claude session can still use it; it consumes disk until you remove the directory\n' "$1"
 }
 
 _ctx_ctx_file_has_noautoload() {
@@ -1965,6 +1994,19 @@ _ctx_sha256_file() {
     fi
 }
 
+_ctx_sha256_stream() {
+    # sha256 of stdin, so D10 can compare the expected bytes without writing
+    # a file. Prints nothing when no hashing tool exists (the caller fails
+    # closed).
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | cut -d' ' -f1
+    else
+        printf ''
+    fi
+}
+
 _ctx_claude_check_client() {
     # Design D7. Sets _ctx_claude_version only on success. None of these calls
     # starts a session or calls a model.
@@ -1997,23 +2039,29 @@ _ctx_claude_write_claude_md() {
     # only when the source does not end with one (D3). @path imports are copied
     # as they are, never resolved.
     local out="$1"; shift
+    _ctx_claude_claude_md_stream "$@" > "$out"
+}
+
+_ctx_claude_claude_md_stream() {
+    # Remaining args: alternating label/path in .ctx order. The same byte
+    # emission as _ctx_claude_write_claude_md, to stdout, so `ctx check` can
+    # compare the expected bytes without writing anything (D10, read-only).
     local order=0 name path src head3 last
-    : > "$out" || return 1
     while [ "$#" -gt 0 ]; do
         name="$1"; path="$2"; shift 2
         order=$((order + 1))
         src="$path/AGENTS.md"
         [ -f "$src" ] || return 1
-        printf '<!-- ctx profile %s %s -->\n' "$order" "$name" >> "$out" || return 1
+        printf '<!-- ctx profile %s %s -->\n' "$order" "$name" || return 1
         head3="$(head -c 3 -- "$src" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
         if [ "$head3" = "efbbbf" ]; then
-            tail -c +4 -- "$src" >> "$out" || return 1
+            tail -c +4 -- "$src" || return 1
         else
-            cat -- "$src" >> "$out" || return 1
+            cat -- "$src" || return 1
         fi
         last="$(tail -c 1 -- "$src" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
         if [ "$last" != "0a" ]; then
-            printf '\n' >> "$out" || return 1
+            printf '\n' || return 1
         fi
     done
     return 0
@@ -2225,6 +2273,116 @@ _ctx_claude_activate() {
     return 0
 }
 
+_ctx_claude_expected_skills() {
+    # Remaining args: alternating label/path as recorded. Prints one
+    # "<name>\t<source>" line per skill the D3 rule would select from the
+    # recorded paths now, without touching the record: `ctx check` recomputes
+    # the expected tree instead of trusting the activation snapshot (D10).
+    local name path root entry
+    while [ "$#" -gt 0 ]; do
+        name="$1"; path="$2"; shift 2
+        root="$path/.agents/skills"
+        [ -d "$root" ] && [ ! -L "$root" ] || continue
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+            [ -f "$entry/SKILL.md" ] && [ ! -L "$entry/SKILL.md" ] || continue
+            printf '%s\t%s\n' "$(basename "$entry")" "$entry"
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -print 2>/dev/null | LC_ALL=C sort)
+    done
+}
+
+_ctx_claude_tree_diff() {
+    # $1: source tree, $2: copy. Prints the first differing path in the copy
+    # and returns 1; returns 0 when every source file matches and the copy has
+    # no extra file. Read-only.
+    local src="$1" dst="$2" rel
+    while IFS= read -r rel; do
+        [ -f "$src/$rel" ] || continue
+        if [ ! -f "$dst/$rel" ] || ! cmp -s -- "$src/$rel" "$dst/$rel"; then
+            printf '%s\n' "$dst/${rel#./}"
+            return 1
+        fi
+    done < <(cd "$src" 2>/dev/null && find . -type f -print 2>/dev/null | LC_ALL=C sort)
+    while IFS= read -r rel; do
+        if [ ! -f "$src/$rel" ]; then
+            printf '%s\n' "$dst/${rel#./}"
+            return 1
+        fi
+    done < <(cd "$dst" 2>/dev/null && find . -type f -print 2>/dev/null | LC_ALL=C sort)
+    return 0
+}
+
+_ctx_claude_check() {
+    # $1: nearest .ctx path. Design D10, strictly read-only: every comparison
+    # is against the shell record and the snapshot on disk, so no engine call
+    # and no file change happens. The Copilot checks do not apply.
+    local ctx_file="$1" snap="$_ctx_claude_snapshot" failures=0
+    local name src dest expected actual stale entry i=0
+    local -a pairs=() expected_names=()
+    while [ "$i" -lt "${#_ctx_claude_labels[@]}" ]; do
+        pairs+=("${_ctx_claude_labels[$i]}" "${_ctx_claude_dirs[$i]}")
+        i=$((i + 1))
+    done
+
+    if [ -z "$snap" ] || [ -L "$snap" ] || [ ! -d "$snap" ]; then
+        printf 'CHECK FAIL harness:claude missing\n'
+        printf 'ctx check: FAIL (1)\n'
+        return 1
+    fi
+    # The .ctx path and its bytes: a changed selection, label or root shows
+    # here (D10).
+    if [ "$(realpath -m -- "$ctx_file" 2>/dev/null)" != "$(realpath -m -- "$_ctx_claude_ctx_file" 2>/dev/null)" ] \
+       || [ -z "$_ctx_claude_ctx_sha" ] \
+       || [ "$(_ctx_sha256_file "$ctx_file")" != "$_ctx_claude_ctx_sha" ]; then
+        printf 'CHECK FAIL harness:claude stale %s\n' "$ctx_file"
+        failures=$((failures + 1))
+    fi
+    # The recorded sources still produce the snapshot CLAUDE.md bytes.
+    expected="$(_ctx_claude_claude_md_stream "${pairs[@]}" | _ctx_sha256_stream)"
+    actual="$(_ctx_sha256_file "$snap/CLAUDE.md")"
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+        printf 'CHECK FAIL harness:claude stale %s\n' "$snap/CLAUDE.md"
+        failures=$((failures + 1))
+    fi
+    while IFS=$'\t' read -r name src; do
+        [ -n "$name" ] || continue
+        expected_names+=("$name")
+        dest="$snap/.claude/skills/$name"
+        if [ ! -d "$dest" ]; then
+            printf 'CHECK FAIL harness:claude stale %s\n' "$dest"
+            failures=$((failures + 1))
+        elif ! stale="$(_ctx_claude_tree_diff "$src" "$dest")"; then
+            printf 'CHECK FAIL harness:claude stale %s\n' "$stale"
+            failures=$((failures + 1))
+        fi
+    done < <(_ctx_claude_expected_skills "${pairs[@]}")
+    # A snapshot skill that the recorded sources no longer select is stale.
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        if ! _ctx_in_list "$(basename "$entry")" "${expected_names[@]}"; then
+            printf 'CHECK FAIL harness:claude stale %s\n' "$entry"
+            failures=$((failures + 1))
+        fi
+    done < <(find "$snap/.claude/skills" -mindepth 1 -maxdepth 1 -print 2>/dev/null | LC_ALL=C sort)
+    expected="$(printf '{"autoMemoryEnabled": false}\n' | _ctx_sha256_stream)"
+    actual="$(_ctx_sha256_file "$snap/ctx-settings.json")"
+    if [ -z "$actual" ] || [ "$expected" != "$actual" ]; then
+        printf 'CHECK FAIL harness:claude stale ctx-settings.json\n'
+        failures=$((failures + 1))
+    fi
+    if [ "$failures" -ne 0 ]; then
+        # The Copilot checks do not apply while a Claude record is active.
+        printf 'CHECK SKIP\n'
+        printf 'ctx check: FAIL (%s)\n' "$failures"
+        return 1
+    fi
+    printf 'CHECK PASS harness:claude\n'
+    printf 'CHECK SKIP\n'
+    printf 'ctx check: PASS\n'
+    return 0
+}
+
 _ctx_check_skip_links_and_skills() {
     # Modes B/C and unattributable (no-record) state do not own the Mode-A
     # synthetic-home shared-link or skill-symlink trees; those checks report
@@ -2398,9 +2556,21 @@ _ctx_check() {
         printf 'ctx check: no .ctx file found; nothing to check\n'
         return 0
     fi
+    if [ "$_ctx_claude_active" -eq 1 ]; then
+        # Design D10: with a Claude record the check is shell-only and
+        # read-only; the Copilot checks below do not apply.
+        _ctx_claude_check "$ctx_file"
+        return $?
+    fi
     if ! _ctx_parse_ctx_file "$ctx_file"; then
         printf 'CHECK FAIL parser: invalid .ctx file\n'
         return 1
+    fi
+    if [ "$_ctx_parsed_harness" = claude ]; then
+        # A Claude .ctx without a Claude record in this shell has nothing to
+        # compare against: report that instead of Copilot drift.
+        printf 'CHECK UNKNOWN harness:claude: no local activation record\n'
+        return 0
     fi
     dir_of_file="$_ctx_parsed_dir"; expected_context="$_ctx_parsed_context"; home_override="$_ctx_parsed_home"
     names=("${_ctx_parsed_names[@]}"); dirs=("${_ctx_parsed_dirs[@]}")
