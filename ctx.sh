@@ -1938,9 +1938,26 @@ _ctx_claude_skill_sources=()
 # The snapshot this call created, before it is published as the record. Kept
 # apart from the record so a failure in step 4 can still remove it.
 _ctx_claude_new_snapshot=""
+# Values for the activation in progress. Step 4 resets the record through the
+# same routine as `ctx clear` (D4), so the version and the skill list must stay
+# here until step 5 publishes them; a record field is never written before
+# that point, and a failed reload cannot overwrite a published record.
+_ctx_claude_pending_version=""
+_ctx_claude_pending_skill_names=()
+_ctx_claude_pending_skill_labels=()
+_ctx_claude_pending_skill_sources=()
+
+_ctx_reset_claude_pending() {
+    _ctx_claude_pending_version=""
+    _ctx_claude_pending_skill_names=()
+    _ctx_claude_pending_skill_labels=()
+    _ctx_claude_pending_skill_sources=()
+}
 
 _ctx_reset_claude_record() {
     # Session-local record only: a published snapshot is never deleted (D8).
+    # Never touches the pending values: step 4 calls this routine while its own
+    # activation is still in progress.
     _ctx_claude_active=0
     _ctx_claude_ctx_file=""
     _ctx_claude_ctx_sha=""
@@ -1961,12 +1978,32 @@ _ctx_claude_error() {
 _ctx_claude_run() {
     # $1: seconds limit; remaining args: the client invocation. Only --version
     # and --help are ever passed, so no session and no model call happen (D7).
+    # Without `timeout` the same deadline is enforced by hand: the child runs in
+    # the background and is stopped when the limit passes, so a hung client
+    # cannot block ctx. The terminated status is non-zero, which the caller
+    # reports as client-failed / client-unsupported.
     local limit="$1"; shift
     if command -v timeout >/dev/null 2>&1; then
         timeout "$limit" "$@"
-    else
-        "$@"
+        return $?
     fi
+    local pid waited=0 rc
+    "$@" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$limit" ]; then
+            kill -TERM "$pid" 2>/dev/null
+            sleep 1
+            kill -KILL "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$pid"
+    rc=$?
+    return "$rc"
 }
 
 _ctx_claude_client_version() {
@@ -2008,8 +2045,9 @@ _ctx_sha256_stream() {
 }
 
 _ctx_claude_check_client() {
-    # Design D7. Sets _ctx_claude_version only on success. None of these calls
-    # starts a session or calls a model.
+    # Design D7. Sets the pending version only on success; the record keeps the
+    # version of the snapshot it points at until step 5 publishes the new one.
+    # None of these calls starts a session or calls a model.
     local out rc version
     if ! command -v claude >/dev/null 2>&1; then
         _ctx_claude_error client-missing
@@ -2028,7 +2066,7 @@ _ctx_claude_check_client() {
     fi
     case "$out" in *--add-dir*) : ;; *) _ctx_claude_error client-unsupported; return 1 ;; esac
     case "$out" in *--settings*) : ;; *) _ctx_claude_error client-unsupported; return 1 ;; esac
-    _ctx_claude_version="$version"
+    _ctx_claude_pending_version="$version"
     return 0
 }
 
@@ -2072,19 +2110,20 @@ _ctx_claude_collect_skills() {
     # regular SKILL.md is selected; a link or special file anywhere in a
     # selected skill, or two selected names that collide (case-insensitively),
     # rejects the activation. A skill without a regular SKILL.md is not
-    # selected and is not inspected. Fills the _ctx_claude_skill_* globals in
-    # .ctx order (names sorted within a profile for a stable listing).
+    # selected and is not inspected. Fills the pending skill lists in .ctx
+    # order (names sorted within a profile for a stable listing); the record is
+    # written only at publication (D4).
     local name path root entry entry_name lower bad
     local -A seen=()
-    _ctx_claude_skill_names=()
-    _ctx_claude_skill_labels=()
-    _ctx_claude_skill_sources=()
+    _ctx_claude_pending_skill_names=()
+    _ctx_claude_pending_skill_labels=()
+    _ctx_claude_pending_skill_sources=()
     while [ "$#" -gt 0 ]; do
         name="$1"; path="$2"; shift 2
         root="$path/.agents/skills"
         [ -d "$root" ] || continue
         [ ! -L "$root" ] || { _ctx_claude_error "skill-link $root"; return 1; }
-        while IFS= read -r entry; do
+        while IFS= read -r -d '' entry; do
             [ -n "$entry" ] || continue
             if [ -L "$entry" ]; then
                 _ctx_claude_error "skill-link $entry"
@@ -2107,29 +2146,38 @@ _ctx_claude_collect_skills() {
                 _ctx_claude_error "skill-link $bad"
                 return 1
             fi
-            _ctx_claude_skill_names+=("$entry_name")
-            _ctx_claude_skill_labels+=("$name")
-            _ctx_claude_skill_sources+=("$entry")
-        done < <(find "$root" -mindepth 1 -maxdepth 1 -print 2>/dev/null | LC_ALL=C sort)
+            _ctx_claude_pending_skill_names+=("$entry_name")
+            _ctx_claude_pending_skill_labels+=("$name")
+            _ctx_claude_pending_skill_sources+=("$entry")
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
     done
     return 0
 }
 
 _ctx_claude_check_limits() {
     # Design D3: at most 2000 files and 32 MiB in one snapshot. The error gives
-    # the measured count.
-    local snap="$1" files bytes size f
-    files="$(find "$snap" -type f -print 2>/dev/null | wc -l | tr -d ' ')"
-    if [ "${files:-0}" -gt 2000 ]; then
+    # the measured count. The traversal is NUL-delimited, so a file name that
+    # contains a newline still counts as one file and its real size, and a size
+    # that cannot be read fails closed instead of counting as zero.
+    local snap="$1" files=0 bytes=0 size f
+    while IFS= read -r -d '' f; do
+        files=$((files + 1))
+    done < <(find "$snap" -type f -print0 2>/dev/null)
+    if [ "$files" -gt 2000 ]; then
         _ctx_claude_error "limit-files $files"
         return 1
     fi
-    bytes=0
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        size="$(wc -c < "$f" 2>/dev/null)" || size=0
+    while IFS= read -r -d '' f; do
+        size="$(wc -c < "$f" 2>/dev/null)" || size=""
+        size="${size//[[:space:]]/}"
+        case "$size" in
+            ''|*[!0-9]*)
+                _ctx_claude_error "snapshot-failed size $f"
+                return 1
+                ;;
+        esac
         bytes=$((bytes + size))
-    done < <(find "$snap" -type f -print 2>/dev/null)
+    done < <(find "$snap" -type f -print0 2>/dev/null)
     if [ "$bytes" -gt 33554432 ]; then
         _ctx_claude_error "limit-bytes $bytes"
         return 1
@@ -2178,11 +2226,11 @@ _ctx_claude_build_snapshot() {
         return 1
     fi
     i=0
-    while [ "$i" -lt "${#_ctx_claude_skill_names[@]}" ]; do
-        dest="$snap/.claude/skills/${_ctx_claude_skill_names[$i]}"
+    while [ "$i" -lt "${#_ctx_claude_pending_skill_names[@]}" ]; do
+        dest="$snap/.claude/skills/${_ctx_claude_pending_skill_names[$i]}"
         if ! mkdir -p "$snap/.claude/skills" \
-           || ! cp -R -- "${_ctx_claude_skill_sources[$i]}/." "$dest"; then
-            _ctx_claude_error "snapshot-failed skill ${_ctx_claude_skill_names[$i]}"
+           || ! cp -R -- "${_ctx_claude_pending_skill_sources[$i]}/." "$dest"; then
+            _ctx_claude_error "snapshot-failed skill ${_ctx_claude_pending_skill_names[$i]}"
             _ctx_claude_remove_new_snapshot
             return 1
         fi
@@ -2235,20 +2283,29 @@ _ctx_claude_activate() {
     # the D2 canonical check and then the D4 steps in order: client check,
     # snapshot, Copilot reset, publication. A failure in steps 1 to 3 leaves the
     # previous activation and record untouched; a failure in step 4 removes this
-    # call's snapshot and publishes nothing.
+    # call's snapshot and publishes nothing. Every pending value (version, skill
+    # lists) stays out of the record until step 5, because step 4 resets it.
     local ctx_file="$1" i=0 name path reset_status=0
     local -a pairs=("${_ctx_parsed_pairs[@]}") labels=() dirs=()
+    _ctx_reset_claude_pending
     while [ "$i" -lt "${#pairs[@]}" ]; do
         name="${pairs[$i]}"; path="${pairs[$((i + 1))]}"
         i=$((i + 2))
         if ! _ctx_profile_is_canonical "$path"; then
             _ctx_claude_error "legacy-profile $name"
+            _ctx_reset_claude_pending
             return 1
         fi
         labels+=("$name"); dirs+=("$path")
     done
-    _ctx_claude_check_client || return 1
-    _ctx_claude_build_snapshot || return 1
+    if ! _ctx_claude_check_client; then
+        _ctx_reset_claude_pending
+        return 1
+    fi
+    if ! _ctx_claude_build_snapshot; then
+        _ctx_reset_claude_pending
+        return 1
+    fi
     if [ -n "$_ctx_active_mode" ]; then
         # Step 4 (D4): the unchanged `ctx clear` routine resets an existing
         # Copilot activation. This is the only step that may touch Copilot
@@ -2256,6 +2313,7 @@ _ctx_claude_activate() {
         _ctx_clear || reset_status=$?
         if [ "$reset_status" -ne 0 ]; then
             _ctx_claude_remove_new_snapshot
+            _ctx_reset_claude_pending
             _ctx_claude_error "reset-failed $reset_status: the previous Copilot activation was partly reset"
             return 1
         fi
@@ -2268,6 +2326,11 @@ _ctx_claude_activate() {
     _ctx_claude_dirs=("${dirs[@]}")
     _ctx_claude_snapshot="$_ctx_claude_new_snapshot"
     _ctx_claude_new_snapshot=""
+    _ctx_claude_version="$_ctx_claude_pending_version"
+    _ctx_claude_skill_names=("${_ctx_claude_pending_skill_names[@]}")
+    _ctx_claude_skill_labels=("${_ctx_claude_pending_skill_labels[@]}")
+    _ctx_claude_skill_sources=("${_ctx_claude_pending_skill_sources[@]}")
+    _ctx_reset_claude_pending
     export AI_CTX_PROFILES="$_ctx_parsed_context"
     _ctx_print_claude_guidance
     return 0
@@ -2283,33 +2346,73 @@ _ctx_claude_expected_skills() {
         name="$1"; path="$2"; shift 2
         root="$path/.agents/skills"
         [ -d "$root" ] && [ ! -L "$root" ] || continue
-        while IFS= read -r entry; do
+        while IFS= read -r -d '' entry; do
             [ -n "$entry" ] || continue
             [ -d "$entry" ] && [ ! -L "$entry" ] || continue
             [ -f "$entry/SKILL.md" ] && [ ! -L "$entry/SKILL.md" ] || continue
             printf '%s\t%s\n' "$(basename "$entry")" "$entry"
-        done < <(find "$root" -mindepth 1 -maxdepth 1 -print 2>/dev/null | LC_ALL=C sort)
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
     done
+}
+
+_ctx_claude_nul_sorted() {
+    # Sorts a NUL-delimited stream bytewise. `sort -z` is not on every platform;
+    # without it the stream passes through unchanged, so an entry is never lost
+    # because the sort is unavailable (only the listing order differs).
+    if printf 'b\0a\0' | LC_ALL=C sort -z >/dev/null 2>&1; then
+        LC_ALL=C sort -z
+    else
+        cat
+    fi
+}
+
+_ctx_claude_tree_entries() {
+    # $1: a directory. Prints one NUL-terminated "<type>\t<relative name>"
+    # record per entry, byte-sorted: d directory, f regular file, l link,
+    # s other special file. Nothing is followed, and a name is used exactly as
+    # stored, so a case-only or newline-bearing difference stays visible.
+    local root="$1" rel
+    find "$root" -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' rel; do
+        rel="${rel#"$root"/}"
+        if [ -L "$root/$rel" ]; then
+            printf 'l\t%s\0' "$rel"
+        elif [ -d "$root/$rel" ]; then
+            printf 'd\t%s\0' "$rel"
+        elif [ -f "$root/$rel" ]; then
+            printf 'f\t%s\0' "$rel"
+        else
+            printf 's\t%s\0' "$rel"
+        fi
+    done | _ctx_claude_nul_sorted
 }
 
 _ctx_claude_tree_diff() {
     # $1: source tree, $2: copy. Prints the first differing path in the copy
-    # and returns 1; returns 0 when every source file matches and the copy has
-    # no extra file. Read-only.
-    local src="$1" dst="$2" rel
-    while IFS= read -r rel; do
-        [ -f "$src/$rel" ] || continue
-        if [ ! -f "$dst/$rel" ] || ! cmp -s -- "$src/$rel" "$dst/$rel"; then
-            printf '%s\n' "$dst/${rel#./}"
-            return 1
-        fi
-    done < <(cd "$src" 2>/dev/null && find . -type f -print 2>/dev/null | LC_ALL=C sort)
-    while IFS= read -r rel; do
-        if [ ! -f "$src/$rel" ]; then
-            printf '%s\n' "$dst/${rel#./}"
-            return 1
-        fi
-    done < <(cd "$dst" 2>/dev/null && find . -type f -print 2>/dev/null | LC_ALL=C sort)
+    # and returns 1; returns 0 only when the two trees hold the same entries:
+    # the same exact relative names, the same entry types (so an added or
+    # removed empty directory, or a file replaced by a link, is a difference)
+    # and byte-identical regular files. A link or special entry on either side
+    # is a difference and is never followed. Read-only.
+    local src="$1" dst="$2" record type rel target
+    while IFS= read -r -d '' record; do
+        type="${record%%$'\t'*}"
+        rel="${record#*$'\t'}"
+        target="$dst/$rel"
+        case "$type" in
+            d) { [ -d "$target" ] && [ ! -L "$target" ]; } || { printf '%s\n' "$target"; return 1; } ;;
+            f) { [ -f "$target" ] && [ ! -L "$target" ] && cmp -s -- "$src/$rel" "$target"; } || { printf '%s\n' "$target"; return 1; } ;;
+            *) printf '%s\n' "$target"; return 1 ;;
+        esac
+    done < <(_ctx_claude_tree_entries "$src")
+    while IFS= read -r -d '' record; do
+        type="${record%%$'\t'*}"
+        rel="${record#*$'\t'}"
+        case "$type" in
+            d) { [ -d "$src/$rel" ] && [ ! -L "$src/$rel" ]; } || { printf '%s\n' "$dst/$rel"; return 1; } ;;
+            f) { [ -f "$src/$rel" ] && [ ! -L "$src/$rel" ]; } || { printf '%s\n' "$dst/$rel"; return 1; } ;;
+            *) printf '%s\n' "$dst/$rel"; return 1 ;;
+        esac
+    done < <(_ctx_claude_tree_entries "$dst")
     return 0
 }
 
@@ -2358,13 +2461,13 @@ _ctx_claude_check() {
         fi
     done < <(_ctx_claude_expected_skills "${pairs[@]}")
     # A snapshot skill that the recorded sources no longer select is stale.
-    while IFS= read -r entry; do
+    while IFS= read -r -d '' entry; do
         [ -n "$entry" ] || continue
         if ! _ctx_in_list "$(basename "$entry")" "${expected_names[@]}"; then
             printf 'CHECK FAIL harness:claude stale %s\n' "$entry"
             failures=$((failures + 1))
         fi
-    done < <(find "$snap/.claude/skills" -mindepth 1 -maxdepth 1 -print 2>/dev/null | LC_ALL=C sort)
+    done < <(find "$snap/.claude/skills" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
     expected="$(printf '{"autoMemoryEnabled": false}\n' | _ctx_sha256_stream)"
     actual="$(_ctx_sha256_file "$snap/ctx-settings.json")"
     if [ -z "$actual" ] || [ "$expected" != "$actual" ]; then
@@ -2553,6 +2656,13 @@ _ctx_check() {
     local _p_name _p_path _p_order=0
 
     if ! ctx_file="$(_ctx_find_ctx_file)"; then
+        if [ "$_ctx_claude_active" -eq 1 ]; then
+            # A Claude record with no `.ctx` above the working directory is a
+            # removed selection, not "nothing to check": the record still names
+            # the file it was built from (D10).
+            _ctx_claude_check "$_ctx_claude_ctx_file"
+            return $?
+        fi
         printf 'ctx check: no .ctx file found; nothing to check\n'
         return 0
     fi

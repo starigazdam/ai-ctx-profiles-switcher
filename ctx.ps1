@@ -964,6 +964,14 @@ $Script:CtxClaudeSkillSources = @()
 # The snapshot the current call created, before it is published as the record, so
 # a failure in step 4 can still remove it.
 $Script:CtxClaudeNewSnapshot = $null
+# Values for the activation in progress. Step 4 resets the record through the
+# same routine as `ctx clear` (D4), so the version and the skill list stay here
+# until step 5 publishes them: no record field is written before that point, and
+# a failed reload cannot overwrite a published record.
+$Script:CtxClaudePendingVersion = $null
+$Script:CtxClaudePendingSkillNames = @()
+$Script:CtxClaudePendingSkillLabels = @()
+$Script:CtxClaudePendingSkillSources = @()
 
 function Get-CtxActiveRecordMode {
     # Returns the recorded mode when the activation record's context and
@@ -2522,8 +2530,20 @@ function Import-CtxFile {
 # never creates, reads or changes Copilot state, except the D4 step-4 reset,
 # which reuses Clear-CtxContext unchanged. Each reason is one D6 token.
 
+function Reset-CtxClaudePending {
+    # Clears the values of an activation in progress. Reset-CtxClaudeRecord must
+    # never call this: step 4 resets the record while its own activation is
+    # still pending (D4).
+    $Script:CtxClaudePendingVersion = $null
+    $Script:CtxClaudePendingSkillNames = @()
+    $Script:CtxClaudePendingSkillLabels = @()
+    $Script:CtxClaudePendingSkillSources = @()
+}
+
 function Reset-CtxClaudeRecord {
     # Session-local record only: a published snapshot is never deleted (D8).
+    # Never touches the pending values: step 4 calls this routine while its own
+    # activation is still in progress.
     $Script:CtxClaudeActive = $false
     $Script:CtxClaudeCtxFile = $null
     $Script:CtxClaudeCtxSha = $null
@@ -2572,7 +2592,8 @@ function Get-CtxClaudeVersionToken {
 }
 
 function Test-CtxClaudeClient {
-    # Design D7. Sets $Script:CtxClaudeVersion only on success.
+    # Design D7. Sets the pending version only on success: the record keeps the
+    # version of the snapshot it points at until step 5 publishes the new one.
     $command = Get-Command -Name 'claude' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $command) { Write-CtxClaudeError 'client-missing'; return $false }
     $probe = Invoke-CtxClaudeProbe -Command 'claude' -Arguments @('--version')
@@ -2584,7 +2605,7 @@ function Test-CtxClaudeClient {
         Write-CtxClaudeError 'client-unsupported'
         return $false
     }
-    $Script:CtxClaudeVersion = $version
+    $Script:CtxClaudePendingVersion = $version
     return $true
 }
 
@@ -2648,11 +2669,12 @@ function Get-CtxClaudeSkills {
     # SKILL.md is selected. A link or special file anywhere in a selected skill,
     # or two selected names that collide case-insensitively, rejects the
     # activation. A skill without a regular SKILL.md is not selected and is not
-    # inspected. Fills the CtxClaudeSkill* record arrays.
+    # inspected. Fills the pending skill lists; the record is written only at
+    # publication (D4).
     param([object]$Parsed)
-    $Script:CtxClaudeSkillNames = @()
-    $Script:CtxClaudeSkillLabels = @()
-    $Script:CtxClaudeSkillSources = @()
+    $Script:CtxClaudePendingSkillNames = @()
+    $Script:CtxClaudePendingSkillLabels = @()
+    $Script:CtxClaudePendingSkillSources = @()
     $seen = @{}
     for ($i = 0; $i -lt $Parsed.Dirs.Count; $i++) {
         $label = $Parsed.Names[$i]
@@ -2684,9 +2706,9 @@ function Get-CtxClaudeSkills {
                 Write-CtxClaudeError "skill-link $special"
                 return $false
             }
-            $Script:CtxClaudeSkillNames += $name
-            $Script:CtxClaudeSkillLabels += $label
-            $Script:CtxClaudeSkillSources += $entry.FullName
+            $Script:CtxClaudePendingSkillNames += $name
+            $Script:CtxClaudePendingSkillLabels += $label
+            $Script:CtxClaudePendingSkillSources += $entry.FullName
         }
     }
     return $true
@@ -2694,15 +2716,27 @@ function Get-CtxClaudeSkills {
 
 function Test-CtxClaudeLimit {
     # Design D3: at most 2000 files and 32 MiB in one snapshot. The error gives
-    # the measured count.
+    # the measured count. A traversal or size that cannot be read fails closed
+    # instead of being silently skipped and undercounted.
     param([string]$Snapshot)
-    $files = @(Get-ChildItem -LiteralPath $Snapshot -Recurse -File -Force -ErrorAction SilentlyContinue)
+    try {
+        $files = @(Get-ChildItem -LiteralPath $Snapshot -Recurse -File -Force -ErrorAction Stop)
+    } catch {
+        Write-CtxClaudeError "snapshot-failed size $Snapshot"
+        return $false
+    }
     if ($files.Count -gt 2000) {
         Write-CtxClaudeError "limit-files $($files.Count)"
         return $false
     }
     $bytes = 0
-    foreach ($f in $files) { $bytes += $f.Length }
+    foreach ($f in $files) {
+        if ($null -eq $f.Length) {
+            Write-CtxClaudeError "snapshot-failed size $($f.FullName)"
+            return $false
+        }
+        $bytes += $f.Length
+    }
     if ($bytes -gt 33554432) {
         Write-CtxClaudeError "limit-bytes $bytes"
         return $false
@@ -2755,13 +2789,13 @@ function New-CtxClaudeSnapshot {
         Remove-CtxClaudeNewSnapshot
         return $false
     }
-    for ($i = 0; $i -lt $Script:CtxClaudeSkillNames.Count; $i++) {
-        $dest = Join-Path (Join-Path $snap '.claude/skills') $Script:CtxClaudeSkillNames[$i]
+    for ($i = 0; $i -lt $Script:CtxClaudePendingSkillNames.Count; $i++) {
+        $dest = Join-Path (Join-Path $snap '.claude/skills') $Script:CtxClaudePendingSkillNames[$i]
         try {
             New-Item -ItemType Directory -Path (Join-Path $snap '.claude/skills') -Force -ErrorAction Stop | Out-Null
-            Copy-Item -LiteralPath $Script:CtxClaudeSkillSources[$i] -Destination $dest -Recurse -Force -ErrorAction Stop
+            Copy-Item -LiteralPath $Script:CtxClaudePendingSkillSources[$i] -Destination $dest -Recurse -Force -ErrorAction Stop
         } catch {
-            Write-CtxClaudeError "snapshot-failed skill $($Script:CtxClaudeSkillNames[$i])"
+            Write-CtxClaudeError "snapshot-failed skill $($Script:CtxClaudePendingSkillNames[$i])"
             Remove-CtxClaudeNewSnapshot
             return $false
         }
@@ -2807,21 +2841,25 @@ function Invoke-CtxClaudeActivation {
     # check, the client check, the snapshot, the Copilot reset and publication.
     # A failure in steps 1 to 3 leaves the previous activation and record
     # untouched; a failure in step 4 removes this call's snapshot and publishes
-    # nothing.
+    # nothing. Every pending value stays out of the record until step 5,
+    # because step 4 resets it.
     param([object]$Parsed, [string]$CtxFile)
+    Reset-CtxClaudePending
     for ($i = 0; $i -lt $Parsed.Dirs.Count; $i++) {
         if (-not (Test-CtxProfileCanonical -ProfileDir $Parsed.Dirs[$i])) {
             Write-CtxClaudeError "legacy-profile $($Parsed.Names[$i])"
+            Reset-CtxClaudePending
             return $false
         }
     }
-    if (-not (Test-CtxClaudeClient)) { return $false }
-    if (-not (New-CtxClaudeSnapshot -Parsed $Parsed)) { return $false }
+    if (-not (Test-CtxClaudeClient)) { Reset-CtxClaudePending; return $false }
+    if (-not (New-CtxClaudeSnapshot -Parsed $Parsed)) { Reset-CtxClaudePending; return $false }
     if ($Script:CtxActiveMode) {
         # Step 4 (D4): the unchanged Clear-CtxContext routine resets an existing
         # Copilot activation. This is the only step that may touch Copilot state.
         if (-not (Clear-CtxContext)) {
             Remove-CtxClaudeNewSnapshot
+            Reset-CtxClaudePending
             Write-CtxClaudeError 'reset-failed ctx-clear: the previous Copilot activation was partly reset'
             return $false
         }
@@ -2837,6 +2875,11 @@ function Invoke-CtxClaudeActivation {
     $Script:CtxClaudeDirs = @($Parsed.Dirs)
     $Script:CtxClaudeSnapshot = $Script:CtxClaudeNewSnapshot
     $Script:CtxClaudeNewSnapshot = $null
+    $Script:CtxClaudeVersion = $Script:CtxClaudePendingVersion
+    $Script:CtxClaudeSkillNames = @($Script:CtxClaudePendingSkillNames)
+    $Script:CtxClaudeSkillLabels = @($Script:CtxClaudePendingSkillLabels)
+    $Script:CtxClaudeSkillSources = @($Script:CtxClaudePendingSkillSources)
+    Reset-CtxClaudePending
     $env:AI_CTX_PROFILES = $Parsed.Context
     Write-CtxClaudeGuidance
     return $true
@@ -2864,26 +2907,64 @@ function Get-CtxClaudeExpectedSkills {
     return $list
 }
 
+function Get-CtxClaudeTreeEntries {
+    # Lists every entry under $Path as an ordinal (case-sensitive) table from
+    # the exact relative name to its type: 'dir', 'file', 'link' or 'special'.
+    # Recursion is manual so a link is recorded and never followed.
+    param([string]$Path)
+    $table = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    $pending = New-Object System.Collections.Stack
+    $pending.Push('')
+    while ($pending.Count -gt 0) {
+        $rel = [string]$pending.Pop()
+        $dir = if ($rel) { Join-Path $Path $rel } else { $Path }
+        foreach ($item in (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)) {
+            $childRel = if ($rel) { $rel + '/' + $item.Name } else { $item.Name }
+            if (Test-CtxClaudeLinkish -Item $item) {
+                $table[$childRel] = 'link'
+            } elseif ($item.PSIsContainer) {
+                $table[$childRel] = 'dir'
+                $pending.Push($childRel)
+            } elseif (Test-CtxRegularFile -Path $item.FullName -AllowHardLinks) {
+                $table[$childRel] = 'file'
+            } else {
+                $table[$childRel] = 'special'
+            }
+        }
+    }
+    return ,$table
+}
+
 function Get-CtxClaudeTreeDiff {
-    # Returns the first differing path in the copy, else $null. Every source
-    # file must exist byte-identically in the copy and the copy may hold no
-    # extra file. Read-only.
+    # Returns the first differing path in the copy, else $null. The two trees
+    # must hold the same entries: the same exact relative names (ordinal, so a
+    # case-only difference counts), the same entry types (so an added or removed
+    # empty directory, or a file replaced by a link, is a difference) and
+    # byte-identical regular files. A link or special entry on either side is a
+    # difference and is never followed. Read-only.
     param([string]$Source, [string]$Copy)
-    $srcFiles = @{}
-    foreach ($f in (Get-ChildItem -LiteralPath $Source -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-        $rel = $f.FullName.Substring($Source.Length).TrimStart([char]'\', [char]'/')
-        $srcFiles[$rel] = $f.FullName
+    $srcEntries = Get-CtxClaudeTreeEntries -Path $Source
+    $dstEntries = Get-CtxClaudeTreeEntries -Path $Copy
+    foreach ($rel in @($srcEntries.Keys)) {
+        $type = $srcEntries[$rel]
+        $target = Join-Path $Copy $rel
+        if (-not $dstEntries.ContainsKey($rel)) { return $target }
+        if ($dstEntries[$rel] -cne $type) { return $target }
+        if ($type -ceq 'file') {
+            try {
+                $a = (Get-FileHash -LiteralPath (Join-Path $Source $rel) -Algorithm SHA256).Hash
+                $b = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+            } catch {
+                return $target
+            }
+            if ($a -cne $b) { return $target }
+        } elseif ($type -cne 'dir') {
+            # A link or special entry: never followed, always a difference.
+            return $target
+        }
     }
-    foreach ($rel in ($srcFiles.Keys | Sort-Object)) {
-        $dest = Join-Path $Copy $rel
-        if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) { return $dest }
-        $a = (Get-FileHash -LiteralPath $srcFiles[$rel] -Algorithm SHA256).Hash
-        $b = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
-        if ($a -cne $b) { return $dest }
-    }
-    foreach ($f in (Get-ChildItem -LiteralPath $Copy -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-        $rel = $f.FullName.Substring($Copy.Length).TrimStart([char]'\', [char]'/')
-        if (-not $srcFiles.ContainsKey($rel)) { return $f.FullName }
+    foreach ($rel in @($dstEntries.Keys)) {
+        if (-not $srcEntries.ContainsKey($rel)) { return (Join-Path $Copy $rel) }
     }
     return $null
 }
@@ -3022,7 +3103,16 @@ function Test-CtxActivation {
     # Read-only audit of the nearest .ctx activation. This function deliberately
     # does not call Import-CtxFile or Set-CtxCopilotHome.
     $ctxFile = Find-CtxFile
-    if (-not $ctxFile) { Write-Host 'ctx check: no .ctx file found; nothing to check'; return $true }
+    if (-not $ctxFile) {
+        if ($Script:CtxClaudeActive) {
+            # A Claude record with no `.ctx` above the working directory is a
+            # removed selection, not "nothing to check": the record still names
+            # the file it was built from (D10).
+            return (Test-CtxClaudeCheck -CtxFile $Script:CtxClaudeCtxFile)
+        }
+        Write-Host 'ctx check: no .ctx file found; nothing to check'
+        return $true
+    }
     if ($Script:CtxClaudeActive) {
         # Design D10: with a Claude record the check is shell-only and
         # read-only; the Copilot checks below do not apply.
