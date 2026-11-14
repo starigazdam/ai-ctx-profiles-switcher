@@ -2685,7 +2685,14 @@ function Get-CtxClaudeSkills {
             Write-CtxClaudeError "skill-link $root"
             return $false
         }
-        foreach ($entry in (Get-ChildItem -LiteralPath $root -Force | Sort-Object Name)) {
+        try {
+            $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | Sort-Object Name)
+        } catch {
+            # An unreadable root is not an empty skill selection (D4).
+            Write-CtxClaudeError "snapshot-failed $root"
+            return $false
+        }
+        foreach ($entry in $children) {
             if (Test-CtxClaudeLinkish -Item $entry) {
                 Write-CtxClaudeError "skill-link $($entry.FullName)"
                 return $false
@@ -2894,8 +2901,19 @@ function Get-CtxClaudeExpectedSkills {
         $root = Join-Path $Parsed.Dirs[$i] '.agents/skills'
         if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
         $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
-        if (-not $rootItem -or (Test-CtxClaudeLinkish -Item $rootItem)) { continue }
-        foreach ($entry in (Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        if (-not $rootItem -or (Test-CtxClaudeLinkish -Item $rootItem)) {
+            # A linked or unreadable root cannot be traversed as evidence, so it
+            # becomes a '!' marker and the check fails closed (D2, D4).
+            $list += [PSCustomObject]@{ Name = '!'; Source = $root }
+            continue
+        }
+        try {
+            $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop | Sort-Object Name)
+        } catch {
+            $list += [PSCustomObject]@{ Name = '!'; Source = $root }
+            continue
+        }
+        foreach ($entry in $children) {
             if (-not $entry.PSIsContainer) { continue }
             if (Test-CtxClaudeLinkish -Item $entry) { continue }
             $skillMd = Join-Path $entry.FullName 'SKILL.md'
@@ -2910,15 +2928,24 @@ function Get-CtxClaudeExpectedSkills {
 function Get-CtxClaudeTreeEntries {
     # Lists every entry under $Path as an ordinal (case-sensitive) table from
     # the exact relative name to its type: 'dir', 'file', 'link' or 'special'.
-    # Recursion is manual so a link is recorded and never followed.
+    # Recursion is manual so a link is recorded and never followed. A directory
+    # that cannot be listed is collected in Errors, so no caller compares a
+    # partial inventory as if it were complete (D4).
     param([string]$Path)
     $table = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    $errors = New-Object System.Collections.Generic.List[string]
     $pending = New-Object System.Collections.Stack
     $pending.Push('')
     while ($pending.Count -gt 0) {
         $rel = [string]$pending.Pop()
         $dir = if ($rel) { Join-Path $Path $rel } else { $Path }
-        foreach ($item in (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)) {
+        try {
+            $items = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop)
+        } catch {
+            $errors.Add($dir)
+            continue
+        }
+        foreach ($item in $items) {
             $childRel = if ($rel) { $rel + '/' + $item.Name } else { $item.Name }
             if (Test-CtxClaudeLinkish -Item $item) {
                 $table[$childRel] = 'link'
@@ -2932,7 +2959,7 @@ function Get-CtxClaudeTreeEntries {
             }
         }
     }
-    return ,$table
+    return [PSCustomObject]@{ Entries = $table; Errors = @($errors) }
 }
 
 function Get-CtxClaudeTreeDiff {
@@ -2943,8 +2970,20 @@ function Get-CtxClaudeTreeDiff {
     # byte-identical regular files. A link or special entry on either side is a
     # difference and is never followed. Read-only.
     param([string]$Source, [string]$Copy)
-    $srcEntries = Get-CtxClaudeTreeEntries -Path $Source
-    $dstEntries = Get-CtxClaudeTreeEntries -Path $Copy
+    # Validate both root entries before traversing them: a linked root over an
+    # identical tree would otherwise compare equal while following the link (D2).
+    foreach ($root in @($Source, $Copy)) {
+        if (Test-CtxIsLink -Path $root) { return $root }
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) { return $root }
+    }
+    $srcInv = Get-CtxClaudeTreeEntries -Path $Source
+    $dstInv = Get-CtxClaudeTreeEntries -Path $Copy
+    # An unreadable subtree makes an inventory incomplete, so it is a
+    # difference and never a pass (D4).
+    if ($srcInv.Errors.Count -gt 0) { return $srcInv.Errors[0] }
+    if ($dstInv.Errors.Count -gt 0) { return $dstInv.Errors[0] }
+    $srcEntries = $srcInv.Entries
+    $dstEntries = $dstInv.Entries
     foreach ($rel in @($srcEntries.Keys)) {
         $type = $srcEntries[$rel]
         $target = Join-Path $Copy $rel
@@ -3006,24 +3045,48 @@ function Test-CtxClaudeCheck {
         Write-Host "CHECK FAIL harness:claude stale $claudeMd"
         $failures++
     }
-    # The expected skill tree, recomputed from the recorded paths.
+    # The expected skill tree, recomputed from the recorded paths. The copy
+    # skills root is validated first: a linked root is never traversed (D2).
     $skillsRoot = Join-Path $snap '.claude/skills'
+    $skillsOk = $true
+    if ((Test-CtxIsLink -Path $skillsRoot) -or ((Test-Path -LiteralPath $skillsRoot) -and -not (Test-Path -LiteralPath $skillsRoot -PathType Container))) {
+        Write-Host "CHECK FAIL harness:claude stale $skillsRoot"
+        $failures++
+        $skillsOk = $false
+    }
     $expectedSkills = @(Get-CtxClaudeExpectedSkills -Parsed $recorded)
-    foreach ($s in $expectedSkills) {
-        $dest = Join-Path $skillsRoot $s.Name
-        if (-not (Test-Path -LiteralPath $dest -PathType Container)) {
-            Write-Host "CHECK FAIL harness:claude stale $dest"
-            $failures++
-            continue
+    $snapshotDirs = @()
+    if ($skillsOk) {
+        foreach ($s in $expectedSkills) {
+            if ($s.Name -ceq '!') {
+                # The source side cannot be traversed as evidence (D2, D4).
+                Write-Host "CHECK FAIL harness:claude stale $($s.Source)"
+                $failures++
+                continue
+            }
+            $dest = Join-Path $skillsRoot $s.Name
+            if ((Test-CtxIsLink -Path $dest) -or -not (Test-Path -LiteralPath $dest -PathType Container)) {
+                Write-Host "CHECK FAIL harness:claude stale $dest"
+                $failures++
+                continue
+            }
+            $diff = Get-CtxClaudeTreeDiff -Source $s.Source -Copy $dest
+            if ($diff) {
+                Write-Host "CHECK FAIL harness:claude stale $diff"
+                $failures++
+            }
         }
-        $diff = Get-CtxClaudeTreeDiff -Source $s.Source -Copy $dest
-        if ($diff) {
-            Write-Host "CHECK FAIL harness:claude stale $diff"
-            $failures++
+        # A snapshot skill the recorded sources no longer select is stale too.
+        if (Test-Path -LiteralPath $skillsRoot) {
+            try {
+                $snapshotDirs = @(Get-ChildItem -LiteralPath $skillsRoot -Directory -Force -ErrorAction Stop)
+            } catch {
+                Write-Host "CHECK FAIL harness:claude stale $skillsRoot"
+                $failures++
+            }
         }
     }
-    # A snapshot skill the recorded sources no longer select is stale too.
-    foreach ($d in (Get-ChildItem -LiteralPath $skillsRoot -Directory -Force -ErrorAction SilentlyContinue)) {
+    foreach ($d in $snapshotDirs) {
         if (-not ($expectedSkills | Where-Object { $_.Name -ceq $d.Name })) {
             Write-Host "CHECK FAIL harness:claude stale $($d.FullName)"
             $failures++

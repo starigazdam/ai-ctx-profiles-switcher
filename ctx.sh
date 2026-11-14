@@ -1978,24 +1978,41 @@ _ctx_claude_error() {
 _ctx_claude_run() {
     # $1: seconds limit; remaining args: the client invocation. Only --version
     # and --help are ever passed, so no session and no model call happen (D7).
-    # Without `timeout` the same deadline is enforced by hand: the child runs in
-    # the background and is stopped when the limit passes, so a hung client
-    # cannot block ctx. The terminated status is non-zero, which the caller
-    # reports as client-failed / client-unsupported.
+    # The probe writes its output to a private file and runs in its own process
+    # group (`setsid` when it exists), so neither a hung client nor a wrapper
+    # that leaves an inheriting descendant behind can hold the caller's capture
+    # pipe open past the deadline (round 2, D1). At the deadline the whole
+    # group is stopped: TERM, a short wait, then KILL. The file is read only
+    # after the process is reaped, and the terminated status is non-zero, which
+    # the caller reports as client-failed / client-unsupported.
     local limit="$1"; shift
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$limit" "$@"
-        return $?
+    local out_file pid waited=0 rc grouped=0
+    out_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || return 1
+    if command -v setsid >/dev/null 2>&1; then
+        grouped=1
+        setsid "$@" >"$out_file" 2>&1 &
+    else
+        # No setsid: only the direct child can be stopped. The private file
+        # still bounds collection, so the caller never blocks past the deadline.
+        "$@" >"$out_file" 2>&1 &
     fi
-    local pid waited=0 rc
-    "$@" &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         if [ "$waited" -ge "$limit" ]; then
-            kill -TERM "$pid" 2>/dev/null
+            if [ "$grouped" -eq 1 ]; then
+                kill -TERM -- "-$pid" 2>/dev/null
+            else
+                kill -TERM "$pid" 2>/dev/null
+            fi
             sleep 1
-            kill -KILL "$pid" 2>/dev/null
+            if [ "$grouped" -eq 1 ]; then
+                kill -KILL -- "-$pid" 2>/dev/null
+            else
+                kill -KILL "$pid" 2>/dev/null
+            fi
             wait "$pid" 2>/dev/null
+            cat -- "$out_file" 2>/dev/null
+            rm -f -- "$out_file"
             return 124
         fi
         sleep 1
@@ -2003,6 +2020,8 @@ _ctx_claude_run() {
     done
     wait "$pid"
     rc=$?
+    cat -- "$out_file" 2>/dev/null
+    rm -f -- "$out_file"
     return "$rc"
 }
 
@@ -2121,8 +2140,20 @@ _ctx_claude_collect_skills() {
     while [ "$#" -gt 0 ]; do
         name="$1"; path="$2"; shift 2
         root="$path/.agents/skills"
-        [ -d "$root" ] || continue
+        # The root itself must be a real directory: a link (or a file) cannot be
+        # traversed as evidence, so it never passes (round 2, D2).
         [ ! -L "$root" ] || { _ctx_claude_error "skill-link $root"; return 1; }
+        if [ -e "$root" ] && [ ! -d "$root" ]; then
+            _ctx_claude_error "snapshot-failed $root"
+            return 1
+        fi
+        [ -d "$root" ] || continue
+        # A traversal that cannot read the whole directory is a failure, not an
+        # empty selection (round 2, D4).
+        if ! find "$root" -mindepth 1 -maxdepth 1 -print0 >/dev/null 2>&1; then
+            _ctx_claude_error "snapshot-failed $root"
+            return 1
+        fi
         while IFS= read -r -d '' entry; do
             [ -n "$entry" ] || continue
             if [ -L "$entry" ]; then
@@ -2141,6 +2172,10 @@ _ctx_claude_collect_skills() {
                 return 1
             fi
             seen[$lower]="$entry_name"
+            if ! find "$entry" -print0 >/dev/null 2>&1; then
+                _ctx_claude_error "snapshot-failed $entry"
+                return 1
+            fi
             bad="$(find "$entry" ! -type f ! -type d -print 2>/dev/null | head -n 1)"
             if [ -n "$bad" ]; then
                 _ctx_claude_error "skill-link $bad"
@@ -2160,6 +2195,12 @@ _ctx_claude_check_limits() {
     # contains a newline still counts as one file and its real size, and a size
     # that cannot be read fails closed instead of counting as zero.
     local snap="$1" files=0 bytes=0 size f
+    # A traversal that cannot read every entry fails the snapshot: a partial
+    # count must never pass a limit (round 2, D4).
+    if ! find "$snap" -type f -print0 >/dev/null 2>&1; then
+        _ctx_claude_error "snapshot-failed $snap"
+        return 1
+    fi
     while IFS= read -r -d '' f; do
         files=$((files + 1))
     done < <(find "$snap" -type f -print0 2>/dev/null)
@@ -2341,14 +2382,29 @@ _ctx_claude_expected_skills() {
     # "<name>\t<source>" line per skill the D3 rule would select from the
     # recorded paths now, without touching the record: `ctx check` recomputes
     # the expected tree instead of trusting the activation snapshot (D10).
+    # A skill root or skill directory that is a link, not a directory, or not
+    # fully traversable prints "!\t<path>" instead, so the check fails closed
+    # rather than comparing an empty selection (round 2, D2 and D4).
     local name path root entry
     while [ "$#" -gt 0 ]; do
         name="$1"; path="$2"; shift 2
         root="$path/.agents/skills"
-        [ -d "$root" ] && [ ! -L "$root" ] || continue
+        if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
+            printf '!\t%s\n' "$root"
+            continue
+        fi
+        [ -d "$root" ] || continue
+        if ! find "$root" -mindepth 1 -maxdepth 1 -print0 >/dev/null 2>&1; then
+            printf '!\t%s\n' "$root"
+            continue
+        fi
         while IFS= read -r -d '' entry; do
             [ -n "$entry" ] || continue
-            [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+            if [ -L "$entry" ]; then
+                printf '!\t%s\n' "$entry"
+                continue
+            fi
+            [ -d "$entry" ] || continue
             [ -f "$entry/SKILL.md" ] && [ ! -L "$entry/SKILL.md" ] || continue
             printf '%s\t%s\n' "$(basename "$entry")" "$entry"
         done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
@@ -2371,49 +2427,90 @@ _ctx_claude_tree_entries() {
     # record per entry, byte-sorted: d directory, f regular file, l link,
     # s other special file. Nothing is followed, and a name is used exactly as
     # stored, so a case-only or newline-bearing difference stays visible.
-    local root="$1" rel
-    find "$root" -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' rel; do
-        rel="${rel#"$root"/}"
-        if [ -L "$root/$rel" ]; then
-            printf 'l\t%s\0' "$rel"
-        elif [ -d "$root/$rel" ]; then
-            printf 'd\t%s\0' "$rel"
-        elif [ -f "$root/$rel" ]; then
-            printf 'f\t%s\0' "$rel"
-        else
-            printf 's\t%s\0' "$rel"
-        fi
-    done | _ctx_claude_nul_sorted
+    # The last record is "~\t<find status>" (0x7e sorts after every type
+    # letter): a traversal that could not read a subtree therefore never looks
+    # like an empty one, and the comparison fails closed (round 2, D4).
+    local root="$1" rel st
+    {
+        find "$root" -mindepth 1 -print0 2>/dev/null | while IFS= read -r -d '' rel; do
+            rel="${rel#"$root"/}"
+            if [ -L "$root/$rel" ]; then
+                printf 'l\t%s\0' "$rel"
+            elif [ -d "$root/$rel" ]; then
+                printf 'd\t%s\0' "$rel"
+            elif [ -f "$root/$rel" ]; then
+                printf 'f\t%s\0' "$rel"
+            else
+                printf 's\t%s\0' "$rel"
+            fi
+        done
+        st=${PIPESTATUS[0]}
+        printf '~\t%s\0' "$st"
+    } | _ctx_claude_nul_sorted
+}
+
+_ctx_claude_tree_report() {
+    # $1: the copy root; $2: a "<type>\t<relative name>" record. Prints the
+    # path a difference is reported at. For a source record that is the copy
+    # path, because that is where the snapshot differs; for a traversal-failure
+    # record it is the copy root itself.
+    local root="$1" type="${2%%$'\t'*}" rel="${2#*$'\t'}"
+    if [ "$type" = '~' ]; then
+        printf '%s\n' "$root"
+    else
+        printf '%s\n' "$root/$rel"
+    fi
 }
 
 _ctx_claude_tree_diff() {
     # $1: source tree, $2: copy. Prints the first differing path in the copy
     # and returns 1; returns 0 only when the two trees hold the same entries:
-    # the same exact relative names, the same entry types (so an added or
-    # removed empty directory, or a file replaced by a link, is a difference)
-    # and byte-identical regular files. A link or special entry on either side
-    # is a difference and is never followed. Read-only.
-    local src="$1" dst="$2" record type rel target
-    while IFS= read -r -d '' record; do
-        type="${record%%$'\t'*}"
-        rel="${record#*$'\t'}"
-        target="$dst/$rel"
-        case "$type" in
-            d) { [ -d "$target" ] && [ ! -L "$target" ]; } || { printf '%s\n' "$target"; return 1; } ;;
-            f) { [ -f "$target" ] && [ ! -L "$target" ] && cmp -s -- "$src/$rel" "$target"; } || { printf '%s\n' "$target"; return 1; } ;;
-            *) printf '%s\n' "$target"; return 1 ;;
-        esac
-    done < <(_ctx_claude_tree_entries "$src")
-    while IFS= read -r -d '' record; do
-        type="${record%%$'\t'*}"
-        rel="${record#*$'\t'}"
-        case "$type" in
-            d) { [ -d "$src/$rel" ] && [ ! -L "$src/$rel" ]; } || { printf '%s\n' "$dst/$rel"; return 1; } ;;
-            f) { [ -f "$src/$rel" ] && [ ! -L "$src/$rel" ]; } || { printf '%s\n' "$dst/$rel"; return 1; } ;;
-            *) printf '%s\n' "$dst/$rel"; return 1 ;;
-        esac
-    done < <(_ctx_claude_tree_entries "$dst")
-    return 0
+    # the same exact relative names (compared as sorted inventories, so a
+    # case-only difference on a case-insensitive filesystem cannot satisfy both
+    # sides), the same entry types (so an added or removed empty directory, or
+    # a file replaced by a link, is a difference) and byte-identical regular
+    # files (round 2, D3). A traversal that failed on either side is a
+    # difference and never a pass (D4). A link or special entry on either side
+    # is a difference and is never followed. Read-only: no temporary file.
+    (
+        local src="$1" dst="$2" a b type rel
+        exec 8< <(_ctx_claude_tree_entries "$src") 9< <(_ctx_claude_tree_entries "$dst")
+        # Exact inventory first: record by record, in byte order.
+        while IFS= read -r -d '' a <&8; do
+            if ! IFS= read -r -d '' b <&9; then
+                _ctx_claude_tree_report "$dst" "$a"
+                exit 1
+            fi
+            if [ "$a" != "$b" ]; then
+                # Report the copy entry: an extra, renamed or retyped entry in
+                # the snapshot is what the user has to look at.
+                _ctx_claude_tree_report "$dst" "$b"
+                exit 1
+            fi
+            type="${a%%$'\t'*}"
+            if [ "$type" = '~' ] && [ "${a#*$'\t'}" != 0 ]; then
+                printf '%s\n' "$dst"
+                exit 1
+            fi
+        done
+        if IFS= read -r -d '' b <&9; then
+            _ctx_claude_tree_report "$dst" "$b"
+            exit 1
+        fi
+        # The inventories are equal: compare the bytes of every regular file.
+        exec 8<&-
+        exec 8< <(_ctx_claude_tree_entries "$src")
+        while IFS= read -r -d '' a <&8; do
+            type="${a%%$'\t'*}"
+            rel="${a#*$'\t'}"
+            [ "$type" = 'f' ] || continue
+            if ! cmp -s -- "$src/$rel" "$dst/$rel"; then
+                printf '%s\n' "$dst/$rel"
+                exit 1
+            fi
+        done
+        exit 0
+    )
 }
 
 _ctx_claude_check() {
@@ -2448,26 +2545,50 @@ _ctx_claude_check() {
         printf 'CHECK FAIL harness:claude stale %s\n' "$snap/CLAUDE.md"
         failures=$((failures + 1))
     fi
-    while IFS=$'\t' read -r name src; do
-        [ -n "$name" ] || continue
-        expected_names+=("$name")
-        dest="$snap/.claude/skills/$name"
-        if [ ! -d "$dest" ]; then
-            printf 'CHECK FAIL harness:claude stale %s\n' "$dest"
-            failures=$((failures + 1))
-        elif ! stale="$(_ctx_claude_tree_diff "$src" "$dest")"; then
-            printf 'CHECK FAIL harness:claude stale %s\n' "$stale"
-            failures=$((failures + 1))
+    # The copy side must be real directories: a linked skills root, or a linked
+    # skill directory over an identical tree, compares equal while it hides a
+    # different tree, so it is a stale result and never a pass (round 2, D2).
+    local skills_root="$snap/.claude/skills" skills_ok=1
+    if [ -L "$skills_root" ] || { [ -e "$skills_root" ] && [ ! -d "$skills_root" ]; }; then
+        printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
+        failures=$((failures + 1))
+        skills_ok=0
+    fi
+    if [ "$skills_ok" -eq 1 ]; then
+        while IFS=$'\t' read -r name src; do
+            [ -n "$name" ] || continue
+            if [ "$name" = '!' ]; then
+                # The source side cannot be traversed as evidence (D2, D4).
+                printf 'CHECK FAIL harness:claude stale %s\n' "$src"
+                failures=$((failures + 1))
+                continue
+            fi
+            expected_names+=("$name")
+            dest="$skills_root/$name"
+            if [ -L "$dest" ] || [ ! -d "$dest" ]; then
+                printf 'CHECK FAIL harness:claude stale %s\n' "$dest"
+                failures=$((failures + 1))
+            elif ! stale="$(_ctx_claude_tree_diff "$src" "$dest")"; then
+                printf 'CHECK FAIL harness:claude stale %s\n' "$stale"
+                failures=$((failures + 1))
+            fi
+        done < <(_ctx_claude_expected_skills "${pairs[@]}")
+        # A snapshot skill that the recorded sources no longer select is stale.
+        if [ -d "$skills_root" ]; then
+            if ! find "$skills_root" -mindepth 1 -maxdepth 1 -print0 >/dev/null 2>&1; then
+                printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
+                failures=$((failures + 1))
+            else
+                while IFS= read -r -d '' entry; do
+                    [ -n "$entry" ] || continue
+                    if ! _ctx_in_list "$(basename "$entry")" "${expected_names[@]}"; then
+                        printf 'CHECK FAIL harness:claude stale %s\n' "$entry"
+                        failures=$((failures + 1))
+                    fi
+                done < <(find "$skills_root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
+            fi
         fi
-    done < <(_ctx_claude_expected_skills "${pairs[@]}")
-    # A snapshot skill that the recorded sources no longer select is stale.
-    while IFS= read -r -d '' entry; do
-        [ -n "$entry" ] || continue
-        if ! _ctx_in_list "$(basename "$entry")" "${expected_names[@]}"; then
-            printf 'CHECK FAIL harness:claude stale %s\n' "$entry"
-            failures=$((failures + 1))
-        fi
-    done < <(find "$snap/.claude/skills" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
+    fi
     expected="$(printf '{"autoMemoryEnabled": false}\n' | _ctx_sha256_stream)"
     actual="$(_ctx_sha256_file "$snap/ctx-settings.json")"
     if [ -z "$actual" ] || [ "$expected" != "$actual" ]; then

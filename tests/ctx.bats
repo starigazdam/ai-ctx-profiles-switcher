@@ -4202,6 +4202,21 @@ _claude_snapshots() {
     find "$TEST_TMP/snapshots" -mindepth 1 -maxdepth 1 -name 'ctx-claude.*' -print 2>/dev/null | sort
 }
 
+_claude_record_state() {
+    # Round 2 (C9): the whole published record, not selected fields, so a
+    # failure before publication must leave every field byte-identical.
+    printf 'active=%s\n' "$_ctx_claude_active"
+    printf 'ctx_file=%s\n' "$_ctx_claude_ctx_file"
+    printf 'ctx_sha=%s\n' "$_ctx_claude_ctx_sha"
+    printf 'labels=%s\n' "${_ctx_claude_labels[*]}"
+    printf 'dirs=%s\n' "${_ctx_claude_dirs[*]}"
+    printf 'snapshot=%s\n' "$_ctx_claude_snapshot"
+    printf 'version=%s\n' "$_ctx_claude_version"
+    printf 'skill_names=%s\n' "${_ctx_claude_skill_names[*]}"
+    printf 'skill_labels=%s\n' "${_ctx_claude_skill_labels[*]}"
+    printf 'skill_sources=%s\n' "${_ctx_claude_skill_sources[*]}"
+}
+
 _claude_project() {
     # _claude_project <name> <body> ; prints the project directory
     local proj="$TEST_TMP/$1"
@@ -4362,6 +4377,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     _make_profile review review-skill
     local proj
     proj="$(_claude_project claude-legacy $'harness:claude\nreview:@profile\n')"
@@ -4375,6 +4391,7 @@ _claude_load() {
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
     [ "$AI_CTX_PROFILES" = base ]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
 }
 
 @test "Claude22: CLAUDE.md copies LF, CRLF, BOM and no-final-newline bytes exactly" {
@@ -4460,6 +4477,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     state_before="$(_claude_state "$snap_before")"
     _make_canonical_profile taska $'# A\n'
     _make_canonical_profile taskb $'# B\n'
@@ -4473,6 +4491,7 @@ _claude_load() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"ctx: error: harness claude: skill-collision lint"* ]]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
     [ "$_ctx_claude_active" -eq 1 ]
     [ "$_ctx_claude_ctx_file" = "$baseproj/.ctx" ]
     [ "${#_ctx_claude_labels[@]}" -eq 1 ]
@@ -4491,6 +4510,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     _make_canonical_profile taska $'# A\n'
     _make_canonical_profile taskb $'# B\n'
     _make_canonical_skill taska Lint
@@ -4503,6 +4523,7 @@ _claude_load() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"ctx: error: harness claude: skill-collision "* ]]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
     [ "$_ctx_claude_active" -eq 1 ]
     [ "$_ctx_claude_ctx_file" = "$baseproj/.ctx" ]
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
@@ -4517,6 +4538,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     _make_canonical_profile review $'# review\n'
     _make_canonical_skill review lint
     printf 'target\n' > "$TEST_TMP/link-target.txt"
@@ -4529,6 +4551,7 @@ _claude_load() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"ctx: error: harness claude: skill-link "*"cfg"* ]]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
     [ "$_ctx_claude_active" -eq 1 ]
     [ "$_ctx_claude_ctx_file" = "$baseproj/.ctx" ]
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
@@ -4544,6 +4567,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     _make_canonical_profile review $'# review\n'
     _make_canonical_skill review bulk
     local dir="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/bulk"
@@ -4556,6 +4580,7 @@ _claude_load() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"ctx: error: harness claude: limit-files "* ]]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
     [ "$_ctx_claude_active" -eq 1 ]
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
 }
@@ -4569,6 +4594,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     _make_canonical_profile review $'# review\n'
     _make_canonical_skill review bulk
     truncate -s 34000000 "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/bulk/big.bin"
@@ -4580,6 +4606,7 @@ _claude_load() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"ctx: error: harness claude: limit-bytes "* ]]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
     [ "$_ctx_claude_active" -eq 1 ]
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
 }
@@ -4610,6 +4637,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     _make_canonical_profile arch $'# arch\n'
     local saved_path="$PATH"
     _claude_isolated_path
@@ -4627,6 +4655,7 @@ _claude_load() {
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
     [ "$AI_CTX_PROFILES" = base ]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
 }
 
 @test "Claude22: a failing claude --version fails with client-failed before any change" {
@@ -4638,6 +4667,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     _make_canonical_profile arch $'# arch\n'
     _claude_failed_client
     local proj
@@ -4652,6 +4682,7 @@ _claude_load() {
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
     [ "$AI_CTX_PROFILES" = base ]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
 }
 
 @test "Claude22: a client without --settings fails with client-unsupported before any change" {
@@ -4663,6 +4694,7 @@ _claude_load() {
     _claude_load "$baseproj/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     _make_canonical_profile arch $'# arch\n'
     _claude_unsupported_client
     local proj
@@ -4677,13 +4709,16 @@ _claude_load() {
     [ "$_ctx_claude_snapshot" = "$snap_before" ]
     [ "$AI_CTX_PROFILES" = base ]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
 }
 
 @test "Claude22: a hanging client probe is bounded when timeout is absent" {
     _make_canonical_profile arch $'# arch\n'
-    # A client that never answers --version, on a PATH without `timeout`, so
-    # the fallback deadline is the only limit (D7: ten seconds per call). The
-    # stub hangs in its own process, like a client that blocks on stdin.
+    # A client that never answers --version, on a PATH without `timeout` or
+    # `setsid`, so the fallback deadline is the only limit (D7: ten seconds per
+    # call). The stub hangs in its own process, like a client that blocks on
+    # stdin. Round 2 (D5): the fixture hangs far longer than the limit and the
+    # bound is asserted against the limit, not against a minute.
     mkdir -p "$TEST_TMP/hang-bin" "$TEST_TMP/no-timeout-bin"
     cat > "$TEST_TMP/hang-bin/claude" <<'EOF'
 #!/usr/bin/env bash
@@ -4692,12 +4727,15 @@ printf 'Usage: claude\n  --add-dir <dirs>\n  --settings <file>\n'
 EOF
     chmod +x "$TEST_TMP/hang-bin/claude"
     local tool target
-    for tool in bash sh realpath mktemp find tr cat head tail od sed grep wc cp mkdir rm dirname basename sort printf env python3 stat sha256sum sleep kill chmod; do
+    for tool in bash sh realpath mktemp find tr cat head tail od sed grep wc cp mkdir rm dirname basename sort printf env python3 stat sha256sum sleep kill chmod cmp; do
         target="$(command -v "$tool" 2>/dev/null)" || continue
         ln -sf "$target" "$TEST_TMP/no-timeout-bin/$tool"
     done
     ln -sf "$TEST_TMP/hang-bin/claude" "$TEST_TMP/no-timeout-bin/claude"
-    command -v timeout >/dev/null 2>&1 || skip "the base PATH has no timeout either"
+    # The fallback PATH must not contain either bounding tool, or this case
+    # would prove the fallback with a tool it is supposed to lack.
+    [ ! -e "$TEST_TMP/no-timeout-bin/timeout" ]
+    [ ! -e "$TEST_TMP/no-timeout-bin/setsid" ]
     _claude_snapshot_root
     local saved_path="$PATH" start elapsed proj
     export PATH="$TEST_TMP/no-timeout-bin"
@@ -4711,8 +4749,72 @@ EOF
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"ctx: error: harness claude: client-failed"* ]]
-    [ "$elapsed" -lt 60 ]
+    # Ten-second limit, plus a five-second allowance for scheduling and the
+    # one-second poll interval: a 300-second hang may not pass this bound.
+    [ "$elapsed" -lt 15 ]
     [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: a wrapper that leaves an inheriting descendant cannot hold the probe past the deadline" {
+    # Round 2 (D1, D5): the probe must bound the whole process group. A wrapper
+    # client starts a descendant that inherits stdout and stderr and then waits
+    # for it, so the direct child never finishes and the descendant keeps any
+    # capture pipe open. Only a private output file plus a group deadline keeps
+    # the call bounded. `timeout` is absent from this PATH, so the deadline code
+    # of ctx itself is what the case measures.
+    _make_canonical_profile arch $'# arch\n'
+    _claude_snapshot_root
+    mkdir -p "$TEST_TMP/wrap-bin"
+    cat > "$TEST_TMP/wrap-bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+    printf '%s' "$$" > "$CTX_PROBE_CHILD_PID"
+    sleep 300 &
+    printf '%s' "$!" > "$CTX_PROBE_DESC_PID"
+    wait
+fi
+printf 'Usage: claude\n  --add-dir <dirs>\n  --settings <file>\n'
+EOF
+    chmod +x "$TEST_TMP/wrap-bin/claude"
+    # A PATH with every tool ctx needs, `setsid` included and `timeout` absent.
+    mkdir -p "$TEST_TMP/probe-bin"
+    local tool target
+    for tool in bash sh env setsid realpath mktemp find tr cat head tail od sed grep wc cp mkdir rm dirname basename sort printf python3 stat sha256sum sleep kill chmod cmp ln mv; do
+        target="$(command -v "$tool" 2>/dev/null)" || continue
+        ln -sf "$target" "$TEST_TMP/probe-bin/$tool"
+    done
+    [ ! -e "$TEST_TMP/probe-bin/timeout" ]
+    ln -sf "$TEST_TMP/wrap-bin/claude" "$TEST_TMP/probe-bin/claude"
+    local proj start elapsed pid i alive saved_path="$PATH"
+    export CTX_PROBE_CHILD_PID="$TEST_TMP/probe-child.pid"
+    export CTX_PROBE_DESC_PID="$TEST_TMP/probe-descendant.pid"
+    proj="$(_claude_project claude-wrap $'harness:claude\narch:@profile\n')"
+    PATH="$TEST_TMP/probe-bin"
+    export PATH
+
+    start=$SECONDS
+    _claude_load "$proj/.ctx"
+    elapsed=$((SECONDS - start))
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: client-failed"* ]]
+    [ "$elapsed" -lt 15 ]
+    [ -z "$(_claude_snapshots)" ]
+    [ -s "$CTX_PROBE_CHILD_PID" ]
+    [ -s "$CTX_PROBE_DESC_PID" ]
+    # Nothing from the probe may survive the deadline: neither the wrapper nor
+    # the descendant it left behind.
+    for pid in "$(cat "$CTX_PROBE_CHILD_PID")" "$(cat "$CTX_PROBE_DESC_PID")"; do
+        alive=1
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$pid" 2>/dev/null || { alive=0; break; }
+            sleep 0.2
+        done
+        [ "$alive" -eq 0 ]
+    done
+    # Restore PATH: the bats teardown needs `rm` outside the fixture root.
+    PATH="$saved_path"
+    export PATH
 }
 
 @test "Claude22: a reset failure removes the new snapshot, publishes no record and prints reset-failed" {
@@ -4747,6 +4849,7 @@ EOF
     _claude_load "$proja/.ctx"
     [ "$status" -eq 0 ]
     snap_before="$_ctx_claude_snapshot"
+    before_record="$(_claude_record_state)"
     [ "$_ctx_claude_version" = 2.1.292 ]
     [ "${_ctx_claude_skill_names[0]}" = skill-a ]
     # A newer client, and a second profile that cannot build: the client check
@@ -4770,6 +4873,7 @@ EOF
     [ "${#_ctx_claude_skill_names[@]}" -eq 1 ]
     [ "${_ctx_claude_skill_names[0]}" = skill-a ]
     [ "$(_claude_snapshots)" = "$snap_before" ]
+    [ "$before_record" = "$(_claude_record_state)" ]
 }
 
 @test "Claude22: A then B then A creates three distinct snapshots with no B content in A" {
@@ -4916,27 +5020,40 @@ _claude_tree_hash() {
 }
 
 _claude_state() {
-    # $1: a file or directory. Lists the entry type, the size and the
-    # modification time of every entry, so a rewrite with identical bytes, a
-    # new temporary file or a touched profile still changes the listing.
+    # $1: a file or directory. Lists the entry type, the size, the metadata
+    # timestamp and the sha256 of every regular file, so a rewrite with
+    # identical bytes (same second or not), a new temporary file or a touched
+    # profile still changes the listing. `stat %y` keeps sub-second resolution
+    # where the platform has it; the content hash is what proves the bytes did
+    # not change (round 2, D7).
     local root="$1" p
     if [ ! -e "$root" ] && [ ! -L "$root" ]; then
         printf 'absent %s\n' "$root"
         return 0
     fi
     if [ -L "$root" ] || [ ! -d "$root" ]; then
-        printf 'f %s %s\n' "$(stat -c '%s:%Y' -- "$root" 2>/dev/null)" "$root"
+        printf 'f %s %s\n' "$(_claude_stat_stamp "$root")" "$root"
         return 0
     fi
     find "$root" -print0 2>/dev/null | while IFS= read -r -d '' p; do
         if [ -L "$p" ]; then
             printf 'l %s\n' "$p"
         elif [ -d "$p" ]; then
-            printf 'd %s %s\n' "$(stat -c '%Y' -- "$p" 2>/dev/null)" "$p"
+            printf 'd %s %s\n' "$(_claude_stat_stamp "$p")" "$p"
         else
-            printf 'f %s %s\n' "$(stat -c '%s:%Y' -- "$p" 2>/dev/null)" "$p"
+            printf 'f %s %s %s\n' "$(_claude_stat_stamp "$p")" "$(_claude_sha256_file "$p")" "$p"
         fi
     done | LC_ALL=C sort
+}
+
+_claude_stat_stamp() {
+    # `%y` (nanoseconds where available) with a `%Y` fallback, plus the size, so
+    # a same-second rewrite is still visible where only `%Y` exists.
+    stat -c '%s:%y' -- "$1" 2>/dev/null || stat -c '%s:%Y' -- "$1" 2>/dev/null
+}
+
+_claude_sha256_file() {
+    sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1
 }
 
 _claude_engine_sentinel() {
@@ -4977,8 +5094,9 @@ _claude_no_engine_calls() {
     check_tmp="$TEST_TMP/check-tmp"
     mkdir -p "$check_tmp"
     export TMPDIR="$check_tmp"
-    # Entry type, size and mtime for the snapshot, the .ctx file and both source
-    # profiles: identical bytes rewritten in place still change this listing.
+    # Entry type, size, high-resolution timestamp and content hash for the
+    # snapshot, the .ctx file and both source profiles: identical bytes
+    # rewritten in place still change this listing (round 2, D7).
     local before_ctx before_snap before_profile before_profile2
     before_ctx="$(_claude_state "$proj/.ctx")"
     before_snap="$(_claude_state "$snap")"
@@ -4995,6 +5113,8 @@ _claude_no_engine_calls() {
     [ "$before_snap" = "$(_claude_state "$snap")" ]
     [ "$before_profile" = "$(_claude_state "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review")" ]
     [ "$before_profile2" = "$(_claude_state "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch")" ]
+    # A private TMPDIR that stays empty proves that nothing remains there; it
+    # does not prove that no file was written outside it (round 2, D7).
     [ -z "$(ls -A "$check_tmp")" ]
     _claude_no_engine_calls
 }
@@ -5015,10 +5135,13 @@ _claude_no_engine_calls() {
     local check_tmp="$TEST_TMP/check-tmp"
     mkdir -p "$check_tmp"
     export TMPDIR="$check_tmp"
-    local before_ctx before_snap before_profile
+    local before_ctx before_snap before_profile before_profile2
     before_ctx="$(_claude_state "$proj/.ctx")"
     before_snap="$(_claude_state "$snap")"
     before_profile="$(_claude_state "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review")"
+    # Both recorded source profiles are measured: a check that reaches into the
+    # one it does not compare must still be visible here (round 2, D7).
+    before_profile2="$(_claude_state "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch")"
 
     _claude_cmd ctx check
 
@@ -5027,6 +5150,9 @@ _claude_no_engine_calls() {
     [ "$before_ctx" = "$(_claude_state "$proj/.ctx")" ]
     [ "$before_snap" = "$(_claude_state "$snap")" ]
     [ "$before_profile" = "$(_claude_state "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review")" ]
+    [ "$before_profile2" = "$(_claude_state "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/arch")" ]
+    # A private TMPDIR that stays empty proves that nothing remains there; it
+    # does not prove that no file was written outside it.
     [ -z "$(ls -A "$check_tmp")" ]
     _claude_no_engine_calls
 }
@@ -5043,13 +5169,14 @@ _claude_no_engine_calls() {
     snap="$(_claude_snapshot_of "$output")"
     before="$(_claude_tree_hash "$snap")"
     printf '# review edited\n' >> "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/AGENTS.md"
-    unset CTX_ENGINE_DLL
+    _claude_engine_sentinel
 
     _claude_cmd ctx check
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"CHECK FAIL harness:claude stale $snap/CLAUDE.md"* ]]
     [ "$before" = "$(_claude_tree_hash "$snap")" ]
+    _claude_no_engine_calls
 }
 
 @test "Claude22: ctx check reports a changed skill file as stale harness:claude" {
@@ -5067,12 +5194,13 @@ _claude_no_engine_calls() {
     snap="$(_claude_snapshot_of "$output")"
     [ -f "$snap/.claude/skills/lint/ref/data.txt" ]
     printf 'asset edited\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref/data.txt"
-    unset CTX_ENGINE_DLL
+    _claude_engine_sentinel
 
     _claude_cmd ctx check
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"CHECK FAIL harness:claude stale $snap/.claude/skills/lint/ref/data.txt"* ]]
+    _claude_no_engine_calls
 }
 
 @test "Claude22: ctx check reports a changed ctx-settings.json as stale harness:claude" {
@@ -5086,12 +5214,13 @@ _claude_no_engine_calls() {
     [ "$status" -eq 0 ]
     snap="$(_claude_snapshot_of "$output")"
     printf '{"autoMemoryEnabled": true}\n' > "$snap/ctx-settings.json"
-    unset CTX_ENGINE_DLL
+    _claude_engine_sentinel
 
     _claude_cmd ctx check
 
     [ "$status" -ne 0 ]
     [[ "$output" == *"CHECK FAIL harness:claude stale ctx-settings.json"* ]]
+    _claude_no_engine_calls
 }
 
 @test "Claude22: ctx check reports a missing snapshot as CHECK FAIL harness:claude missing" {
@@ -5119,6 +5248,8 @@ _claude_no_engine_calls() {
     [[ "$output" == *"CHECK FAIL harness:claude missing"* ]]
     [ "$before_ctx" = "$(_claude_state "$proj/.ctx")" ]
     [ "$before_profile" = "$(_claude_state "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review")" ]
+    # A private TMPDIR that stays empty proves that nothing remains there; it
+    # does not prove that no file was written outside it (round 2, D7).
     [ -z "$(ls -A "$check_tmp")" ]
     _claude_no_engine_calls
 }
@@ -5190,6 +5321,165 @@ _claude_no_engine_calls() {
     _claude_no_engine_calls
 }
 
+@test "Claude22: ctx check sees a case-only relative name difference in the snapshot" {
+    # Round 2 (D3): the inventory is compared as exact (type, relative name)
+    # records, so a case-insensitive filesystem cannot satisfy both sides of a
+    # path-building comparison.
+    printf 'x' > "$TEST_TMP/case-probe.txt"
+    if [ -e "$TEST_TMP/CASE-PROBE.TXT" ]; then
+        skip "the filesystem is case-insensitive"
+    fi
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref"
+    printf 'asset\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref/Asset.txt"
+    _claude_client
+    _claude_snapshot_root
+    local proj snap copied renamed
+    proj="$(_claude_project claude-checkcase $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    copied="$snap/.claude/skills/lint/ref/Asset.txt"
+    renamed="$snap/.claude/skills/lint/ref/asset.txt"
+    [ -f "$copied" ]
+    mv "$copied" "$renamed"
+    [ -f "$renamed" ] && [ ! -e "$copied" ]
+    _claude_engine_sentinel
+
+    _claude_cmd ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude stale"* ]]
+    [[ "$output" != *"CHECK PASS harness:claude"* ]]
+    _claude_no_engine_calls
+}
+
+@test "Claude22: ctx check rejects a snapshot skill directory replaced by a link to an identical tree" {
+    # Round 2 (D2): a linked destination skill directory compares equal to the
+    # source while it hides a different tree, so it is stale, never a pass.
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref"
+    printf 'asset\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref/data.txt"
+    _claude_client
+    _claude_snapshot_root
+    local proj snap dest
+    proj="$(_claude_project claude-checklinkdir $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    dest="$snap/.claude/skills/lint"
+    mv "$dest" "$TEST_TMP/lint-identical-tree"
+    ln -s "$TEST_TMP/lint-identical-tree" "$dest"
+    [ -L "$dest" ]
+    _claude_engine_sentinel
+
+    _claude_cmd ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude stale $dest"* ]]
+    [[ "$output" != *"CHECK PASS harness:claude"* ]]
+    _claude_no_engine_calls
+}
+
+@test "Claude22: ctx check rejects a source skill root replaced by a link" {
+    # Round 2 (D2): two linked roots can enumerate as empty and compare equal,
+    # so a linked source root is a stale result, never a pass.
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    _claude_client
+    _claude_snapshot_root
+    local proj snap root
+    proj="$(_claude_project claude-checksrclink $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    root="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills"
+    mv "$root" "$TEST_TMP/skills-identical-tree"
+    ln -s "$TEST_TMP/skills-identical-tree" "$root"
+    [ -L "$root" ]
+    _claude_engine_sentinel
+
+    _claude_cmd ctx check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude stale $root"* ]]
+    [[ "$output" != *"CHECK PASS harness:claude"* ]]
+    _claude_no_engine_calls
+}
+
+@test "Claude22: ctx check reports an unreadable snapshot subtree as stale, never a pass" {
+    # Round 2 (D4): a subtree that cannot be read must not vanish from the
+    # inventory and leave the comparison passing. Both sides are locked, so
+    # every entry that both sides can see is identical and only the unread
+    # subtree differs from a complete traversal.
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    mkdir -p "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref"
+    printf 'asset\n' > "$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref/data.txt"
+    _claude_client
+    _claude_snapshot_root
+    local proj snap locked src_locked
+    proj="$(_claude_project claude-checkunreadable $'harness:claude\nreview:@profile\n')"
+    cd "$proj"
+    _claude_load "$proj/.ctx"
+    [ "$status" -eq 0 ]
+    snap="$(_claude_snapshot_of "$output")"
+    locked="$snap/.claude/skills/lint/ref"
+    src_locked="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills/lint/ref"
+    chmod 000 "$locked" "$src_locked"
+    _claude_engine_sentinel
+
+    _claude_cmd ctx check
+    chmod 755 "$locked" "$src_locked"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CHECK FAIL harness:claude stale"* ]]
+    [[ "$output" != *"CHECK PASS harness:claude"* ]]
+    _claude_no_engine_calls
+}
+
+@test "Claude22: an unreadable skill root fails the activation with snapshot-failed" {
+    # Round 2 (D4): an unreadable enumeration is not an empty skill selection.
+    _make_canonical_profile review $'# review\n'
+    _make_canonical_skill review lint
+    _claude_client
+    _claude_snapshot_root
+    local proj root
+    proj="$(_claude_project claude-unreadable-root $'harness:claude\nreview:@profile\n')"
+    root="$AI_CTX_PROFILES_CONFIG_ROOT/profiles/review/.agents/skills"
+    chmod 000 "$root"
+
+    _claude_load "$proj/.ctx"
+    chmod 755 "$root"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: snapshot-failed"* ]]
+    [ -z "$(_claude_snapshots)" ]
+}
+
+@test "Claude22: the snapshot limit check fails closed on an unreadable subtree" {
+    # Round 2 (D4): the counts must not undercount an unreadable subtree.
+    local snap="$TEST_TMP/limit-snap" locked
+    mkdir -p "$snap/locked"
+    printf 'x' > "$snap/ok.txt"
+    printf 'y' > "$snap/locked/f.txt"
+
+    run _ctx_claude_check_limits "$snap"
+    [ "$status" -eq 0 ]
+
+    locked="$snap/locked"
+    chmod 000 "$locked"
+    run _ctx_claude_check_limits "$snap"
+    chmod 755 "$locked"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"snapshot-failed"* ]]
+}
+
 @test "Claude22: a Claude record makes ctx check skip the Copilot checks" {
     _make_canonical_profile review $'# review\n'
     _claude_client
@@ -5216,12 +5506,14 @@ _claude_no_engine_calls() {
     local proj
     proj="$(_claude_project claude-checknorecord $'harness:claude\nreview:@profile\n')"
     cd "$proj"
+    _claude_engine_sentinel
 
     _claude_cmd ctx check
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"CHECK UNKNOWN harness:claude: no local activation record"* ]]
     [[ "$output" != *"CHECK FAIL"* ]]
+    _claude_no_engine_calls
 }
 
 @test "Claude22: ctx current shows the harness and the snapshot without the engine" {
