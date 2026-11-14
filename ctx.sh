@@ -2012,7 +2012,8 @@ _ctx_claude_run() {
                  my $pid=fork(); exit 127 unless defined $pid;
                  if ($pid==0) { setpgrp(0,0); open(my $f,">",$pf) or exit 1;
                                 print $f "$$"; close $f; exec @ARGV; exit 127; }
-                 waitpid($pid,0); my $st=$?>>8;
+                 waitpid($pid,0); my $raw=$?; my $sig=$raw & 127;
+                 my $st=$raw>>8; $st=128+$sig if $sig;
                  open(my $s,">",$sf) or exit 1; print $s $st; close $s; exit $st;' \
             "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
     else
@@ -2022,7 +2023,7 @@ _ctx_claude_run() {
             printf "%s" "$$" > "$pf"
             "$@" &
             c=$!
-            trap "kill -TERM $c 2>/dev/null" TERM
+            trap "kill -TERM $c 2>/dev/null; sleep 1; kill -KILL $c 2>/dev/null" TERM
             wait "$c"
             st=$?
             printf "%s" "$st" > "$sf"' sh "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
@@ -2452,10 +2453,11 @@ _ctx_claude_expected_skills() {
             printf '!\t%s\n' "$root"
             continue
         fi
-        local sort_st=1
+        local sort_st=1 trav_st=1
         while IFS= read -r -d '' entry; do
             case "$entry" in
                 $'~~\t'*) sort_st="${entry#*$'\t'}"; continue ;;
+                $'~\t'*) trav_st="${entry#*$'\t'}"; continue ;;
             esac
             [ -n "$entry" ] || continue
             if [ -L "$entry" ]; then
@@ -2465,8 +2467,8 @@ _ctx_claude_expected_skills() {
             [ -d "$entry" ] || continue
             [ -f "$entry/SKILL.md" ] && [ ! -L "$entry/SKILL.md" ] || continue
             printf '%s\t%s\n' "$(basename "$entry")" "$entry"
-        done < <(find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
-        if [ "$sort_st" -ne 0 ]; then
+        done < <({ find "$root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted; printf '~\t%s\0' "${PIPESTATUS[0]}"; })
+        if [ "$sort_st" -ne 0 ] || [ "${trav_st:-1}" -ne 0 ]; then
             printf '!\t%s\n' "$root"
         fi
     done
@@ -2538,7 +2540,7 @@ _ctx_claude_tree_diff() {
     # difference and never a pass (D4). A link or special entry on either side
     # is a difference and is never followed. Read-only: no temporary file.
     (
-        local src="$1" dst="$2" a b type rel root seen_term=0
+        local src="$1" dst="$2" a b type rel root seen_term=0 seen_trav=0
         # Validate both root entries first: find does not descend a symlinked
         # root, so two linked roots would read as two empty trees (round 3, F2).
         for root in "$src" "$dst"; do
@@ -2568,6 +2570,7 @@ _ctx_claude_tree_diff() {
                         printf '%s\n' "$dst"
                         exit 1
                     fi
+                    seen_trav=1
                     ;;
                 '~~')
                     # The terminal record of the sorting stage: a failed or
@@ -2591,13 +2594,14 @@ _ctx_claude_tree_diff() {
             _ctx_claude_tree_report "$dst" "$b"
             exit 1
         fi
-        if [ "$seen_term" -eq 0 ]; then
+        if [ "$seen_term" -eq 0 ] || [ "$seen_trav" -eq 0 ]; then
             printf '%s\n' "$dst"
             exit 1
         fi
         # The inventories are equal: compare the bytes of every regular file.
         exec 8<&-
         seen_term=0
+        seen_trav=0
         exec 8< <(_ctx_claude_tree_entries "$src")
         while IFS= read -r -d '' a <&8; do
             type="${a%%$'\t'*}"
@@ -2608,6 +2612,7 @@ _ctx_claude_tree_diff() {
                 # first pass must not drop files from the byte comparison
                 # (round 3, F4).
                 [ "$rel" = 0 ] || { printf '%s\n' "$dst"; exit 1; }
+                seen_trav=1
                 continue
             fi
             if [ "$type" = '~~' ]; then
@@ -2621,7 +2626,7 @@ _ctx_claude_tree_diff() {
                 exit 1
             fi
         done
-        [ "$seen_term" -eq 1 ] || { printf '%s\n' "$dst"; exit 1; }
+        [ "$seen_term" -eq 1 ] && [ "$seen_trav" -eq 1 ] || { printf '%s\n' "$dst"; exit 1; }
         exit 0
     )
 }
@@ -2692,18 +2697,19 @@ _ctx_claude_check() {
                 printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
                 failures=$((failures + 1))
             else
-                local sort_st=1
+                local sort_st=1 trav_st=1
                 while IFS= read -r -d '' entry; do
                     case "$entry" in
                         $'~~\t'*) sort_st="${entry#*$'\t'}"; continue ;;
+                        $'~\t'*) trav_st="${entry#*$'\t'}"; continue ;;
                     esac
                     [ -n "$entry" ] || continue
                     if ! _ctx_in_list "$(basename "$entry")" "${expected_names[@]}"; then
                         printf 'CHECK FAIL harness:claude stale %s\n' "$entry"
                         failures=$((failures + 1))
                     fi
-                done < <(find "$skills_root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted)
-                if [ "$sort_st" -ne 0 ]; then
+                done < <({ find "$skills_root" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | _ctx_claude_nul_sorted; printf '~\t%s\0' "${PIPESTATUS[0]}"; })
+                if [ "$sort_st" -ne 0 ] || [ "$trav_st" -ne 0 ]; then
                     printf 'CHECK FAIL harness:claude stale %s\n' "$skills_root"
                     failures=$((failures + 1))
                 fi
