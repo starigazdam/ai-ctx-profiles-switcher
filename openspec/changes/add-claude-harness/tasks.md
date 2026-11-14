@@ -2,12 +2,14 @@
 
 ## 0. Evidence gate (needs a separate run approval)
 
-- [ ] 0.0 Write the probe like `experiments/native-isolation/claude-signed-in.sh`. It is opt-in and runs as a sandbox account. Exit codes: 0 for PASS, 1 for FAIL, 2 for BLOCKED. Each client call has a 60-second limit. Cleanup deletes only owned paths. Run an offline self-check with a fake client first.
-- [ ] 0.1 On one named client version, signed in: build a fabricated snapshot by hand (D3). Start `claude -p` with `--add-dir <snapshot>`, `--settings <snapshot>/ctx-settings.json` and `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. The stream-json `init` event must list the snapshot skills.
-- [ ] 0.2 The response must contain a unique marker from the snapshot `CLAUDE.md`. Repeat without the variable and record whether the response contains the marker.
-- [ ] 0.3 Record that the client accepts `--settings <file>` (exit 0, a successful result). Do not claim that it reads `autoMemoryEnabled` or that no memory write occurs.
-- [ ] 0.4 Put a task-B canonical profile next to the task-A workspace. Put an earlier task-B snapshot in the temp directory. Start the task-A recipe in the task-A workspace. No task-B skill and no task-B marker may appear. If one appears, print `BLOCKED other-task`, stop, and ask the owner.
-- [ ] 0.5 Record the results in `docs/native-skill-isolation-poc.md`. If 0.1, 0.2, 0.3 or 0.4 does not pass, stop. Do not start task 1.
+Done on 2026-11-13: owner go in #22, `RESULT: PASS` on Claude Code 2.1.250. Evidence: `docs/native-skill-isolation-poc.md`, section "Claude harness task 0".
+
+- [x] 0.0 Write the probe like `experiments/native-isolation/claude-signed-in.sh`. It is opt-in and runs as a sandbox account. Exit codes: 0 for PASS, 1 for FAIL, 2 for BLOCKED. Each client call has a 60-second limit. Cleanup deletes only owned paths. Run an offline self-check with a fake client first.
+- [x] 0.1 On one named client version, signed in: build a fabricated snapshot by hand (D3). Start `claude -p` with `--add-dir <snapshot>`, `--settings <snapshot>/ctx-settings.json` and `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. The stream-json `init` event must list the snapshot skills.
+- [x] 0.2 The response must contain a unique marker from the snapshot `CLAUDE.md`. Repeat without the variable and record whether the response contains the marker.
+- [x] 0.3 Record that the client accepts `--settings <file>` (exit 0, a successful result). Do not claim that it reads `autoMemoryEnabled` or that no memory write occurs.
+- [x] 0.4 Put a task-B canonical profile next to the task-A workspace. Put an earlier task-B snapshot in the temp directory. Start the task-A recipe in the task-A workspace. No task-B skill and no task-B marker may appear. If one appears, print `BLOCKED other-task`, stop, and ask the owner.
+- [x] 0.5 Record the results in `docs/native-skill-isolation-poc.md`. If 0.1, 0.2, 0.3 or 0.4 does not pass, stop. Do not start task 1.
 
 ## 1. Grammar
 
