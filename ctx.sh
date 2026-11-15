@@ -2021,16 +2021,11 @@ _ctx_claude_run() {
                  open(my $s,">",$sf) or exit 1; print $s $st; close $s; exit $st;' \
             "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
     else
-        # No group tool: the supervisor stops its own client on TERM, so the
-        # direct client is still bounded. The private file bounds collection.
-        sh -c 'pf=$1; sf=$2; shift 2
+        # Without a group tool, this branch bounds the direct client only, not
+        # its descendants. The private file bounds collection.
+        sh -c 'pf=$1; shift
             printf "%s" "$$" > "$pf"
-            "$@" &
-            c=$!
-            trap "kill -TERM $c 2>/dev/null; sleep 1; kill -KILL $c 2>/dev/null" TERM
-            wait "$c"
-            st=$?
-            printf "%s" "$st" > "$sf"' sh "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
+            exec "$@"' sh "$pid_file" "$@" >"$out_file" 2>&1 &
     fi
     sup=$!
     # The watchdog polls a done marker instead of one long sleep: a killed
@@ -2053,7 +2048,7 @@ _ctx_claude_run() {
         else
             kill -TERM "$egroup" 2>/dev/null
             sleep 1
-            kill -KILL "$egroup" 2>/dev/null
+            [ -s "$done_file" ] || kill -KILL "$egroup" 2>/dev/null
         fi
     ) &
     killer=$!

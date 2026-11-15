@@ -4785,6 +4785,86 @@ EOF
     [ "$state_before" = "$(_claude_state "$snap_before")" ]
 }
 
+@test "Claude22: a TERM-resistant client is killed on the no-group fallback" {
+    _make_canonical_profile arch $'# arch\n'
+    _claude_snapshot_root
+    mkdir -p "$TEST_TMP/hang-bin" "$TEST_TMP/no-timeout-bin"
+    cat > "$TEST_TMP/hang-bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then
+    printf '%s' "$$" > "$CTX_PROBE_CHILD_PID"
+    printf '%s' "$PPID" > "$CTX_PROBE_SUP_PID"
+    trap '' TERM
+    exec sleep 300
+fi
+printf 'Usage: claude\n  --add-dir <dirs>\n  --settings <file>\n'
+EOF
+    chmod +x "$TEST_TMP/hang-bin/claude"
+    local tool target real_sleep saved_path="$PATH" start elapsed proj pid alive
+    real_sleep="$(command -v sleep)"
+    for tool in bash sh realpath mktemp find tr cat head tail od sed grep wc cp mkdir rm dirname basename sort printf env python3 stat sha256sum kill chmod cmp; do
+        target="$(command -v "$tool" 2>/dev/null)" || continue
+        ln -sf "$target" "$TEST_TMP/no-timeout-bin/$tool"
+    done
+    # A scheduling race can pass on the old code. This stub delays exactly one
+    # one-second sleep: the one the old supervisor runs inside its TERM trap,
+    # where its parent is the PID the client recorded. Every other call,
+    # including the watchdog's, gets the real binary and real timing.
+    cat > "$TEST_TMP/no-timeout-bin/sleep" <<EOF
+#!/bin/sh
+if [ "\$1" = 1 ] && [ -s "$TEST_TMP/sup.pid" ] && [ "\$PPID" = "\$(cat "$TEST_TMP/sup.pid")" ]; then
+    exec "$real_sleep" 5
+fi
+exec "$real_sleep" "\$@"
+EOF
+    chmod +x "$TEST_TMP/no-timeout-bin/sleep"
+    ln -sf "$TEST_TMP/hang-bin/claude" "$TEST_TMP/no-timeout-bin/claude"
+    export CTX_PROBE_CHILD_PID="$TEST_TMP/resistant.pid"
+    export CTX_PROBE_SUP_PID="$TEST_TMP/sup.pid"
+    export PATH="$TEST_TMP/no-timeout-bin"
+    proj="$(_claude_project claude-resistant $'harness:claude\narch:@profile\n')"
+
+    start=$SECONDS
+    _claude_load "$proj/.ctx"
+    elapsed=$((SECONDS - start))
+    PATH="$saved_path"
+    export PATH
+    unset CTX_PROBE_CHILD_PID CTX_PROBE_SUP_PID
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ctx: error: harness claude: client-failed"* ]]
+    [ "$elapsed" -lt 15 ]
+    [ -s "$TEST_TMP/resistant.pid" ]
+    pid="$(cat "$TEST_TMP/resistant.pid")"
+    alive=0
+    kill -0 "$pid" 2>/dev/null && alive=1
+    kill -KILL "$pid" 2>/dev/null || :
+    [ "$alive" -eq 0 ]
+}
+
+@test "Claude22: the no-group probe reports a killed client as 137" {
+    mkdir -p "$TEST_TMP/kill-bin" "$TEST_TMP/no-timeout-bin"
+    cat > "$TEST_TMP/kill-bin/claude" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+exec sleep 300
+EOF
+    chmod +x "$TEST_TMP/kill-bin/claude"
+    local tool target saved_path="$PATH" rc
+    for tool in bash sh mktemp rm dirname sort printf env kill chmod cat sleep; do
+        target="$(command -v "$tool" 2>/dev/null)" || continue
+        ln -sf "$target" "$TEST_TMP/no-timeout-bin/$tool"
+    done
+    ln -sf "$TEST_TMP/kill-bin/claude" "$TEST_TMP/no-timeout-bin/claude"
+    export PATH="$TEST_TMP/no-timeout-bin"
+    rc=0
+    _ctx_claude_run 1 claude --version >/dev/null 2>&1 || rc=$?
+    PATH="$saved_path"
+    export PATH
+    # The client ignores TERM, so only the KILL ends it: 128 + 9.
+    [ "$rc" -eq 137 ]
+}
+
 @test "Claude22: a fast client probe does not wait for the probe limit" {
     # The watchdog must end with the probe. A watchdog sleep that outlives it
     # holds the capture pipe of $(...) until the ten-second limit, per call.
