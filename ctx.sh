@@ -1978,9 +1978,10 @@ _ctx_claude_error() {
 _ctx_claude_run() {
     # $1: seconds limit; remaining args: the client invocation. Only --version
     # and --help are ever passed, so no session and no model call happen (D7).
-    # A supervisor reports its own PID, which is the session and group id when
-    # a group tool is used, and writes the client status after the client ends.
-    # The caller waits on the supervisor, so a launcher that forks cannot hide
+    # A group-tool supervisor reports its own PID, which is the session and
+    # group id, and writes the client status after the client ends. Without a
+    # group tool the client runs in place, so its own status is the result.
+    # The caller waits on that process, so a launcher that forks cannot hide
     # the client (round 4, F1). Output goes to a private file, so a descendant
     # that inherits stdout cannot hold the caller's capture pipe. A watchdog
     # stops the group at the deadline: TERM, a short wait, then KILL.
