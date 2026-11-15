@@ -42,10 +42,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y zsh
 
       - name: Run bats suite (ctx.sh)
-        run: ./node_modules/.bin/bats tests/ctx.bats
+        run: ./node_modules/.bin/bats --print-output-on-failure tests/ctx.bats
 
       - name: Run bats suite (ctx-dotnet)
-        run: ./node_modules/.bin/bats tests/ctx-dotnet.bats
+        run: ./node_modules/.bin/bats --print-output-on-failure tests/ctx-dotnet.bats
 
       - name: Install Pester
         shell: pwsh
