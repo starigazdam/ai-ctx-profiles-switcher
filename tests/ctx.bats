@@ -4785,6 +4785,24 @@ EOF
     [ "$state_before" = "$(_claude_state "$snap_before")" ]
 }
 
+@test "Claude22: a fast client probe does not wait for the probe limit" {
+    # The watchdog must end with the probe. A watchdog sleep that outlives it
+    # holds the capture pipe of $(...) until the ten-second limit, per call.
+    _make_canonical_profile base $'# base\n'
+    _claude_client
+    _claude_snapshot_root
+    local proj start elapsed
+    proj="$(_claude_project claude-fast $'harness:claude\nbase:@profile\n')"
+
+    start=$SECONDS
+    _claude_load "$proj/.ctx"
+    elapsed=$((SECONDS - start))
+
+    [ "$status" -eq 0 ]
+    # Two probes (--version, --help) at ten seconds each took 20 seconds.
+    [ "$elapsed" -lt 8 ]
+}
+
 @test "Claude22: a wrapper that exits before its descendant cannot leave it behind" {
     # Round 3 (F1): the deadline loop can end because the wrapper exited
     # successfully. The descendant it started must still be stopped, because

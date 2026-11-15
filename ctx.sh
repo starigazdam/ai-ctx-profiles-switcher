@@ -1985,7 +1985,7 @@ _ctx_claude_run() {
     # that inherits stdout cannot hold the caller's capture pipe. A watchdog
     # stops the group at the deadline: TERM, a short wait, then KILL.
     local limit="$1"; shift
-    local out_file pid_file st_file sup killer egroup rc grouped=0 st
+    local out_file pid_file st_file done_file sup killer egroup rc grouped=0 st
     out_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || return 1
     pid_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || {
         rm -f -- "$out_file"
@@ -1993,6 +1993,10 @@ _ctx_claude_run() {
     }
     st_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || {
         rm -f -- "$out_file" "$pid_file"
+        return 1
+    }
+    done_file="$(mktemp "${TMPDIR:-/tmp}/ctx-probe.XXXXXXXXXX" 2>/dev/null)" || {
+        rm -f -- "$out_file" "$pid_file" "$st_file"
         return 1
     }
     if command -v setsid >/dev/null 2>&1 && setsid -w sh -c 'exit 0' >/dev/null 2>&1; then
@@ -2029,8 +2033,17 @@ _ctx_claude_run() {
             printf "%s" "$st" > "$sf"' sh "$pid_file" "$st_file" "$@" >"$out_file" 2>&1 &
     fi
     sup=$!
+    # The watchdog polls a done marker instead of one long sleep: a killed
+    # watchdog leaves its sleep behind, which holds the caller's capture pipe
+    # until the limit, and a TERM inherited as ignored cannot stop it at all.
+    # The caller waits for it, so no late kill can hit a reused group id.
     (
-        sleep "$limit"
+        n=$((limit * 10))
+        while [ "$n" -gt 0 ]; do
+            [ -s "$done_file" ] && exit 0
+            sleep 0.1
+            n=$((n - 1))
+        done
         egroup="$(cat "$pid_file" 2>/dev/null)"
         [ -n "$egroup" ] || exit 0
         if [ "$grouped" -eq 1 ]; then
@@ -2046,7 +2059,8 @@ _ctx_claude_run() {
     killer=$!
     wait "$sup"
     rc=$?
-    kill "$killer" 2>/dev/null
+    printf 1 > "$done_file"
+    wait "$killer"
     # The client answered, but a wrapper may have left a descendant behind.
     # The probe is finished, so the group goes now (round 3, F1).
     if [ "$grouped" -eq 1 ]; then
@@ -2062,7 +2076,7 @@ _ctx_claude_run() {
         *) rc="$st" ;;
     esac
     cat -- "$out_file" 2>/dev/null
-    rm -f -- "$out_file" "$pid_file" "$st_file"
+    rm -f -- "$out_file" "$pid_file" "$st_file" "$done_file"
     return "$rc"
 }
 
