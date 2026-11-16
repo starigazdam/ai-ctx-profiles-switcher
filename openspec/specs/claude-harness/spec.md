@@ -22,7 +22,7 @@ Manual activation (`ctx <profile>...`) SHALL NOT select Claude.
 #### Scenario: Missing directive keeps Copilot
 
 - **WHEN** a `.ctx` file has no `harness:` line and no entry labelled `harness`
-- **THEN** activation behaves exactly as before this change
+- **THEN** activation behaves as a Copilot activation
 
 #### Scenario: Unknown or duplicate value is rejected
 
@@ -135,7 +135,7 @@ The Bash/zsh command SHALL be `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 cl
 
 The PowerShell command SHALL save the earlier value of `$env:CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`, set it to `'1'`, and run `claude --add-dir '<snapshot>' --settings '<snapshot>\ctx-settings.json'` in a `try` block. A `finally` block SHALL restore the earlier value, or remove the variable when it was not set. Each `'` in a path SHALL be written as `''`.
 
-The system SHALL NOT start Claude, SHALL NOT export `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` in the shell, and SHALL NOT change `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`, or any Claude setting file. Each error of the Claude steps (canonical check, client check, snapshot, reset) SHALL start with `ctx: error: harness claude: ` and a Claude reason token from design D6. Parse errors SHALL use the `.ctx` invalid-file diagnostic.
+The system SHALL NOT start Claude, SHALL NOT export `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD` in the shell, and SHALL NOT change `HOME`, `USERPROFILE`, `CLAUDE_CONFIG_DIR`, or any Claude setting file. Each error of the Claude steps (canonical check, client check, snapshot, reset) SHALL start with `ctx: error: harness claude: ` and exactly one of these reason tokens: `client-missing`, `client-failed`, `client-unsupported`, `legacy-profile <label>`, `skill-link <path>`, `skill-collision <name>`, `snapshot-failed <detail>`, `limit-files <count>`, `limit-bytes <count>`, `reset-failed <status>`. Parse errors SHALL use the `.ctx` invalid-file diagnostic.
 
 #### Scenario: The command is quoted for the shell
 
