@@ -35,4 +35,4 @@ Done on 2026-11-13: owner approval in #22, `RESULT: PASS` on Claude Code 2.1.250
 
 - [x] 4.1 README: `harness:claude`, the printed command, ambient sources, the `@path` limit, the memory limit and snapshot retention.
 - [x] 4.2 Run the full Bats and Pester suites, `bash -n ctx.sh`, the PowerShell parse check and `openspec validate --all --strict`.
-- [ ] 4.3 After the implementation merges, sync the specs and archive this change.
+- [x] 4.3 After the implementation merges, sync the specs and archive this change. Done in the same pull request: the `claude-harness` delta becomes a baseline capability, the `dotctx-loading` delta is merged into its baseline, and the change moves to `openspec/changes/archive/`.
