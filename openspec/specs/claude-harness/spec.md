@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A `.ctx` file can select the Claude Code harness with the reserved `harness:` directive. The directive is validated with the file, so a rejected file changes no state. With `harness:claude`, activation builds a new snapshot, prints one start command per shell, and the lifecycle commands report and remove it. Without the directive, activation of Copilot state does not change.
+A `.ctx` file can select the Claude Code harness with the reserved `harness:` directive. The directive is validated with the file, so a rejected file changes no state. With `harness:claude`, activation builds a new snapshot and prints exactly one start command for the current shell. `ctx current` prints the harness and the snapshot path, `ctx check` reports a stale or missing snapshot, and `ctx clear` removes the record, prints the snapshot path and keeps the snapshot. Without the directive, activation of Copilot state does not change.
 
 ## Requirements
 
